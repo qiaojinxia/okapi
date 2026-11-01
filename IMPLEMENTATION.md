@@ -691,7 +691,7 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 
 验收口径：中转站可用性 = 管理员**不必直连数据库**即可完成全部日常运维。故每类资源
 都要有"增/查（列表）/改/删"的闭环，且列表带占用计数以支撑安全删除。
-路由按域拆分在 `bins/okapi/src/console/mod.rs`（`channel_routes` / `pricing_routes` /
+路由按域拆分在 `crates/okapi-console/src/lib.rs`（`channel_routes` / `pricing_routes` /
 `user_admin_routes` / `ops_routes` / `portal_routes` / `auth_routes`），与下表逐行对应。
 
 列表分页约定（2026-09-27 后端统一）：渠道 / 模型 / 分组 / 池 / 套餐 / 规则 / 角色 /
@@ -3408,6 +3408,29 @@ playground、测活、OAuth 刷新、诊断这些确实要调数据面的，继�
 - **原在 crate 根的共用模块进 `kernel`**：config、shutdown、margin（负毛利熔断表）、text、security_headers、mail、ops。
   `mail::Mailer::from_state` 改收 `&CoreState`（只读 settings）。`okapi::config` / `okapi::mail` / `okapi::margin` / `okapi::ops` / `okapi::shutdown`
   由 lib.rs 再导出，bin 入口与集成测试的写法不变。
+
+### 11.60 bins/okapi 拆成四个角色 crate（2026-11-01）
+
+在 §11.59 把依赖理成树之后，`bins/okapi` 的库按角色拆成独立 crate，行为不变：
+
+| crate | 内容 | 依赖 |
+|---|---|---|
+| `crates/okapi-kernel`（约 8k 行） | 原 `kernel`：错误、提取器、共用状态、鉴权、调度 Redis、SSRF、价簿装载、配置、发信、运维监控、对账 / 修复、后台任务策略 | 只依赖底层库 crate |
+| `crates/okapi-gateway`（约 28k 行） | 原 `gateway`：数据面 | kernel |
+| `crates/okapi-console`（约 26k 行） | 原 `console`：控制面（`embed-web` 特性在这里） | kernel、gateway |
+| `crates/okapi-worker`（约 3k 行） | 原 `worker`：异步面 | kernel、gateway |
+| `bins/okapi` | bin 入口、迁移工具与门面 lib：`okapi::{kernel, gateway, console, worker}` 及 `okapi::{config, mail, margin, ops, shutdown}` 都由它再导出 | 以上四个 |
+
+- **路径**：门面让 `okapi::gateway::…` 等写法与拆分前一致，bin 入口与集成测试没改。各 crate 内部的 `crate::<自己>::` 改成 `crate::`，
+  引用别的角色写 `okapi_kernel::` / `okapi_gateway::`；`pub(in crate::<角色>)` 改成 `pub(crate)`。
+- **可见性**：跨 crate 用到的 49 处 `pub(crate)` / 私有项按编译器报错放宽成 `pub`，其余不动。
+- **依赖**：每个 crate 的 `[dependencies]` 只列它源码里用到的；`bins/okapi` 的 dev-dependencies 补上集成测试与 `examples/loadgen` 用到的。
+  发布构建照旧 `cargo build --release --bin okapi --features embed-web`（门面的 `embed-web` 转给 okapi-console；前端产物路径仍是 `../../frontend/dist`）。
+- **脚本**：`api-surface.py` 改为扫描门面与四个角色 crate，路由只许出现在 gateway / console（端点集合不变，348 条）；
+  `guard-error-codes.py`、`guard-deploy-manifests.py` 里写死的文件路径随之更新。文档里指向 `bins/okapi/src/<角色>/` 的链接都改到新位置。
+- **日志 target 变了**：tracing 的 target 来自模块路径，`okapi::gateway::…` 现在是 `okapi_gateway::…`。默认过滤（`info,sqlx=warn`）与运维日志面板不按 target 过滤，
+  只有自己设 `RUST_LOG=okapi::gateway=debug` 之类的要改写成 `okapi_gateway=debug`。
+- **编译**：改控制面只重编 okapi-console 与门面（约 26k 行，原先是整个 66k 行的库）；改 worker 约 3k 行；console 与 worker 互不依赖，可以并行编译。改 kernel 仍会带动全部。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

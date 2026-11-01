@@ -143,18 +143,26 @@ def extract(source, surface, filename):
     return result
 
 
+# 各角色 crate（IMPLEMENTATION §11.60）；路由只许出现在 gateway / console 两个 crate 里。
+ROLE_CRATES = ('kernel', 'gateway', 'console', 'worker')
+ROUTER_SURFACES = ('gateway', 'console')
+
+
 def inventory():
     endpoints, sources = [], {}
-    for filename in sorted((ROOT / 'bins/okapi/src').rglob('*.rs')):
-        source = filename.read_text()
-        relative = filename.relative_to(ROOT).as_posix()
-        parsed = extract(source, filename.parent.name, relative)
-        if not parsed:
-            continue
-        if filename.parent.name not in ('gateway', 'console'):
-            raise ValueError(f'Unknown router surface: {relative}')
-        sources[relative] = hashlib.sha256(source.encode()).hexdigest()
-        endpoints.extend(parsed)
+    roots = [(ROOT / 'bins/okapi/src', None)] + [(ROOT / f'crates/okapi-{role}/src', role) for role in ROLE_CRATES]
+    for base, role in roots:
+        for filename in sorted(base.rglob('*.rs')):
+            source = filename.read_text()
+            relative = filename.relative_to(ROOT).as_posix()
+            parsed = extract(source, role, relative)
+            if not parsed:
+                continue
+            if role not in ROUTER_SURFACES:
+                raise ValueError(f'Unknown router surface: {relative}')
+            sources[relative] = hashlib.sha256(source.encode()).hexdigest()
+            endpoints.extend(parsed)
+    sources = dict(sorted(sources.items()))
     endpoints.sort(key=lambda row: (row['surface'], row['path'], row['method']))
     keys = [(row['surface'], row['method'], row['path']) for row in endpoints]
     if len(keys) != len(set(keys)):

@@ -1,0 +1,33 @@
+[package]
+name = "okapi-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Okapi 异步面：结算补写、统计落库、对账告警、到期与分区维护"
+
+[dependencies]
+okapi-kernel = { workspace = true }
+okapi-gateway = { workspace = true }
+okapi-domain = { workspace = true }
+okapi-ledger = { workspace = true }
+okapi-providers = { workspace = true }
+okapi-store = { workspace = true }
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+hmac = { workspace = true }
+fred = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sqlx.workspace = true
+chrono.workspace = true
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

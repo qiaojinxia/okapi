@@ -1,0 +1,48 @@
+[package]
+name = "okapi-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Okapi 数据面：鉴权准入、预扣 / 结算、选路、上游转发与流式"
+
+[dependencies]
+okapi-kernel = { workspace = true }
+# 请求体里找 `"provider"` 键名（SIMD 子串查找；已经随 regex / serde_json 进依赖树）
+memchr = "2.8"
+tiktoken-rs = { workspace = true }
+okapi-api = { workspace = true }
+okapi-domain = { workspace = true }
+okapi-ledger = { workspace = true }
+okapi-pricing = { workspace = true }
+okapi-providers = { workspace = true }
+okapi-store = { workspace = true }
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+async_zip = { workspace = true }
+base64 = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+fred = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+moka = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sqlx.workspace = true
+chrono.workspace = true
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+okapi-store = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

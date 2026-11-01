@@ -1,11 +1,13 @@
-//! okapi 库目标：角色装配模块（bin 入口与集成测试共用）。
-#![recursion_limit = "256"]
+//! okapi 库目标：把各角色 crate 汇到一处（bin 入口与集成测试共用，路径与拆分前一致）。
+//!
+//! 依赖方向（IMPLEMENTATION §11.60）：okapi-kernel ← okapi-gateway ← {okapi-console, okapi-worker}。
 
-pub mod console;
-pub mod gateway;
-pub mod kernel;
+pub use okapi_console as console;
+pub use okapi_gateway as gateway;
+pub use okapi_kernel as kernel;
+pub use okapi_worker as worker;
+
 pub mod migrate;
-pub mod worker;
 
-// 这几个模块挪进了 kernel（§11.59）；原路径照旧可用（bin 入口与集成测试按 `okapi::config` 等引用）。
-pub use kernel::{config, mail, margin, ops, shutdown};
+// 原在 crate 根的共用模块（§11.59 挪进了 kernel）；原路径照旧可用。
+pub use okapi_kernel::{config, mail, margin, ops, shutdown};

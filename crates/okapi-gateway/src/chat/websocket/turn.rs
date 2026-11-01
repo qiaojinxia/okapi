@@ -1,0 +1,486 @@
+use super::super::{
+    AppError, ChatEvent, FailureReply, ForwardFailure, Ingress, ProbeInfo, RequestBilling,
+    RespMeta, ResponsesRequestProbe, StatusCode, UsageProbe, capture_chunk_meta,
+    capture_response_event, check_input, codes, elapsed_ms_i32, estimate_prompt_tokens,
+    prepare_chat, request_features, session_hash, settle_failure, settle_stream,
+};
+use super::{Session, Work, bridge, history, routing};
+use futures::StreamExt;
+use serde_json::Value;
+use std::time::{Duration, Instant};
+use tokio::time::Instant as Deadline;
+
+/// 客户端断开（或首字 / 空闲超时）之后，继续读上游终态用量的窗口。
+const USAGE_DRAIN: Duration = Duration::from_secs(30);
+/// 网关下线时的窗口。进程只等后台结算 `SETTLE_DRAIN_CAP`（30s）：读用量用满 30 秒就没有时间落账了，
+/// 要给结算（含三次退避重试约 4s）留出余量；读不到终态就按已累计的用量收尾。
+const SHUTDOWN_USAGE_DRAIN: Duration = Duration::from_secs(20);
+
+fn usage_drain_window(shutting_down: bool) -> Duration {
+    if shutting_down {
+        SHUTDOWN_USAGE_DRAIN
+    } else {
+        USAGE_DRAIN
+    }
+}
+
+fn report(session: &Session, work: &Work, failure: &ForwardFailure) {
+    match &failure.reply {
+        FailureReply::App(error) => session.output.error(error, work.request, work.lane.clone()),
+        FailureReply::Upstream { status, body } => {
+            // Preserve a valid provider error envelope, adding lane/request correlation.
+            if let Ok(mut value) = serde_json::from_slice::<Value>(body)
+                && value.is_object()
+                && value.get("error").is_some()
+            {
+                value["type"] = "error".into();
+                value["status"] = (*status).into();
+                if let Some(lane) = &work.lane {
+                    value["stream_id"] = lane.clone().into();
+                } else if let Some(object) = value.as_object_mut() {
+                    object.remove("stream_id");
+                }
+                session.output.data(&value.to_string(), work.request);
+            } else {
+                session.output.error(
+                    &AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
+                    work.request,
+                    work.lane.clone(),
+                );
+            }
+        }
+    }
+}
+
+fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInfo, AppError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    let probe = <ResponsesRequestProbe as serde::Deserialize>::deserialize(&value)
+        .map_err(|_| AppError::bad_request())?;
+    // 与 HTTP 的 /v1/responses 同一口径（负 temperature 等在入口拒掉）
+    check_input(Ingress::Responses, &value)?;
+    let messages = probe.input_messages();
+    let features = request_features(Ingress::Responses, &value);
+    Ok(ProbeInfo {
+        authenticated: None,
+        requested_model: probe.model.clone(),
+        stream: true,
+        completion_cap_req: if work.warmup {
+            Some(0)
+        } else {
+            probe.completion_cap_req()
+        },
+        choices: 1,
+        prompt_tokens: estimate_prompt_tokens(
+            &probe.model,
+            &probe.prompt_segments(),
+            messages.len().max(1),
+        ),
+        prompt_chars: probe.prompt_chars(),
+        session: session_hash(
+            &session.headers,
+            probe.prompt_cache_key.as_deref(),
+            &messages,
+        ),
+        needs_tools: features.tools,
+        needs_vision: features.vision,
+        foreign_tools: features.foreign_tools,
+        service_tier: probe.service_tier.clone(),
+    })
+}
+
+pub(super) async fn run(session: &Session, work: &Work) {
+    let failed = execute(session, work).await;
+    session.history.lock().await.finish(
+        work.request,
+        &work.lane,
+        bridge::previous(work).as_deref(),
+        failed,
+    );
+}
+
+async fn execute(session: &Session, work: &Work) -> bool {
+    if session.output.is_closed() {
+        return true;
+    }
+    let started = Instant::now();
+    let context = match session.history.lock().await.lookup(&work.body) {
+        Ok(context) => context,
+        Err(error) => {
+            session
+                .output
+                .error(&error, work.request, work.lane.clone());
+            return true;
+        }
+    };
+    let estimate = match history::estimate(&work.body, context.as_deref()) {
+        Ok(body) => body,
+        Err(error) => {
+            session
+                .output
+                .error(&error, work.request, work.lane.clone());
+            return true;
+        }
+    };
+    let info = match probe(session, work, &estimate) {
+        Ok(info) => info,
+        Err(error) => {
+            session
+                .output
+                .error(&error, work.request, work.lane.clone());
+            return true;
+        }
+    };
+    let _inflight = session.state.in_flight.enter().await;
+    let bill = match prepare_chat(
+        &session.state,
+        &session.headers,
+        &work.body,
+        work.request,
+        started,
+        Ingress::Responses,
+        &info,
+    )
+    .await
+    {
+        Ok(bill) => bill,
+        Err(error) => {
+            session
+                .output
+                .error(&error, work.request, work.lane.clone());
+            return true;
+        }
+    };
+    if (bill.user_id, bill.key_id) != session.principal {
+        let failure = ForwardFailure::app(
+            AppError::new(StatusCode::UNAUTHORIZED, codes::INVALID_API_KEY),
+            0,
+            None,
+        );
+        report(session, work, &failure);
+        settle_failure(&bill, &failure).await;
+        return true;
+    }
+    let mut routed = match routing::route(session, &bill, &info, work, context.as_deref()).await {
+        Ok(routed) => routed,
+        Err(failure) => {
+            report(session, work, &failure);
+            settle_failure(&bill, &failure).await;
+            return true;
+        }
+    };
+    let progress = consume(session, work, &bill, &mut routed).await;
+    if let Some(bridge) = &routed.bridge
+        && let Ok(id) = bridge.request_id.lock()
+    {
+        routed.info.upstream_request_id.clone_from(&id);
+    }
+    let failed = progress.error.is_some() || !progress.terminal;
+    progress.settle(session, work, &bill, &mut routed).await;
+    failed
+}
+
+#[derive(Default)]
+struct Progress {
+    usage: Option<UsageProbe>,
+    chars: usize,
+    output_seen: bool,
+    meta: RespMeta,
+    ttft: Option<i32>,
+    terminal: bool,
+    error: Option<AppError>,
+    suppressed: bool,
+}
+
+impl Progress {
+    fn fail(&mut self, session: &Session, work: &Work, error: AppError) {
+        if self.error.is_none() {
+            if !self.suppressed {
+                session
+                    .output
+                    .error(&error, work.request, work.lane.clone());
+            }
+            self.error = Some(error);
+        }
+        self.suppressed = true;
+    }
+
+    async fn event(
+        &mut self,
+        session: &Session,
+        work: &Work,
+        bill: &RequestBilling,
+        routed: &mut routing::Routed,
+        event: &ChatEvent,
+    ) {
+        let ChatEvent::Data {
+            raw,
+            usage,
+            content_chars,
+            has_output,
+            ..
+        } = event
+        else {
+            return;
+        };
+        if usage.is_some() {
+            self.usage = *usage;
+        }
+        self.chars = self.chars.saturating_add(*content_chars);
+        self.output_seen |= has_output;
+        if *has_output && self.ttft.is_none() {
+            self.ttft = Some(elapsed_ms_i32(bill.started));
+        }
+        capture_chunk_meta(event, &mut self.meta);
+        bill.trace.stream_event(raw);
+        let value = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        self.terminal = matches!(
+            kind,
+            "response.completed" | "response.failed" | "response.incomplete" | "error"
+        );
+        if self.error.is_none()
+            && matches!(kind, "error" | "response.failed" | "response.incomplete")
+        {
+            let status = value
+                .get("status")
+                .and_then(Value::as_u64)
+                .and_then(|v| u16::try_from(v).ok())
+                .and_then(|v| StatusCode::from_u16(v).ok())
+                .filter(|s| s.is_client_error() || s.is_server_error())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            self.error = Some(AppError::new(status, codes::UPSTREAM_ERROR));
+        }
+        if self.terminal && work.warmup && self.usage.is_none() && self.error.is_none() {
+            self.fail(
+                session,
+                work,
+                AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+                    .with_param("usage_missing"),
+            );
+        }
+        if !self.suppressed
+            && let Some(bridge) = &mut routed.bridge
+            && let Err(error) = bridge.capture.event(
+                &mut *session.history.lock().await,
+                &work.lane,
+                work.request,
+                raw,
+            )
+        {
+            self.fail(session, work, error);
+        }
+        if !self.suppressed {
+            if let Err(error) = capture_response_event(&mut routed.writer, bill, event).await {
+                self.fail(session, work, error);
+            } else {
+                session.output.data(raw, work.request);
+            }
+        }
+    }
+
+    async fn settle(
+        mut self,
+        session: &Session,
+        work: &Work,
+        bill: &RequestBilling,
+        routed: &mut routing::Routed,
+    ) {
+        if !self.terminal && self.error.is_none() {
+            self.fail(
+                session,
+                work,
+                AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
+            );
+        }
+        if let Some(error) = &self.error {
+            bill.trace.set("request_failed", serde_json::json!(true));
+            bill.trace
+                .set("stream_end_reason", serde_json::json!("upstream_error"));
+            routed.info.outcome = Some((
+                i16::try_from(error.status.as_u16()).unwrap_or(502),
+                error.code.clone(),
+            ));
+        }
+        bill.trace.response_model(self.meta.model.as_deref());
+        if !routed.info.bill_resp_model {
+            self.meta.model = None;
+        }
+        if let Some(error) = self.error
+            && self
+                .usage
+                .is_none_or(|u| u.prompt_tokens == 0 && u.completion_tokens == 0)
+            && !self.output_seen
+        {
+            let mut failure = ForwardFailure::app(
+                error,
+                routed.failover,
+                Some((routed.info.channel, routed.info.key)),
+            );
+            failure.upstream_status = routed.info.outcome.as_ref().map(|v| v.0);
+            failure.upstream = Some(Box::new((
+                routed.info.upstream_model.clone(),
+                routed.info.upstream_endpoint.clone(),
+            )));
+            settle_failure(bill, &failure).await;
+        } else if routed
+            .bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.local_warmup)
+        {
+            bridge::settle_warmup(bill, &routed.info).await;
+        } else {
+            // Warmup usage is authoritative: no fabricated output or local recount.
+            if work.warmup {
+                routed.info.trust_usage = true;
+            }
+            if let Err(error) = settle_stream(
+                bill,
+                &routed.info,
+                self.usage,
+                self.chars,
+                self.ttft.unwrap_or_else(|| elapsed_ms_i32(bill.started)),
+                routed.failover,
+                session.output.is_closed(),
+                self.meta,
+            )
+            .await
+            {
+                tracing::error!(request_id=%bill.request_id, ?error, "WS turn usage persistence failed");
+            }
+        }
+    }
+}
+
+// Keep first-event, inactivity and usage-drain exits with their single settlement owner.
+#[allow(clippy::too_many_lines)]
+async fn consume(
+    session: &Session,
+    work: &Work,
+    bill: &RequestBilling,
+    routed: &mut routing::Routed,
+) -> Progress {
+    let mut progress = Progress::default();
+    let mut gone = session.output.closed.subscribe();
+    let mut draining = None;
+    let first_deadline = Deadline::now() + routed.first_event;
+    // The ledger reservation expires after ten minutes. Keep a hard per-turn
+    // ceiling below it, leaving room for the 30s usage drain and settlement.
+    let configured = session
+        .state
+        .setting_cached("responses_ws_turn_timeout_secs")
+        .await;
+    let seconds = configured
+        .as_ref()
+        .as_ref()
+        .and_then(Value::as_u64)
+        .filter(|v| *v > 0)
+        .unwrap_or(480)
+        .min(480);
+    let turn_deadline = Deadline::from_std(bill.started) + Duration::from_secs(seconds);
+    let setting = session.state.setting_cached("streaming_policy").await;
+    let stream_policy = crate::stream_policy::StreamPolicy::from_setting(setting.as_ref().as_ref());
+    let mut idle_deadline = Deadline::now() + stream_policy.idle;
+    let mut received = false;
+    loop {
+        // Use one observation for both decisions: a close between the check and
+        // select must wake the watch, not disable it and wait the five-minute idle deadline.
+        let disconnected = session.output.is_closed();
+        if disconnected && draining.is_none() {
+            draining =
+                Some(Deadline::now() + usage_drain_window(session.state.settlements.is_draining()));
+        }
+        let deadline = draining.unwrap_or_else(|| {
+            let idle = if received {
+                idle_deadline
+            } else {
+                first_deadline
+            };
+            idle.min(turn_deadline)
+        });
+        let next = tokio::select! {
+            _ = gone.changed(), if !disconnected => continue,
+            () = tokio::time::sleep_until(deadline) => {
+                if progress.error.is_none() {
+                    let mut error = AppError::new(StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT);
+                    if Deadline::now() >= turn_deadline { error = error.with_param("responses_ws_turn_timeout"); }
+                    progress.fail(session, work, error);
+                }
+                progress.suppressed = true;
+                if draining.is_some() {
+                    if let Some(pin) = session.upstream.lock().await.as_ref() { pin.transport.close(); }
+                    break;
+                }
+                draining = Some(
+                    Deadline::now() + usage_drain_window(session.state.settlements.is_draining()),
+                );
+                continue;
+            }
+            event = routed.handle.events.next() => event,
+        };
+        match next {
+            Some(Ok(event @ ChatEvent::Data { .. })) => {
+                received = true;
+                idle_deadline = Deadline::now() + stream_policy.idle;
+                progress.event(session, work, bill, routed, &event).await;
+                if progress.terminal {
+                    break;
+                }
+            }
+            Some(Ok(ChatEvent::Done)) | None => break,
+            Some(Err(super::super::UpstreamError::Status { status, body, .. })) => {
+                if progress.error.is_none() {
+                    let status_code = StatusCode::from_u16(status)
+                        .ok()
+                        .filter(|s| s.is_client_error() || s.is_server_error())
+                        .unwrap_or(StatusCode::BAD_GATEWAY);
+                    let code = format!("upstream_status_{status}");
+                    let failure = ForwardFailure {
+                        reply: FailureReply::Upstream {
+                            status: status_code.as_u16(),
+                            body,
+                        },
+                        error_code: code.clone(),
+                        upstream_status: i16::try_from(status).ok(),
+                        failover_count: routed.failover,
+                        channel: Some((routed.info.channel, routed.info.key)),
+                        upstream: None,
+                    };
+                    if !progress.suppressed {
+                        report(session, work, &failure);
+                    }
+                    progress.error = Some(AppError::new(status_code, &code));
+                    progress.suppressed = true;
+                }
+                break;
+            }
+            Some(Err(error)) => {
+                let status = if error.error_code() == codes::UPSTREAM_TIMEOUT {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                progress.fail(session, work, AppError::new(status, error.error_code()));
+                break;
+            }
+        }
+    }
+    progress
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 下线窗口读完用量之后还要有时间落账：整个进程只等 `SETTLE_DRAIN_CAP`。
+    #[test]
+    fn shutdown_usage_window_leaves_room_to_settle_inside_the_drain_cap() {
+        assert_eq!(usage_drain_window(false), Duration::from_secs(30));
+        assert!(
+            usage_drain_window(true) + Duration::from_secs(5) <= crate::SETTLE_DRAIN_CAP,
+            "读用量的窗口 + 结算（含重试）必须落在下线等待上限之内"
+        );
+    }
+}

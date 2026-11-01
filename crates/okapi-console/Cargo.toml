@@ -1,0 +1,47 @@
+[package]
+name = "okapi-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Okapi 控制面：管理后台、用户门户 API、MCP"
+
+[dependencies]
+okapi-kernel = { workspace = true }
+okapi-gateway = { workspace = true }
+# 用户名入库前做 NFC（已经随 sqlx-postgres 进依赖树）
+unicode-normalization = "0.1.25"
+okapi-api = { workspace = true }
+okapi-domain = { workspace = true }
+okapi-ledger = { workspace = true }
+okapi-pricing = { workspace = true }
+okapi-providers = { workspace = true }
+okapi-store = { workspace = true }
+anyhow = { workspace = true }
+hmac = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+fred = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+sqlx.workspace = true
+chrono.workspace = true
+md-5 = { workspace = true }
+reqwest = { workspace = true }
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+
+[features]
+# 发布形态：前端产物嵌入二进制（构建前需 `pnpm -C frontend build`）
+embed-web = ["dep:rust-embed", "dep:mime_guess"]
+
+[lints]
+workspace = true

@@ -2202,35 +2202,29 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
- "lettre",
  "md-5 0.10.6",
- "memchr",
- "mime_guess",
- "moka",
  "okapi-api",
+ "okapi-console",
  "okapi-domain",
+ "okapi-gateway",
+ "okapi-kernel",
  "okapi-ledger",
  "okapi-pricing",
  "okapi-providers",
  "okapi-store",
+ "okapi-worker",
  "rand 0.10.2",
  "reqwest",
- "rust-embed",
- "rustix",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx",
- "thiserror",
- "tiktoken-rs",
  "tokio",
  "tokio-tungstenite",
  "tower",
- "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
- "unicode-normalization",
  "uuid",
 ]
 
@@ -2246,11 +2240,118 @@ dependencies = [
 ]
 
 [[package]]
+name = "okapi-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "chrono",
+ "fred",
+ "futures",
+ "hex",
+ "hmac",
+ "md-5 0.10.6",
+ "mime_guess",
+ "okapi-api",
+ "okapi-domain",
+ "okapi-gateway",
+ "okapi-kernel",
+ "okapi-ledger",
+ "okapi-pricing",
+ "okapi-providers",
+ "okapi-store",
+ "rand 0.10.2",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+ "tower-http 0.7.0",
+ "tracing",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
 name = "okapi-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "okapi-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "async_zip",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fred",
+ "futures",
+ "hex",
+ "memchr",
+ "moka",
+ "okapi-api",
+ "okapi-domain",
+ "okapi-kernel",
+ "okapi-ledger",
+ "okapi-pricing",
+ "okapi-providers",
+ "okapi-store",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "tiktoken-rs",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http 0.7.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "okapi-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "axum",
+ "chrono",
+ "dotenvy",
+ "fred",
+ "futures",
+ "hex",
+ "lettre",
+ "moka",
+ "okapi-api",
+ "okapi-domain",
+ "okapi-ledger",
+ "okapi-pricing",
+ "okapi-providers",
+ "okapi-store",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2346,6 +2447,33 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx",
  "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "okapi-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "fred",
+ "futures",
+ "hex",
+ "hmac",
+ "okapi-domain",
+ "okapi-gateway",
+ "okapi-kernel",
+ "okapi-ledger",
+ "okapi-providers",
+ "okapi-store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
  "tokio",
  "tracing",
  "uuid",

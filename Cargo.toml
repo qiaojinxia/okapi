@@ -7,6 +7,10 @@ members = [
     "crates/okapi-providers",
     "crates/okapi-store",
     "crates/okapi-api",
+    "crates/okapi-kernel",
+    "crates/okapi-gateway",
+    "crates/okapi-console",
+    "crates/okapi-worker",
     "bins/okapi",
 ]
 
@@ -23,6 +27,10 @@ okapi-ledger = { path = "crates/okapi-ledger" }
 okapi-providers = { path = "crates/okapi-providers" }
 okapi-store = { path = "crates/okapi-store" }
 okapi-api = { path = "crates/okapi-api" }
+okapi-kernel = { path = "crates/okapi-kernel" }
+okapi-gateway = { path = "crates/okapi-gateway" }
+okapi-console = { path = "crates/okapi-console" }
+okapi-worker = { path = "crates/okapi-worker" }
 
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
