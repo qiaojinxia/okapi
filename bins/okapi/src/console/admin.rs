@@ -927,7 +927,7 @@ pub async fn update_channel(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// DELETE /admin/channels/{id}：软删除（历史账单按 channel_id 仍可回溯）。
+/// DELETE /admin/channels/{id}：软删除并停用其下 key（历史账单按 channel_id 仍可回溯），与批量删除同口径。
 pub async fn delete_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -935,7 +935,7 @@ pub async fn delete_channel(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
-    if !okapi_store::admin::soft_delete_channel(&state.pg, id).await? {
+    if !okapi_store::mutate::delete_channel(&state.pg, id).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
     state.invalidate_routing_caches();

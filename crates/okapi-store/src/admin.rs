@@ -285,17 +285,6 @@ pub async fn redemption_precheck(
     }))
 }
 
-pub async fn claim_redemption(
-    pool: &PgPool,
-    code: &str,
-    user_id: i64,
-) -> Result<Option<ClaimedRedemption>, StoreError> {
-    let mut tx = pool.begin().await?;
-    let result = claim_redemption_in_tx(&mut tx, code, user_id).await?;
-    tx.commit().await?;
-    Ok(result)
-}
-
 /// Caller owns the business/ledger transaction.
 pub async fn claim_redemption_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1423,6 +1412,20 @@ pub async fn soft_delete_api_key(
     }))
 }
 
+/// 软删一条 web 会话换来的全部登录 key（退出登录用）；返回被删 key 的哈希，供调用方清鉴权缓存。
+pub async fn soft_delete_session_keys(
+    pool: &PgPool,
+    session_hash: &str,
+) -> Result<Vec<String>, StoreError> {
+    Ok(sqlx::query_scalar(
+        "UPDATE api_keys SET deleted_at = now() \
+         WHERE session_hash = $1 AND deleted_at IS NULL RETURNING key_hash",
+    )
+    .bind(session_hash)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// 定价分组是否存在（`group_override` 写入前置校验：
 /// 交给 FK 报错只能得到 500，前置查得到可渲染的 error_code）。
 pub async fn price_group_exists(pool: &PgPool, group_code: &str) -> Result<bool, StoreError> {
@@ -1491,20 +1494,6 @@ pub async fn patch_channel(
         patch.priority,
         patch.trust_upstream_usage,
         patch.cost_milli,
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(affected > 0)
-}
-
-/// 软删除渠道；返回是否命中。调度候选查询已按 `deleted_at IS NULL` 过滤，
-/// 故不必级联改 channel_keys（历史账单仍能按 channel_id 回溯）。
-pub async fn soft_delete_channel(pool: &PgPool, channel_id: i64) -> Result<bool, StoreError> {
-    let affected = sqlx::query!(
-        r#"UPDATE channels SET deleted_at = now(), updated_at = now()
-           WHERE id = $1 AND deleted_at IS NULL"#,
-        channel_id
     )
     .execute(pool)
     .await?

@@ -494,9 +494,10 @@ async fn deleting_group_or_pool_ignores_soft_deleted_key_overrides() {
         "活令牌绑着的池不得删，实际 {err:?}"
     );
     assert!(
-        okapi_store::mutate::delete_api_key(&env.pg, live.key_id)
+        okapi_store::admin::soft_delete_api_key(&env.pg, live.key_id, None)
             .await
             .unwrap()
+            .is_some()
     );
     assert!(
         okapi_store::mutate::delete_channel_pool(&env.pg, &env.stable_pool)
@@ -544,9 +545,10 @@ async fn deleting_group_or_pool_ignores_soft_deleted_key_overrides() {
         "活令牌绑着的分组不得删，实际 {err:?}"
     );
     assert!(
-        okapi_store::mutate::delete_api_key(&env.pg, live.key_id)
+        okapi_store::admin::soft_delete_api_key(&env.pg, live.key_id, None)
             .await
             .unwrap()
+            .is_some()
     );
     assert!(
         okapi_store::mutate::delete_price_group(&env.pg, &solo_group)

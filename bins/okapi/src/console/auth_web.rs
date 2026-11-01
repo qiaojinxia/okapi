@@ -717,18 +717,13 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<V
     if let Some(sid) = session_id(&headers) {
         state.sched.web_session_del(&sid).await;
         // 这条会话换来的登录 key 本就随会话失效了；这里把它也删掉，不留死 key
-        let revoked: Vec<String> = sqlx::query_scalar(
-            "UPDATE api_keys SET deleted_at = now() \
-             WHERE session_hash = $1 AND deleted_at IS NULL RETURNING key_hash",
-        )
-        .bind(session_hash(&sid))
-        .fetch_all(&state.pg)
-        .await
-        .unwrap_or_else(|error| {
-            // 会话已删，绑定它的 key 鉴权时也过不了；只是行没删掉，留痕好查
-            tracing::error!(%error, "退出登录时作废会话绑定的登录 key 失败");
-            Vec::new()
-        });
+        let revoked = okapi_store::admin::soft_delete_session_keys(&state.pg, &session_hash(&sid))
+            .await
+            .unwrap_or_else(|error| {
+                // 会话已删，绑定它的 key 鉴权时也过不了；只是行没删掉，留痕好查
+                tracing::error!(%error, "退出登录时作废会话绑定的登录 key 失败");
+                Vec::new()
+            });
         for hash in &revoked {
             state.sched.auth_del(hash).await;
         }

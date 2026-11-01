@@ -700,21 +700,6 @@ pub async fn list_settings(pool: &PgPool) -> Result<Vec<SettingListRow>, StoreEr
         .collect())
 }
 
-/// 角色占用计数（删除前检查；角色本体列表已在 console::admin::list_roles）。
-pub async fn role_user_count(pool: &PgPool, role_code: &str) -> Result<Option<i64>, StoreError> {
-    let row = sqlx::query!(
-        r#"
-        SELECT (SELECT COUNT(*) FROM users u
-                 WHERE u.admin_role_id = r.id AND u.deleted_at IS NULL) AS "c!"
-        FROM admin_roles r WHERE r.role_code = $1
-        "#,
-        role_code
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| r.c))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

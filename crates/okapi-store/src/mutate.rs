@@ -12,66 +12,6 @@
 use crate::error::StoreError;
 use sqlx::PgPool;
 
-/// 渠道可编辑字段（None = 不改动）。
-#[derive(Debug, Default)]
-pub struct ChannelPatch<'a> {
-    pub name: Option<&'a str>,
-    pub api_base: Option<&'a str>,
-    pub models: Option<&'a serde_json::Value>,
-    pub model_mapping: Option<&'a serde_json::Value>,
-    pub capabilities: Option<&'a serde_json::Value>,
-    pub settings: Option<&'a serde_json::Value>,
-    pub retry_policy: Option<&'a serde_json::Value>,
-    pub upstream_unit_cost: Option<&'a serde_json::Value>,
-    pub priority: Option<i32>,
-    pub weight: Option<i32>,
-    pub trust_upstream_usage: Option<bool>,
-}
-
-/// 局部更新渠道；false = 渠道不存在。
-/// COALESCE 语义：未传字段保持原值；api_base 传空串则清空（NULLIF）。
-pub async fn patch_channel(
-    pool: &PgPool,
-    channel_id: i64,
-    patch: &ChannelPatch<'_>,
-) -> Result<bool, StoreError> {
-    let affected = sqlx::query!(
-        r#"
-        UPDATE channels SET
-            name                 = COALESCE($2, name),
-            api_base             = CASE WHEN $3::text IS NULL THEN api_base
-                                        ELSE NULLIF($3, '') END,
-            models               = COALESCE($4, models),
-            model_mapping        = COALESCE($5, model_mapping),
-            capabilities         = COALESCE($6, capabilities),
-            settings             = COALESCE($7, settings),
-            retry_policy         = COALESCE($8, retry_policy),
-            upstream_unit_cost   = COALESCE($9, upstream_unit_cost),
-            priority             = COALESCE($10, priority),
-            weight               = COALESCE($11, weight),
-            trust_upstream_usage = COALESCE($12, trust_upstream_usage),
-            updated_at           = now()
-        WHERE id = $1 AND deleted_at IS NULL
-        "#,
-        channel_id,
-        patch.name,
-        patch.api_base,
-        patch.models,
-        patch.model_mapping,
-        patch.capabilities,
-        patch.settings,
-        patch.retry_policy,
-        patch.upstream_unit_cost,
-        patch.priority,
-        patch.weight,
-        patch.trust_upstream_usage
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(affected > 0)
-}
-
 /// 软删渠道（同时停用其下 key，避免调度器取到孤儿 key）。
 pub async fn delete_channel(pool: &PgPool, channel_id: i64) -> Result<bool, StoreError> {
     let mut tx = pool.begin().await?;
@@ -482,46 +422,6 @@ pub async fn manage_user(
     }
     tx.commit().await?;
     Ok(affected > 0)
-}
-
-/// 软删令牌。
-pub async fn delete_api_key(pool: &PgPool, key_id: i64) -> Result<bool, StoreError> {
-    let affected = sqlx::query!(
-        r#"UPDATE api_keys SET deleted_at = now(), status = 2
-           WHERE id = $1 AND deleted_at IS NULL"#,
-        key_id
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(affected > 0)
-}
-
-/// 改令牌状态（1=启用 2=停用）。
-pub async fn set_api_key_status(
-    pool: &PgPool,
-    key_id: i64,
-    status: i16,
-) -> Result<bool, StoreError> {
-    let affected = sqlx::query!(
-        r#"UPDATE api_keys SET status = $2 WHERE id = $1 AND deleted_at IS NULL"#,
-        key_id,
-        status
-    )
-    .execute(pool)
-    .await?
-    .rows_affected();
-    Ok(affected > 0)
-}
-
-/// 令牌属主（own 范围校验用）；None = 不存在。
-pub async fn api_key_owner(pool: &PgPool, key_id: i64) -> Result<Option<i64>, StoreError> {
-    Ok(sqlx::query_scalar!(
-        r#"SELECT user_id FROM api_keys WHERE id = $1 AND deleted_at IS NULL"#,
-        key_id
-    )
-    .fetch_optional(pool)
-    .await?)
 }
 
 /// 启停定价规则（不删配置，便于活动复用）。

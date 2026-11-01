@@ -1384,24 +1384,6 @@ pub async fn resolve_for_key(
         .transpose()
 }
 
-/// 渠道级操作（拉模型、余额、测活）按渠道的第一把 key 解析出口。None = 渠道或 key 不存在。
-pub async fn resolve_for_channel(
-    pool: &PgPool,
-    channel_id: i64,
-    master_key: Option<&str>,
-) -> Result<Option<Resolved>, StoreError> {
-    let key = sqlx::query_scalar!(
-        r#"SELECT id FROM channel_keys WHERE channel_id = $1 ORDER BY id LIMIT 1"#,
-        channel_id
-    )
-    .fetch_optional(pool)
-    .await?;
-    match key {
-        Some(key) => resolve_for_key(pool, key, master_key).await,
-        None => Ok(None),
-    }
-}
-
 /// `egress_pick` 一行 → 解析结果。
 pub(crate) fn resolved(
     master_key: Option<&str>,

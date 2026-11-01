@@ -1,7 +1,8 @@
-//! okapi-store：存储层薄封装（PG 连接与迁移、Redis 客户端、只读仓储与开发种子）。
+//! okapi-store：持久化层（PG 连接与迁移、Redis 客户端、按表组织的读写仓储与开发种子）。
 //!
-//! schema 唯一权威见 docs/database.md；本 crate 不承载业务规则，
-//! 计费写路径在 okapi-ledger，定价编译在 okapi-pricing。
+//! schema 唯一权威见 docs/database.md。这里只放必须和写入同处一个事务的规则
+//! （占用检查、软删时停用从属行、出口代理固定分配）；计费写路径在 okapi-ledger，
+//! 定价编译在 okapi-pricing，请求期的业务判断在 bins/okapi。
 
 pub mod admin;
 pub mod api_key_secret;
