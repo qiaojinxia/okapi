@@ -4,7 +4,7 @@
 //! 协议转换在 convert::openai_to_gemini 进行（禁统一 IR）。
 
 use crate::egress_meter::MeteredSend as _;
-use crate::error::UpstreamError;
+use crate::error::{UpstreamError, classify};
 use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
@@ -114,15 +114,7 @@ pub async fn send_generate_at(
         .map(str::to_owned);
 
     if !(200..300).contains(&status) {
-        let retry_after_secs = crate::retry_after::seconds(resp.headers());
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-            .await
-            .unwrap_or_default();
-        return Err(UpstreamError::Status {
-            status,
-            body,
-            retry_after_secs,
-        });
+        return Err(crate::openai::status_error(resp).await);
     }
 
     if stream {
@@ -245,16 +237,6 @@ impl MetaScanner {
             usage,
         };
         vec![Ok(passthrough)]
-    }
-}
-
-fn classify(e: &reqwest::Error) -> UpstreamError {
-    if let Some(unreachable) = UpstreamError::connect_phase(e) {
-        unreachable
-    } else if e.is_timeout() {
-        UpstreamError::Timeout
-    } else {
-        UpstreamError::Stream(e.to_string())
     }
 }
 

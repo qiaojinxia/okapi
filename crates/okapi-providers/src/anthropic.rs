@@ -111,15 +111,7 @@ impl AnthropicUpstream {
         let resp = self.http.send(req, &prepared.outbound).await?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-                .await
-                .unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
+            return Err(crate::openai::status_error(resp).await);
         }
         crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
     }
@@ -297,16 +289,6 @@ pub(crate) fn stream_error(data: &serde_json::Value, raw: &[u8]) -> UpstreamErro
                 .unwrap_or("upstream_error")
                 .to_owned(),
         ),
-    }
-}
-
-pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
-    if let Some(unreachable) = UpstreamError::connect_phase(e) {
-        unreachable
-    } else if e.is_timeout() {
-        UpstreamError::Timeout
-    } else {
-        UpstreamError::Stream(e.to_string())
     }
 }
 

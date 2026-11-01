@@ -413,15 +413,7 @@ pub async fn count_tokens(
     let resp = http.send(req, &outbound).await?;
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
-        let retry_after_secs = crate::retry_after::seconds(resp.headers());
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-            .await
-            .unwrap_or_default();
-        return Err(UpstreamError::Status {
-            status,
-            body,
-            retry_after_secs,
-        });
+        return Err(crate::openai::status_error(resp).await);
     }
     crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
 }

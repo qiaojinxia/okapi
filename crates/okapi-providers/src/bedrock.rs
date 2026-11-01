@@ -5,11 +5,12 @@
 //! 这里只管三件事：SigV4 或 Bearer 鉴权、模型 ID 进 URL（`:` 须编码）、把 event-stream 帧
 //! 还原成 `AnthropicEvent`。非 Anthropic 模型（Converse 形状）不在此模块范围。
 
-use crate::anthropic::{AnthropicEvent, MessagesResponse, MessagesStream, classify};
+use crate::anthropic::{AnthropicEvent, MessagesResponse, MessagesStream};
 use crate::aws_eventstream::Decoder;
 use crate::aws_sigv4::{self, AwsCredentials, SignParams};
 use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
+use crate::error::classify;
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -99,15 +100,7 @@ impl BedrockUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
-            let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-                .await
-                .unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
+            return Err(crate::openai::status_error(resp).await);
         }
         if !stream {
             let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;

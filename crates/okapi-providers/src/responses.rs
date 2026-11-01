@@ -51,7 +51,7 @@ pub async fn count_input_tokens_at(
     let mut response = request
         .send_via(outbound.proxy_url.as_deref())
         .await
-        .map_err(|e| crate::openai::classify(&e))?;
+        .map_err(|e| crate::error::classify(&e))?;
     let status = response.status().as_u16();
     let retry_after_secs = crate::retry_after::seconds(response.headers());
     let source_estimated = response
@@ -62,7 +62,7 @@ pub async fn count_input_tokens_at(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| crate::openai::classify(&e))?
+        .map_err(|e| crate::error::classify(&e))?
     {
         if bytes.len().saturating_add(chunk.len()) > 32 * 1024 {
             return Err(UpstreamError::Stream(
@@ -325,7 +325,7 @@ pub async fn send_responses_at(
     let resp = req
         .send_via(outbound.proxy_url.as_deref())
         .await
-        .map_err(|e| crate::openai::classify(&e))?;
+        .map_err(|e| crate::error::classify(&e))?;
     let status = resp.status().as_u16();
     let upstream_request_id = resp
         .headers()
@@ -334,15 +334,7 @@ pub async fn send_responses_at(
         .map(str::to_owned);
 
     if !(200..300).contains(&status) {
-        let retry_after_secs = crate::retry_after::seconds(resp.headers());
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-            .await
-            .unwrap_or_default();
-        return Err(UpstreamError::Status {
-            status,
-            body,
-            retry_after_secs,
-        });
+        return Err(crate::openai::status_error(resp).await);
     }
     crate::response_relay::record(resp.headers());
 

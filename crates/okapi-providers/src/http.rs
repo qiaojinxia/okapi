@@ -309,7 +309,7 @@ impl HttpPool {
     }
 
     /// 发出一个由本池构造的请求。渠道配了 Claude Code 客户端外形时换用与真机同款的 TLS 握手
-    /// （`client_tls`），其余照常走 reqwest；两条路的错误分类一致（`anthropic::classify`）。
+    /// （`client_tls`），其余照常走 reqwest；两条路的错误分类一致（`error::classify`）。
     pub async fn send(
         &self,
         request: reqwest::RequestBuilder,
@@ -331,7 +331,7 @@ impl HttpPool {
         }
         crate::egress_meter::send(request, outbound.proxy_url.as_deref())
             .await
-            .map_err(|e| crate::anthropic::classify(&e))
+            .map_err(|e| crate::error::classify(&e))
     }
 
     /// Claude 订阅账号接口的请求（`oauth::anthropic_max` 照真机 axios 的头构造好）：与真机账号接口

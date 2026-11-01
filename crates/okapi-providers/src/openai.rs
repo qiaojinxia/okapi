@@ -1,7 +1,7 @@
 //! OpenAI 方向上游客户端（原生 OpenAI 与一切 OpenAI 兼容上游共用）。
 
 use crate::egress_meter::MeteredSend as _;
-use crate::error::UpstreamError;
+use crate::error::{UpstreamError, classify};
 use crate::http::{HttpPool, Outbound};
 use crate::types::ChatEvent;
 use bytes::Bytes;
@@ -41,6 +41,20 @@ pub(crate) async fn response_bytes(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes.freeze())
+}
+
+/// 非 2xx 响应 → `UpstreamError::Status`：带上 Retry-After，错误体按 `MAX_ERROR` 截读（读失败按空体）。
+pub(crate) async fn status_error(response: reqwest::Response) -> UpstreamError {
+    let status = response.status().as_u16();
+    let retry_after_secs = crate::retry_after::seconds(response.headers());
+    let body = response_bytes(response, Some(crate::limits::MAX_ERROR))
+        .await
+        .unwrap_or_default();
+    UpstreamError::Status {
+        status,
+        body,
+        retry_after_secs,
+    }
 }
 
 pub struct StreamHandle {
@@ -179,15 +193,7 @@ impl OpenAiUpstream {
             .map(str::to_owned);
 
         if !(200..300).contains(&status) {
-            let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-                .await
-                .unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
+            return Err(status_error(resp).await);
         }
 
         if stream {
@@ -282,15 +288,7 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
-            let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = response_bytes(resp, Some(crate::limits::MAX_ERROR))
-                .await
-                .unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
+            return Err(status_error(resp).await);
         }
         let body = response_bytes(resp, limit).await?;
         let usage = serde_json::from_slice::<serde_json::Value>(&body)
@@ -349,15 +347,7 @@ impl OpenAiUpstream {
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
-                .await
-                .unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
+            return Err(status_error(resp).await);
         }
         let content_type = resp
             .headers()
@@ -454,15 +444,7 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
-            let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = response_bytes(resp, Some(crate::limits::MAX_ERROR))
-                .await
-                .unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
+            return Err(status_error(resp).await);
         }
         let body = response_bytes(resp, limit).await?;
         Ok(EmbeddingsResponse {
@@ -593,16 +575,6 @@ fn parse_event(data: &str) -> ChatEvent {
         content_chars,
         usage: value.as_ref().and_then(okapi_api::usage_from_chat),
         raw: data.to_owned(),
-    }
-}
-
-pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
-    if let Some(unreachable) = UpstreamError::connect_phase(e) {
-        unreachable
-    } else if e.is_timeout() {
-        UpstreamError::Timeout
-    } else {
-        UpstreamError::Stream(e.to_string())
     }
 }
 

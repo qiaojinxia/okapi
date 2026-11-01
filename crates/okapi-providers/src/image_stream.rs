@@ -1,6 +1,7 @@
 //! Bounded Images SSE transport, shared by OpenAI-compatible and Azure endpoints.
 use crate::egress_meter::MeteredSend as _;
-use crate::openai::{EmbeddingsResponse, MAX_IMAGE_RESPONSE_BYTES, classify, response_bytes};
+use crate::error::classify;
+use crate::openai::{EmbeddingsResponse, MAX_IMAGE_RESPONSE_BYTES, response_bytes};
 use crate::{AzureUpstream, OpenAiUpstream, Outbound, UpstreamError};
 use bytes::Bytes;
 use eventsource_stream::Eventsource;

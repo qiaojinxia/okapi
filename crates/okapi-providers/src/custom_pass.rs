@@ -2,7 +2,7 @@
 //! 任意方法 + 路径的透明代理，响应体流式回传；协议语义与计费由 gateway 决策。
 
 use crate::egress_meter::MeteredSend as _;
-use crate::error::UpstreamError;
+use crate::error::{UpstreamError, classify};
 use crate::http::{HttpPool, Outbound};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -105,15 +105,5 @@ impl PassUpstream {
                 .unwrap_or_default();
             Ok(PassResponse::ErrStatus { status, body })
         }
-    }
-}
-
-fn classify(e: &reqwest::Error) -> UpstreamError {
-    if let Some(unreachable) = UpstreamError::connect_phase(e) {
-        unreachable
-    } else if e.is_timeout() {
-        UpstreamError::Timeout
-    } else {
-        UpstreamError::Stream(e.to_string())
     }
 }

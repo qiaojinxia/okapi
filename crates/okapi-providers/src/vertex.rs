@@ -9,8 +9,9 @@
 //! 进程内按凭证哈希缓存、到期前 5 分钟刷新、刷新单飞。不是 JSON 的凭证按现成 access token 直接
 //! 作 Bearer（测试 / 外部 STS 侧车）。
 
-use crate::anthropic::{MessagesResponse, classify, send_messages_at};
+use crate::anthropic::{MessagesResponse, send_messages_at};
 use crate::error::UpstreamError;
+use crate::error::classify;
 use crate::gemini::{GeminiResponse, send_generate_at};
 use base64::Engine as _;
 use bytes::Bytes;

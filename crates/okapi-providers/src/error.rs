@@ -46,6 +46,18 @@ pub enum UpstreamError {
     Build(String),
 }
 
+/// reqwest 传输错误的统一分类（各家上游共用）：连接阶段 → `Unreachable`，超时 → `Timeout`，
+/// 其余（建流后断开、读体失败）→ `Stream`。
+pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
+    if let Some(unreachable) = UpstreamError::connect_phase(e) {
+        unreachable
+    } else if e.is_timeout() {
+        UpstreamError::Timeout
+    } else {
+        UpstreamError::Stream(e.to_string())
+    }
+}
+
 impl UpstreamError {
     /// reqwest 的连接阶段错误 → `Unreachable`；其余返回 None 交给各家自己的分类。
     /// 连接超时同时满足 `is_connect` 与 `is_timeout`，先判连接阶段才不会被归成普通超时。
