@@ -403,7 +403,7 @@ fn retry_knobs(policy: Option<&serde_json::Value>) -> (i16, u64) {
 /// anthropic / gemini / custom_pass 渠道无论写什么都走降级链（它们根本没有 /responses）。
 #[must_use]
 pub fn responses_native_for(provider: &str, configured: Option<bool>) -> bool {
-    okapi_api::provider_contract::native_responses_for(provider).enabled(configured)
+    okapi_domain::provider_contract::native_responses_for(provider).enabled(configured)
 }
 
 /// 从 `channels.retry_policy` 取一个整数项，并夹在 [min, max]。

@@ -6,6 +6,7 @@
 pub mod error;
 pub mod ids;
 pub mod money;
+pub mod provider_contract;
 pub mod server_tools;
 pub mod state;
 pub mod tokens;

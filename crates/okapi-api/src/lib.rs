@@ -8,7 +8,6 @@
 pub mod chat;
 pub mod error;
 pub mod permissions;
-pub mod provider_contract;
 mod token_usage;
 
 pub use chat::{

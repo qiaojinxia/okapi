@@ -4,7 +4,7 @@
 
 ## 实现边界
 
-推理主流程固定为凭证解析、公共准入、注册传输、协议转换和结算。Transport/Factory 与账号 Hook 分离；订阅行为保持在插件内。协议默认值由 `okapi-api::provider_contract` 目录统一持有；扩展原生协议能力时添加目录元数据和 transport 注册，不修改存储查询或网关 dispatch。
+推理主流程固定为凭证解析、公共准入、注册传输、协议转换和结算。Transport/Factory 与账号 Hook 分离；订阅行为保持在插件内。协议默认值由 `okapi-domain::provider_contract` 目录统一持有（存储与适配器共用，store 因此不依赖 okapi-api）；扩展原生协议能力时添加目录元数据和 transport 注册，不修改存储查询或网关 dispatch。
 
 并发限制使用每个渠道 Key 的唯一租约，适用于普通 Key 和订阅。长流通过响应所有权保留许可，取消/EOF/错误会释放；续租失败终止继续使用该许可的请求。账本到期、预扣、恢复共用用户锁。
 

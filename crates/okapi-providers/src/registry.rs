@@ -71,7 +71,7 @@ pub enum RequestExtensionKind {
     CodexClient,
 }
 
-pub use okapi_api::provider_contract::NativeResponses;
+pub use okapi_domain::provider_contract::NativeResponses;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProviderDescriptor {
@@ -159,14 +159,14 @@ const HTTP_AND_WS: &[WireTransport] = &[WireTransport::Http, WireTransport::Resp
 /// Adding an adapter starts with an explicit registration, rather than a fallback to OpenAI.
 pub const BUILT_INS: &[ProviderDescriptor] = &[
     ProviderDescriptor {
-        id: okapi_api::provider_contract::OPENAI.id,
+        id: okapi_domain::provider_contract::OPENAI.id,
         kind: AdapterKind::OpenAi,
         inference: Some(crate::inference::openai),
         dialect_for_model: openai_dialect,
         chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: Some("https://api.openai.com/v1"),
-        native_responses: okapi_api::provider_contract::OPENAI.native_responses,
+        native_responses: okapi_domain::provider_contract::OPENAI.native_responses,
         ingress: CHAT_FORMATS,
         transports: HTTP_AND_WS,
         extensions: &[],
@@ -174,14 +174,14 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         account: None,
     },
     ProviderDescriptor {
-        id: okapi_api::provider_contract::OPENAI_COMPAT.id,
+        id: okapi_domain::provider_contract::OPENAI_COMPAT.id,
         kind: AdapterKind::OpenAiCompatible,
         inference: Some(crate::inference::openai),
         dialect_for_model: openai_dialect,
         chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: Some("https://api.openai.com/v1"),
-        native_responses: okapi_api::provider_contract::OPENAI_COMPAT.native_responses,
+        native_responses: okapi_domain::provider_contract::OPENAI_COMPAT.native_responses,
         ingress: CHAT_FORMATS,
         // Preserve the existing WS ingress boundary; compatibility requires separate verification.
         transports: HTTP,
@@ -280,14 +280,14 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         account: Some(&crate::oauth::anthropic_max::account::HOOKS),
     },
     ProviderDescriptor {
-        id: okapi_api::provider_contract::CODEX.id,
+        id: okapi_domain::provider_contract::CODEX.id,
         kind: AdapterKind::CodexOAuth,
         inference: Some(crate::inference::codex),
         dialect_for_model: openai_dialect,
         chat_only: true,
         credential: CredentialKind::OAuth(OAuthKind::Codex),
         default_base: Some(crate::oauth::codex::DEFAULT_API_BASE),
-        native_responses: okapi_api::provider_contract::CODEX.native_responses,
+        native_responses: okapi_domain::provider_contract::CODEX.native_responses,
         ingress: RESPONSES_FORMATS,
         transports: HTTP_AND_WS,
         extensions: &[RequestExtensionKind::CodexClient],
@@ -332,7 +332,7 @@ mod tests {
         for registration in BUILT_INS {
             assert_eq!(
                 registration.native_responses,
-                okapi_api::provider_contract::native_responses_for(registration.id)
+                okapi_domain::provider_contract::native_responses_for(registration.id)
             );
             assert_eq!(
                 registration.inference.is_some(),
