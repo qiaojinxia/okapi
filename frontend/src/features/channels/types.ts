@@ -62,6 +62,20 @@ export function defaultApiBase(provider: string): string | undefined {
     ? apiBasePlaceholder(provider) : undefined
 }
 
+/// 地址必须带版本段的协议：网关在 api_base 后面直接接 `/messages`、`/models`、`/models/{m}:generateContent`，
+/// 不会替你补 `/v1` / `/v1beta`。只写了主机名（`https://host:8893`）时请求会落在站点首页上——
+/// new-api 之类的站点对任何未知路径都回 200 + 网页，测试 / 发送 / 拉模型会以莫名其妙的方式失败。
+/// OpenAI 兼容上游不在此列：有的厂商（如 DeepSeek）本来就不带 `/v1`，提示会误报。
+export function needsVersionSegment(provider: string, apiBase: string): boolean {
+  if (provider !== 'anthropic' && provider !== 'gemini') return false
+  try {
+    const url = new URL(apiBase.trim())
+    return (url.protocol === 'http:' || url.protocol === 'https:') && (url.pathname === '' || url.pathname === '/')
+  } catch {
+    return false
+  }
+}
+
 /// `responses_native` 未显式配置时的生效缺省（与后端 `responses_native_for` 一致）。
 export function defaultResponsesNative(provider: string): boolean {
   return provider === 'openai'

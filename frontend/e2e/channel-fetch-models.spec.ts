@@ -7,6 +7,7 @@ type Json = Record<string, unknown>
 const providerMetadata = { data: [
   { id: 'openai', account: { quota: false, refresh: false, subscription: null } },
   { id: 'anthropic', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'gemini', account: { quota: false, refresh: false, subscription: null } },
   { id: 'codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
 ] }
 // 价簿里只有 gpt-5 建了模型；其余发现到的名字都是「还没建」
@@ -27,6 +28,8 @@ async function prepare(page: Page, options: { models?: 'ok' | 'denied' } = {}) {
       if (path === '/admin/channels/fetch-models') {
         const body = request.postDataJSON() as Json
         if (body.credential === 'sk-bad') return route.fulfill({ status: 502, json: { error: { code: 'upstream_error', param: 'status_401' } } })
+        // 上游回了 200 + 网页（地址缺 /v1）：后端是 400 bad_request，param 区分
+        if (body.credential === 'sk-page') return route.fulfill({ status: 400, json: { error: { code: 'bad_request', param: 'upstream_models_not_json' } } })
         return route.fulfill({ json: { models: ['gpt-5', 'gpt-5-mini', 'o4'] } })
       }
       return route.fulfill({ json: { channel_id: 7, channel_key_id: 8 } })
@@ -100,6 +103,56 @@ test('API 地址填的是 http:// 时提示明文传输（不分大小写、忽�
   await expect(warning).toBeVisible()
   await base.fill('')
   await expect(warning).toHaveCount(0)
+})
+
+test('Anthropic / Gemini 的地址只写了主机名时提示要带版本段（/v1、/v1beta）；带了、留空、OpenAI 兼容、写不成地址都不提示', async ({ page }) => {
+  await prepare(page)
+  const drawer = await openNew(page)
+  const base = drawer.locator('#d-base')
+  const hint = drawer.getByRole('note').filter({ hasText: '这个协议的地址要带版本段' })
+  // 「连接设置」折叠区：换协议会把它重新收起，每次要看地址框前先确保它是开的
+  const openConnection = async () => {
+    if (!(await base.isVisible())) await drawer.locator('#channel-connection-options > summary').click()
+    await expect(base).toBeVisible()
+  }
+  await openConnection()
+
+  // OpenAI 兼容：有的厂商本来就不带 /v1，不提示
+  await base.fill('https://relay.example.test:8893')
+  await expect(hint).toHaveCount(0)
+
+  // 同一个只有主机名的地址，换成 Anthropic 协议就要提示
+  await drawer.locator('#d-provider').selectOption('anthropic')
+  await openConnection()
+  await expect(hint).toBeVisible()
+  await base.fill('http://38.92.24.38:8893')
+  await expect(hint).toBeVisible()
+  await expect(hint).toContainText('官方是 https://api.anthropic.com/v1')
+  await base.fill('  https://relay.example.test:8893/  ')
+  await expect(hint).toBeVisible()
+  await base.fill('https://relay.example.test:8893/v1')
+  await expect(hint).toHaveCount(0)
+  await base.fill('https://relay.example.test/openai/anthropic')
+  await expect(hint).toHaveCount(0)
+  await base.fill('not a url')
+  await expect(hint).toHaveCount(0)
+  await base.fill('')
+  await expect(hint).toHaveCount(0)
+
+  await drawer.locator('#d-provider').selectOption('gemini')
+  await openConnection()
+  await base.fill('https://relay.example.test:8893')
+  await expect(hint).toContainText('官方是 https://generativelanguage.googleapis.com/v1beta')
+})
+
+test('拉取上游回的是网页（地址缺 /v1）：提示原因，而不是「请求参数有误（upstream_models_not_json）」', async ({ page }) => {
+  await prepare(page)
+  const drawer = await openNew(page)
+  await drawer.locator('#d-cred').fill('sk-page')
+  await drawer.getByRole('button', { name: '拉取上游模型' }).click()
+  const alert = page.getByRole('alert')
+  await expect(alert).toContainText('上游返回的是网页而不是模型列表')
+  await expect(alert).not.toContainText('upstream_models_not_json')
 })
 
 test('拉取失败不动清单，错误提示出来；没有定价读取权限时照样能拉，只是不提示价簿缺口', async ({ page }) => {

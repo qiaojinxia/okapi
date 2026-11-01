@@ -249,6 +249,18 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
   await expect(page.getByRole('alert').filter({ hasText: /模型 gpt-5 调不通（model_not_found）：unknown model xyz/ })).toBeVisible()
   await dismissToasts(page)
 
+  // 2xx 却是站点网页（地址缺 /v1）：不是「调不通（代码）」的通用提示，直接说原因
+  await page.route('**/admin/channels/*/test', async (route) => {
+    record(route)
+    await route.fulfill({
+      json: { ok: false, scope: 'model', error_code: 'upstream_not_json', upstream_body: '<!doctype html><html lang="en">' },
+    })
+  })
+  await openai.getByRole('button', { name: '测试', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: /上游返回的是网页而不是 JSON：API 地址多半缺了版本段/ })).toBeVisible()
+  await expect(page.getByRole('alert').filter({ hasText: '调不通' })).toHaveCount(0)
+  await dismissToasts(page)
+
   await page.route('**/admin/channels/*/test', async (route) => {
     record(route)
     await route.fulfill({ json: { ok: false, error_code: 'upstream_timeout' } })

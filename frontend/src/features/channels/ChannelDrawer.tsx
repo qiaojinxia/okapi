@@ -30,6 +30,7 @@ import {
   defaultApiBase,
   defaultResponsesNative,
   isCloudManaged,
+  needsVersionSegment,
   ratioToCostMilli,
   readSettings,
   speaksOpenAi,
@@ -46,7 +47,7 @@ import {
 } from '@/features/channels/PoolMembership'
 import type { PoolMember } from '@/features/pools/types'
 import { toast } from '@/components/ui/toast'
-import { apiFetch } from '@/lib/api'
+import { ApiError, apiFetch } from '@/lib/api'
 import { configuredModelsOptions } from '@/features/models/configured-models'
 import { describeError } from '@/lib/i18n'
 import { parseInt32 } from '@/lib/int32'
@@ -346,7 +347,10 @@ export function ChannelDrawer({
       setUnknownModels(unknown)
       toast.success(t('admin:discovered', { n: found.length, added: added.length }))
     },
-    onError: (err) => toast.error(describeError(err)),
+    // 上游回了 200 却不是 JSON（站点的网页前端）：几乎都是地址缺了版本段，通用的「请求参数有误」说不清
+    onError: (err) => toast.error(
+      err instanceof ApiError && err.param === 'upstream_models_not_json' ? t('admin:discoverNotJson') : describeError(err),
+    ),
   })
   const scheduleCustom = form.priority !== '0' || form.cost !== '1'
   const scheduleSummary = scheduleCustom
@@ -361,6 +365,9 @@ export function ChannelDrawer({
     <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
     <Input id="d-base" value={form.api_base} placeholder={defaultBase ?? apiBasePlaceholder(form.provider)} required={endpointRequired}
       onChange={(e) => setForm((f) => ({ ...f, api_base: e.target.value }))} />
+    {needsVersionSegment(form.provider, form.api_base) && (
+      <p role="note" className="text-xs text-warning">{t('admin:apiBaseVersionHint', { example: apiBasePlaceholder(form.provider) })}</p>
+    )}
     {/^http:\/\//i.test(form.api_base.trim()) && <p role="note" className="text-xs text-warning">{t('admin:apiBaseHttpWarning')}</p>}
     {form.provider === 'azure' && <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>}
     {form.provider === 'bedrock' && <p className="text-xs text-muted-foreground">{t('admin:bedrockApiBaseHint')}</p>}

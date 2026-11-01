@@ -189,6 +189,8 @@ export function ChannelsPage() {
     },
     onSuccess: (r, c) => {
       if (r.ok) toast.success(shownName(c), t('admin:testOk', { ms: r.latency_ms ?? 0 }))
+      // 2xx 却是网页：地址缺版本段（/v1）或指到了站点首页，网关已不再把它当成功
+      else if (r.error_code === 'upstream_not_json') toast.error(shownName(c), t('admin:testNotJson'))
       else if (r.scope === 'model')
         toast.error(
           shownName(c),
