@@ -107,7 +107,7 @@ async fn run(archived: bool) {
                     .await
                     .unwrap(),
             );
-            env.state.channel_cost_cache.invalidate_all();
+            env.state.routing.channel_cost_cache.invalidate_all();
             let body = json!({"request_id":id,"reason":"refund provenance"});
             let first = post(&env, "/admin/billing/refund", &body).await;
             assert_eq!(first["refunded_micro"], expected_amount);

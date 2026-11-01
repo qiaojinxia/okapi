@@ -147,7 +147,7 @@ pub(super) async fn count_via_upstream(
         match super::super::oauth_cred::fresh_credential(state, cand).await {
             Ok(cred) => {
                 okapi_providers::oauth::anthropic_max::count_tokens(
-                    state.anthropic.http(),
+                    state.upstreams.anthropic.http(),
                     &base,
                     &cred.access_token,
                     body_up,
@@ -160,6 +160,7 @@ pub(super) async fn count_via_upstream(
         }
     } else {
         state
+            .upstreams
             .anthropic
             .count_tokens(&base, &cand.credential, body_up, &outbound)
             .await

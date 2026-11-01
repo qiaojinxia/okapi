@@ -263,7 +263,11 @@ async fn refresh_with_lock(
     {
         return Err(UpstreamError::Build("oauth_refresh_not_available".into()));
     }
-    let gate = state.refresh_gate.key_mutex(key.channel_key_id).await;
+    let gate = state
+        .upstreams
+        .refresh_gate
+        .key_mutex(key.channel_key_id)
+        .await;
     let _local = gate.lock().await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
     let owner = loop {
@@ -599,7 +603,7 @@ async fn do_refresh(
         .filter(|hook| hook.capabilities().refresh)
         .ok_or_else(|| UpstreamError::Build("oauth_credential_expected".to_owned()))?;
     hook.refresh(okapi_providers::account::RefreshContext {
-        http: state.upstream.http(),
+        http: state.upstreams.openai.http(),
         token_url: key.token_url,
         refresh_token: &basis.refresh_token,
         scope: basis.scope.as_deref(),

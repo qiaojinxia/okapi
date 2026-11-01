@@ -327,7 +327,7 @@ async fn downloads_hold_capacity_until_body_drop_and_do_not_require_a_balance() 
         b"private image"
     );
     drop(held);
-    assert_eq!(env.state.image_download_gate.available_permits(), 4);
+    assert_eq!(env.state.media.image_download_gate.available_permits(), 4);
     let other = format!("sk-download-other-{}", Uuid::new_v4());
     okapi_store::provision::create_api_key(
         &env.state.pg,

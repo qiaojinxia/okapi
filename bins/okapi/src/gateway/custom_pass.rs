@@ -185,7 +185,7 @@ async fn handle(
         .await?
         .ok_or_else(|| crate::kernel::sched_redis::channel_permit::blocked("concurrency"))?;
         let response = tokio::select! {
-            result = state.pass.forward(pass_req) => result,
+            result = state.upstreams.pass.forward(pass_req) => result,
             () = permit.expired() => Err(crate::kernel::sched_redis::channel_permit::blocked("concurrency_lease_lost")),
         }?;
         Ok(response.with_guard(permit))

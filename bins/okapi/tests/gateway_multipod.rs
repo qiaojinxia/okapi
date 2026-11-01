@@ -81,6 +81,7 @@ async fn routing_invalidate_broadcasts_across_instances() {
     // 给"另一个 pod"的缓存塞一条，模拟它正拿着旧配置服务
     let model = format!("mp-{}", Uuid::new_v4().simple());
     subscriber
+        .routing
         .model_cache
         .insert(
             model.clone(),
@@ -92,7 +93,7 @@ async fn routing_invalidate_broadcasts_across_instances() {
         )
         .await;
     assert!(
-        subscriber.model_cache.get(&model).await.is_some(),
+        subscriber.routing.model_cache.get(&model).await.is_some(),
         "先确认缓存里确实有"
     );
 
@@ -102,7 +103,7 @@ async fn routing_invalidate_broadcasts_across_instances() {
     // 另一个 pod 应在广播到达后立刻清掉（而不是等 60s TTL）
     let mut cleared = false;
     for _ in 0..40 {
-        if subscriber.model_cache.get(&model).await.is_none() {
+        if subscriber.routing.model_cache.get(&model).await.is_none() {
             cleared = true;
             break;
         }

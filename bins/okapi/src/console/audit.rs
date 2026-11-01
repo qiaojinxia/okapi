@@ -276,7 +276,7 @@ pub async fn my_logins(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     let actor = format!("user:{}", key.user_id);
     let rows = sqlx::query!(
         r#"SELECT action, detail, created_at FROM audit_logs

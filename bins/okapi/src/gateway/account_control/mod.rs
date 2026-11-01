@@ -11,7 +11,7 @@ use policy::{ForecastMode, Policy};
 use std::{future::Future, sync::Arc};
 
 pub async fn policy(state: &AppState, channel: i64) -> Result<Arc<Policy>, UpstreamError> {
-    if let Some(value) = state.channel_control_cache.get(&channel).await {
+    if let Some(value) = state.routing.channel_control_cache.get(&channel).await {
         return Ok(value);
     }
     let settings: Option<serde_json::Value> = sqlx::query_scalar(
@@ -24,6 +24,7 @@ pub async fn policy(state: &AppState, channel: i64) -> Result<Arc<Policy>, Upstr
     let settings = settings.ok_or_else(|| blocked("channel_disabled"))?;
     let policy = Arc::new(Policy::parse(&settings).map_err(|_| blocked("invalid_policy"))?);
     state
+        .routing
         .channel_control_cache
         .insert(channel, policy.clone())
         .await;

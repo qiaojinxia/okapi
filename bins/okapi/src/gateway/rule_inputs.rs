@@ -105,7 +105,7 @@ pub async fn track_in_flight(State(state): State<AppState>, req: Request, next: 
 /// 持有计数守卫直到响应体流结束（含客户端中断——Drop 一样触发）。
 struct GuardedBody {
     inner: Pin<Box<axum::body::BodyDataStream>>,
-    guard: Option<super::inflight::InFlightGuard>,
+    guard: Option<crate::kernel::inflight::InFlightGuard>,
 }
 
 impl Stream for GuardedBody {

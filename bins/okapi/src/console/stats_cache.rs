@@ -1,9 +1,10 @@
 //! Opt-in dashboard query cache. Guards run before this helper; errors aren't cached.
-//! 缓存本体挂在 `AppState` 上，类型与构造在 `gateway::state`（网关构造状态时不引用 console）。
-#[cfg(test)]
-use crate::gateway::state::build_query_cache as build;
-use crate::gateway::state::{AppState, QueryCache};
+//! 缓存本体挂在 `CoreState` 上，类型与构造在 `kernel::state`（网关构造状态时不引用 console）。
+use crate::gateway::state::AppState;
 use crate::kernel::error::AppError;
+use crate::kernel::state::QueryCache;
+#[cfg(test)]
+use crate::kernel::state::build_query_cache as build;
 use axum::http::HeaderMap;
 use serde_json::Value;
 use std::{future::Future, sync::Arc};

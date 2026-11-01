@@ -113,7 +113,7 @@ pub async fn lift(
             AppError::internal()
         })?;
     // 同进程立即生效；其它副本靠 10s TTL 收敛
-    state.margin_cache.invalidate_all();
+    state.routing.margin_cache.invalidate_all();
     audit(
         &state,
         &actor,

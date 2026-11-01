@@ -410,7 +410,7 @@ async fn retired_stores_remain_readable_and_reusing_an_id_cannot_redirect_privat
     assert_eq!(bucket.gets.load(Ordering::SeqCst), 0);
     let mut retired = config(address);
     retired["active"] = Value::Null;
-    env.state.image_storage =
+    env.state.media.image_storage =
         Arc::new(Storage::new(serde_json::from_value(retired.clone()).unwrap()).unwrap());
     env.address = serve(gateway::router(env.state.clone())).await;
     assert_eq!(
@@ -418,7 +418,7 @@ async fn retired_stores_remain_readable_and_reusing_an_id_cannot_redirect_privat
         PNG
     );
     retired["stores"][0]["bucket"] = json!("another-bucket");
-    env.state.image_storage =
+    env.state.media.image_storage =
         Arc::new(Storage::new(serde_json::from_value(retired).unwrap()).unwrap());
     env.address = serve(gateway::router(env.state.clone())).await;
     let response = download(&env, &task).await;

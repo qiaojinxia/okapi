@@ -3366,11 +3366,36 @@ gateway 原先兼做「数据面」和「各角色共用的底层」：console �
 
 `AppState`（`gateway::state`）与鉴权（`gateway::auth`）仍在 gateway：AppState 的字段（上游客户端、图片对象存储、额度策略缓存……）
 与方法（结算重试、候选缓存、额度预判……）都挂着数据面，鉴权又读写 AppState。console 现在对 gateway 的引用主要就是这两个
-（state 74 处、auth 21 处），其余是它真要调用的数据面能力（playground、测活、OAuth 刷新、诊断）。拆开 AppState 之后它们才能进 kernel。
+（state 74 处、auth 21 处），其余是它真要调用的数据面能力（playground、测活、OAuth 刷新、诊断）。拆开 AppState 之后它们才能进 kernel。（同日 §11.58 已拆：共用状态与鉴权进了 kernel。）
 
 早先章节里的 `gateway::extract`、`gateway::clients::TrustPolicy`、`gateway/sched_redis.rs`、`console::ssrf` / `gateway/ssrf.rs` 指的就是上表这几个模块。
 `scripts/guard-error-codes.py` 对 `Self::new(StatusCode::…)` 的扫描限定在 error.rs 所在路径，已随之改成 `kernel/error.rs`——不改的话这几处
 error_code 会被静默漏扫（CI 照样绿）。
+
+### 11.58 AppState 按用途分组，共用状态与鉴权进 `kernel`（2026-11-01）
+
+`AppState` 原先是 38 个平铺的字段，各角色共用的连接与数据面专用的缓存、闸、上游客户端混在一起，
+console / worker 拿到的永远是整个数据面。现在拆成两层，行为不变：
+
+| 位置 | 内容 |
+|---|---|
+| `kernel::state::CoreState`（`state.core`） | pg、ledger、sched、pricebook、node、ch、nats、master_key、settings 缓存（连同 `setting_cached` / `try_setting_cached` / `record_ip_log`）、看板查询缓存、在途量计数（`kernel::inflight`）、下线跟踪 `settlements` |
+| `state.upstreams` | 七个上游客户端（原 `upstream` 改名 `openai`）与订阅凭证刷新的单飞闸 `refresh_gate` |
+| `state.routing` | 模型 / 候选 / 渠道成本 / 账号控制策略 / 负毛利熔断的进程内缓存 |
+| `state.health` | 渠道 key 与出口代理的失败标记 |
+| `state.flow` | 按用户排队（准入、结算）、结算写入闸、积压上界与泄压态 |
+| `state.media` | 图片下载 / 批量提交的并发闸与私有对象存储 |
+
+`AppState` `Deref` / `DerefMut` 到 `CoreState`：`state.pg`、`state.sched`、`state.setting_cached(..)` 这类访问照旧，
+测试里改 `state.ch` 之类也照旧；数据面字段要写全组名（`state.flow.settle_backlog_max`）。只用到共用部分的函数收
+`&CoreState`，传 `&AppState` 时自动解引用。
+
+鉴权 `authenticate`（连同会话 cookie 与无效 key 计数）挪到 `kernel::auth`，收 `&CoreState`；数据面在它前后另加的
+准入（结算积压泄压、key 级 IP 白名单）留在 `gateway::auth::authenticate_data_plane`，成员月限、分组限流、结算计数
+也留在 gateway。数据面的方法（预扣、结算、候选、额度预判……）仍是 `impl AppState`，在 gateway 里。
+
+之后若要让 console 的处理器只依赖 kernel，只读共用部分的处理器可以改用 `State<CoreState>`（axum `FromRef`）；
+playground、测活、OAuth 刷新、诊断这些确实要调数据面的，继续用 `AppState`。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

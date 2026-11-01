@@ -7,8 +7,8 @@
 //!   payment_epay   = {gateway_url, pid, key, usd_to_cny_milli?=7000}
 //!   payment_stripe = {secret_key, webhook_secret, api_base?=https://api.stripe.com}
 
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
@@ -304,6 +304,7 @@ pub async fn place_order(
                 .to_owned();
             crate::kernel::ssrf::validate_api_base(&state.pg, &api).await?;
             let resp = state
+                .upstreams
                 .pass
                 .probe(PassRequest {
                     method: axum::http::Method::POST,

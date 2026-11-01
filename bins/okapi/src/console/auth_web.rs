@@ -31,7 +31,7 @@ pub use self::sessions::{
 };
 pub(super) use self::sessions::{open_web_session, secure_cookie, session_cookie};
 
-use crate::gateway::auth::{SESSION_COOKIE, session_id};
+use crate::kernel::auth::{SESSION_COOKIE, session_id};
 
 /// 直连 socket 地址的可缺省提取器（serve 未挂 with_connect_info 时为 None，
 /// 如集成测试的裸 serve；生产 console 已挂，见 mod.rs run）。

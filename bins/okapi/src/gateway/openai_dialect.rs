@@ -72,7 +72,8 @@ impl AppState {
         super::account_control::execute(self, cand, model, path, async {
             if is_azure(cand) {
                 let (endpoint, version) = azure_target(cand)?;
-                self.azure
+                self.upstreams
+                    .azure
                     .image_stream(
                         endpoint,
                         version,
@@ -84,7 +85,8 @@ impl AppState {
                     )
                     .await
             } else {
-                self.upstream
+                self.upstreams
+                    .openai
                     .image_stream(
                         &openai_base(cand),
                         path,
@@ -140,7 +142,8 @@ impl AppState {
         super::account_control::execute(self, cand, upstream_model, path, async {
             if is_azure(cand) {
                 let (endpoint, api_version) = azure_target(cand)?;
-                self.azure
+                self.upstreams
+                    .azure
                     .json_relay(
                         endpoint,
                         api_version,
@@ -152,7 +155,8 @@ impl AppState {
                     )
                     .await
             } else {
-                self.upstream
+                self.upstreams
+                    .openai
                     .json_relay(
                         &openai_base(cand),
                         path,
@@ -176,7 +180,8 @@ impl AppState {
         super::account_control::execute(self, cand, upstream_model, "/v1/audio/speech", async {
             if is_azure(cand) {
                 let (endpoint, api_version) = azure_target(cand)?;
-                self.azure
+                self.upstreams
+                    .azure
                     .speech(
                         endpoint,
                         api_version,
@@ -187,7 +192,8 @@ impl AppState {
                     )
                     .await
             } else {
-                self.upstream
+                self.upstreams
+                    .openai
                     .speech(&openai_base(cand), &cand.credential, body, &outbound(cand))
                     .await
             }
@@ -206,7 +212,8 @@ impl AppState {
         super::account_control::execute(self, cand, upstream_model, path, async {
             if is_azure(cand) {
                 let (endpoint, api_version) = azure_target(cand)?;
-                self.azure
+                self.upstreams
+                    .azure
                     .audio_multipart(
                         endpoint,
                         api_version,
@@ -218,7 +225,8 @@ impl AppState {
                     )
                     .await
             } else {
-                self.upstream
+                self.upstreams
+                    .openai
                     .audio_multipart(
                         &openai_base(cand),
                         path,

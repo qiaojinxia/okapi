@@ -18,7 +18,6 @@ pub(crate) mod execution_plan;
 pub(crate) mod extensions;
 pub(crate) mod failure;
 pub mod images;
-pub mod inflight;
 pub(crate) mod ingress;
 pub(crate) mod key_gate;
 pub(crate) mod key_health;
@@ -80,7 +79,7 @@ pub(crate) async fn build_state_with_resources(
     estimate::warm_up();
     let ledger = BalanceLedger::new(redis.clone());
     let sched = crate::kernel::sched_redis::SchedulerRedis::new(redis);
-    let in_flight = inflight::InFlightGauge::new(sched.clone(), node);
+    let in_flight = crate::kernel::inflight::InFlightGauge::new(sched.clone(), node);
 
     let book = crate::kernel::pricing_loader::load_pricebook(&pg).await?;
     tracing::info!(epoch = book.epoch(), "PriceBook 已装载");
@@ -113,84 +112,96 @@ pub(crate) async fn build_state_with_resources(
         .map_err(|e| anyhow::anyhow!("provider registration: {e}"))?;
     let upstream = resources.openai.clone();
     let state = AppState {
-        #[cfg(test)]
-        settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
-        pg,
-        ledger,
-        sched,
-        pricebook: Arc::new(PriceBookHandle::new(book)),
-        model_cache: moka::future::Cache::builder()
-            .time_to_live(Duration::from_mins(1))
-            .max_capacity(100_000)
-            .build(),
-        cand_cache: moka::future::Cache::builder()
-            .time_to_live(Duration::from_secs(5))
-            .max_capacity(100_000)
-            .build(),
-        azure: okapi_providers::AzureUpstream::new(upstream.clone()),
-        upstream,
-        inference,
-        anthropic: resources.anthropic,
-        bedrock: resources.bedrock,
-        vertex: resources.vertex,
-        pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,
-        node: Arc::from(node),
-        ch,
-        stats_query_cache: state::build_query_cache(),
-        nats,
-        master_key: {
-            let key = crate::config::master_key_from_env();
-            okapi_store::credential::warn_if_unprotected(key.as_deref());
-            key.map(Arc::from)
+        core: crate::kernel::state::CoreState {
+            pg,
+            ledger,
+            sched,
+            pricebook: Arc::new(PriceBookHandle::new(book)),
+            node: Arc::from(node),
+            ch,
+            stats_query_cache: crate::kernel::state::build_query_cache(),
+            nats,
+            master_key: {
+                let key = crate::config::master_key_from_env();
+                okapi_store::credential::warn_if_unprotected(key.as_deref());
+                key.map(Arc::from)
+            },
+            settings_cache: moka::future::Cache::builder()
+                .max_capacity(256)
+                .time_to_live(std::time::Duration::from_mins(1))
+                .build(),
+            in_flight,
+            settlements: crate::shutdown::Pending::default(),
         },
-        settings_cache: moka::future::Cache::builder()
-            .max_capacity(256)
-            .time_to_live(std::time::Duration::from_mins(1))
-            .build(),
-        // 容量 = pool 的一半：留一半连接给点查/鉴权回源等前台路径
-        settle_gate: Arc::new(tokio::sync::Semaphore::new(
-            okapi_store::env_config::number("OKAPI_PG_POOL", 16usize, |v| *v > 0).div_ceil(2),
-        )),
-        image_download_gate: Arc::new(tokio::sync::Semaphore::new(4)),
-        batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
-        image_storage: Arc::new(images::tasks::objects::Storage::from_env()?),
-        in_flight,
-        channel_control_cache: moka::future::Cache::builder()
-            .max_capacity(4096)
-            .time_to_live(Duration::from_secs(5))
-            .build(),
-        key_failures: moka::future::Cache::builder()
-            .max_capacity(100_000)
-            .time_to_live(Duration::from_hours(24))
-            .build(),
-        egress_failures: moka::future::Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_hours(24))
-            .build(),
-        egress_verifying: moka::future::Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_mins(1))
-            .build(),
-        admission_turns: user_turns::UserTurns::default(),
-        settlement_turns: user_turns::UserTurns::default(),
-        channel_cost_cache: moka::future::Cache::builder()
-            .max_capacity(4096)
-            .time_to_live(std::time::Duration::from_mins(1))
-            .build(),
-        margin_cache: moka::future::Cache::builder()
-            .max_capacity(1)
-            .time_to_live(Duration::from_secs(10))
-            .build(),
-        refresh_gate: Arc::default(),
-        settlements: crate::shutdown::Pending::default(),
-        settle_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        // 缺省 ≈ 档位一 PG 记账速率（约 1k TPS）× 30s 下线窗口（§12.2 / §14.3）
-        settle_backlog_max: okapi_store::env_config::number(
-            "OKAPI_SETTLE_BACKLOG_MAX",
-            20_000usize,
-            |_| true,
-        ),
-        settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        upstreams: state::Upstreams {
+            azure: okapi_providers::AzureUpstream::new(upstream.clone()),
+            openai: upstream,
+            inference,
+            anthropic: resources.anthropic,
+            bedrock: resources.bedrock,
+            vertex: resources.vertex,
+            pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,
+            refresh_gate: Arc::default(),
+        },
+        routing: state::RoutingCaches {
+            model_cache: moka::future::Cache::builder()
+                .time_to_live(Duration::from_mins(1))
+                .max_capacity(100_000)
+                .build(),
+            cand_cache: moka::future::Cache::builder()
+                .time_to_live(Duration::from_secs(5))
+                .max_capacity(100_000)
+                .build(),
+            channel_cost_cache: moka::future::Cache::builder()
+                .max_capacity(4096)
+                .time_to_live(std::time::Duration::from_mins(1))
+                .build(),
+            channel_control_cache: moka::future::Cache::builder()
+                .max_capacity(4096)
+                .time_to_live(Duration::from_secs(5))
+                .build(),
+            margin_cache: moka::future::Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(10))
+                .build(),
+        },
+        health: state::HealthMarks {
+            key_failures: moka::future::Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(Duration::from_hours(24))
+                .build(),
+            egress_failures: moka::future::Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_hours(24))
+                .build(),
+            egress_verifying: moka::future::Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_mins(1))
+                .build(),
+        },
+        flow: state::FlowControl {
+            admission_turns: user_turns::UserTurns::default(),
+            settlement_turns: user_turns::UserTurns::default(),
+            // 容量 = pool 的一半：留一半连接给点查/鉴权回源等前台路径
+            settle_gate: Arc::new(tokio::sync::Semaphore::new(
+                okapi_store::env_config::number("OKAPI_PG_POOL", 16usize, |v| *v > 0).div_ceil(2),
+            )),
+            settle_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            // 缺省 ≈ 档位一 PG 记账速率（约 1k TPS）× 30s 下线窗口（§12.2 / §14.3）
+            settle_backlog_max: okapi_store::env_config::number(
+                "OKAPI_SETTLE_BACKLOG_MAX",
+                20_000usize,
+                |_| true,
+            ),
+            settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
+        },
+        media: state::Media {
+            image_download_gate: Arc::new(tokio::sync::Semaphore::new(4)),
+            batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
+            image_storage: Arc::new(images::tasks::objects::Storage::from_env()?),
+        },
     };
     // 出站连接的 SSRF 校验从第一个请求起就按库里的策略走，而不是先严格 / 先宽松再等第一次轮询
     sync_ssrf_policy(&state).await;

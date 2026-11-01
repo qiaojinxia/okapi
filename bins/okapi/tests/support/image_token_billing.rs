@@ -185,7 +185,7 @@ async fn insufficient_balance_and_tpm_reject_before_upstream() {
         .execute(&env.state.pg)
         .await
         .unwrap();
-    env.state.model_cache.invalidate_all();
+    env.state.routing.model_cache.invalidate_all();
     let reply = env.request(false).json(&env.body(1)).send().await.unwrap();
     assert_eq!(reply.status(), 429);
     assert_eq!(

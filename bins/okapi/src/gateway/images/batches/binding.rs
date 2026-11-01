@@ -155,6 +155,7 @@ impl Binding {
             "vertex" => {
                 let config = self.gcs.as_ref().ok_or_else(AppError::internal)?;
                 let token = state
+                    .upstreams
                     .vertex
                     .access_token(&self.credential, &outbound)
                     .await

@@ -56,7 +56,12 @@ pub(super) async fn run_probe(
     proxy_url: &str,
     target: &str,
 ) -> (Value, ProbeOutcome) {
-    match okapi_providers::egress_probe::probe(state.upstream.http(), Some(proxy_url), target).await
+    match okapi_providers::egress_probe::probe(
+        state.upstreams.openai.http(),
+        Some(proxy_url),
+        target,
+    )
+    .await
     {
         Ok(result) => (
             json!({

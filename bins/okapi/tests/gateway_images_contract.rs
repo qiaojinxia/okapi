@@ -236,7 +236,7 @@ async fn setup_at(
         .await
         .unwrap();
     if let Some(storage) = storage {
-        state.image_storage = storage;
+        state.media.image_storage = storage;
     }
     state
         .ledger

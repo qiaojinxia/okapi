@@ -4,8 +4,8 @@
 //! 鉴权缓存失效（分组变了就 `auth_flush`，网关 60s 缓存立刻作废）。
 
 use super::admin::{audit, guard};
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use crate::kernel::extract::Path;
 use crate::kernel::extract::{Json as ExtractJson, Query};

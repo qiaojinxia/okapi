@@ -88,7 +88,7 @@ async fn setup() -> TestEnv {
         .await
         .unwrap();
     // 上界压到 1：第三笔起就该被拒（判定是"超过"而非"达到"）
-    state.settle_backlog_max = 1;
+    state.flow.settle_backlog_max = 1;
     state
         .ledger
         .credit(user_id, Money::from_micros(10_000_000))
@@ -133,14 +133,14 @@ impl TestEnv {
     /// 成功响应等待持久记账；等后台任务进入写入闸再发下一笔。
     async fn wait_backlog(&self, expected: usize) {
         for _ in 0..50 {
-            if self.state.settle_backlog.load(Ordering::SeqCst) == expected {
+            if self.state.flow.settle_backlog.load(Ordering::SeqCst) == expected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!(
             "settle_backlog 未在 2.5s 内到达 {expected}（当前 {}）",
-            self.state.settle_backlog.load(Ordering::SeqCst)
+            self.state.flow.settle_backlog.load(Ordering::SeqCst)
         );
     }
 
@@ -158,7 +158,7 @@ impl TestEnv {
 #[tokio::test]
 async fn backlog_over_cap_sheds_before_reserve_and_recovers() {
     let env = Arc::new(setup().await);
-    let gate = env.state.settle_gate.clone();
+    let gate = env.state.flow.settle_gate.clone();
     // 占满写入闸：PG 尚未提交，Redis 预扣仍在，成功响应也必须等待。
     let permits = gate
         .clone()
@@ -225,7 +225,7 @@ async fn backlog_over_cap_sheds_before_reserve_and_recovers() {
         "被拒的请求不得新增预扣，也不能清掉前两笔"
     );
     assert_eq!(
-        env.state.settle_backlog.load(Ordering::SeqCst),
+        env.state.flow.settle_backlog.load(Ordering::SeqCst),
         2,
         "被拒的请求不产生新结算"
     );
@@ -258,8 +258,11 @@ async fn backlog_over_cap_sheds_before_reserve_and_recovers() {
 
     // `OKAPI_SETTLE_BACKLOG_MAX=0` = 不设限（压测网关自身开销的口径）：准入函数直接验证
     let mut unbounded = env.state.clone();
-    unbounded.settle_backlog_max = 0;
-    unbounded.settle_backlog.store(1_000_000, Ordering::SeqCst);
+    unbounded.flow.settle_backlog_max = 0;
+    unbounded
+        .flow
+        .settle_backlog
+        .store(1_000_000, Ordering::SeqCst);
     assert!(unbounded.check_settle_backlog().is_ok());
-    unbounded.settle_backlog.store(0, Ordering::SeqCst);
+    unbounded.flow.settle_backlog.store(0, Ordering::SeqCst);
 }

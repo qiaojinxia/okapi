@@ -304,7 +304,7 @@ pub(crate) async fn playground_parameters(
     model: &str,
 ) -> Result<okapi_providers::model_parameters::ParameterProfile, AppError> {
     use okapi_providers::model_parameters::{self, ParameterProfile};
-    let key = super::super::auth::authenticate(state, headers).await?;
+    let key = crate::kernel::auth::authenticate(state, headers).await?;
     let Some((meta, _, _)) = resolve_with_directive(state, model).await? else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };

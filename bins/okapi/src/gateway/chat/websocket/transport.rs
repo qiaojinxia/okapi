@@ -175,7 +175,7 @@ async fn connect_once(
         .map(|(n, v)| (n.as_str(), v.as_str()))
         .collect();
     ResponsesSocket::connect(
-        bill.state.upstream.http(),
+        bill.state.upstreams.openai.http(),
         &credentials.url,
         &headers,
         &credentials.outbound,
@@ -211,7 +211,7 @@ pub(super) fn http(
             .map(|(n, v)| (n.as_str(), v.as_str()))
             .collect();
         let handle = okapi_providers::responses_bridge::send(
-            bill.state.upstream.http(),
+            bill.state.upstreams.openai.http(),
             credentials.url,
             &headers,
             body,

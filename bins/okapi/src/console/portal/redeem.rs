@@ -1,6 +1,6 @@
 //! 兑换码核销（钱包与订阅两类）。
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;

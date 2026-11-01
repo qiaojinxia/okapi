@@ -175,6 +175,7 @@ pub async fn content(
                 .map_err(|_| AppError::internal());
         }
         let permit = state
+            .media
             .image_download_gate
             .clone()
             .try_acquire_owned()

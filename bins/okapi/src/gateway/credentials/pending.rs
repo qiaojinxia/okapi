@@ -69,6 +69,7 @@ impl Memory {
 pub async fn put(state: &AppState, key: i64, expected: &[u8], next: &OAuthCredential) {
     let expected = fingerprint(expected);
     state
+        .upstreams
         .refresh_gate
         .pending
         .put(key, expected.clone(), next.clone());
@@ -117,7 +118,7 @@ pub async fn take(
     current: &[u8],
 ) -> Result<Option<OAuthCredential>, &'static str> {
     let current = fingerprint(current);
-    if let Some(next) = state.refresh_gate.pending.get(key, &current) {
+    if let Some(next) = state.upstreams.refresh_gate.pending.get(key, &current) {
         return Ok(Some(next));
     }
     let raw: Option<String> = state
@@ -146,7 +147,7 @@ pub async fn take(
 
 /// 补写成功、或库里的 key 已失效 / 被换掉：两处一起清。
 pub async fn clear(state: &AppState, key: i64) {
-    state.refresh_gate.pending.clear(key);
+    state.upstreams.refresh_gate.pending.clear(key);
     let _: Result<i64, _> = state.sched.client().del(redis_key(key)).await;
 }
 

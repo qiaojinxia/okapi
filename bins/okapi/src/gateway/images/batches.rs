@@ -119,6 +119,7 @@ async fn submit(state: &AppState, req: Request, id: Uuid) -> Result<Batch, AppEr
         return Err(not_found());
     }
     let _permit = state
+        .media
         .batch_submit_gate
         .clone()
         .try_acquire_owned()

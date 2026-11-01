@@ -1,15 +1,10 @@
 mod settlement;
-use crate::kernel::error::AppError;
-use crate::kernel::sched_redis::SchedulerRedis;
+use crate::kernel::state::CoreState;
 use moka::future::Cache;
-use okapi_ledger::BalanceLedger;
-use okapi_pricing::PriceBookHandle;
 use okapi_providers::{
     AnthropicUpstream, AzureUpstream, BedrockUpstream, OpenAiUpstream, PassUpstream, VertexUpstream,
 };
-use okapi_store::ChClient;
 use okapi_store::channels::{ChannelCandidate, ResolvedModel};
-use sqlx::PgPool;
 use std::sync::Arc;
 
 /// 路由/配置缓存失效广播主题（与 `pricing.epoch` 同一条 NATS 通道）。
@@ -36,40 +31,41 @@ pub struct Retained {
 
 /// gateway 共享状态：热路径只碰 Redis 与上游（IMPLEMENTATION §2.1）。
 /// 鉴权缓存在 Redis（docs/database.md §2.1 auth:key:*，console 跨进程失效）；
-/// 下面两个进程内短缓存消除热路径 PG 读，console 写路径主动失效（同进程即时，
-/// 多副本靠 TTL 收敛）。
-/// 控制台看板查询缓存：SQL + 绑定参数 → 结果行。
-pub(crate) type QueryCache = Cache<String, Arc<Vec<serde_json::Value>>>;
-
-pub(crate) fn build_query_cache() -> QueryCache {
-    Cache::builder()
-        .max_capacity(16 * 1024 * 1024)
-        .weigher(|key: &String, rows: &Arc<Vec<serde_json::Value>>| {
-            let bytes = serde_json::to_vec(rows.as_ref()).map_or(usize::MAX, |v| v.len());
-            u32::try_from(key.len().saturating_add(bytes)).unwrap_or(u32::MAX)
-        })
-        // 运营概览每分钟自动刷新一次：15s 时每次都落空，多个管理员 / 标签页也各算一遍
-        .time_to_live(std::time::Duration::from_mins(1))
-        .build()
-}
-
+/// 进程内短缓存消除热路径 PG 读，console 写路径主动失效（同进程即时，多副本靠 TTL 收敛）。
+///
+/// 按用途分组（§11.58）：各角色共用的部分在 `core`（`kernel::state::CoreState`，本类型 `Deref` 到它，
+/// `state.pg` / `state.sched` 等照旧可用）；其余是数据面的——上游客户端、路由缓存、健康标记、
+/// 准入与结算的流控、媒体端点的闸与对象存储。
 #[derive(Clone)]
 pub struct AppState {
-    /// Unit tests must not expose their settlement journal to a live worker.
-    #[cfg(test)]
-    pub(crate) settlement_journal_tag: Arc<str>,
-    pub pg: PgPool,
-    pub ledger: BalanceLedger,
-    /// 调度/鉴权 Redis：会话粘性 + 并发信号量 + auth:key 缓存。
-    pub sched: SchedulerRedis,
-    pub pricebook: Arc<PriceBookHandle>,
-    /// 模型解析缓存（canonical + max_output，60s）。
-    pub model_cache: Cache<String, Arc<Option<ResolvedModel>>>,
-    /// 渠道候选缓存（model|groups → 候选行，5s；渠道状态分钟级变化可容忍）。
-    pub cand_cache: Cache<String, Arc<Vec<ChannelCandidate>>>,
-    pub upstream: OpenAiUpstream,
+    pub core: CoreState,
+    pub upstreams: Upstreams,
+    pub routing: RoutingCaches,
+    pub health: HealthMarks,
+    pub flow: FlowControl,
+    pub media: Media,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = CoreState;
+    fn deref(&self) -> &CoreState {
+        &self.core
+    }
+}
+
+impl std::ops::DerefMut for AppState {
+    fn deref_mut(&mut self) -> &mut CoreState {
+        &mut self.core
+    }
+}
+
+/// 上游客户端：各家协议的连接池、签名与鉴权，以及订阅凭证刷新的单飞闸。
+#[derive(Clone)]
+pub struct Upstreams {
+    /// OpenAI 方言上游（openai / openai_compat / codex 等；Azure 与它共用连接池）。
+    pub openai: OpenAiUpstream,
     pub inference: okapi_providers::inference::Registry,
-    /// Azure OpenAI 上游（部署 URL + api-key 头 + api-version；与 `upstream` 共用连接池）。
+    /// Azure OpenAI 上游（部署 URL + api-key 头 + api-version；与 `openai` 共用连接池）。
     pub azure: AzureUpstream,
     /// Anthropic 原生上游（/v1/messages）。
     pub anthropic: AnthropicUpstream,
@@ -79,32 +75,28 @@ pub struct AppState {
     pub vertex: VertexUpstream,
     /// custom_pass 透传传输。
     pub pass: PassUpstream,
-    pub node: Arc<str>,
-    /// 统计查询（console 门户/管理用）；None = 统计接口 fail-closed 501。
-    pub ch: Option<ChClient>,
-    /// 控制台看板查询的可选缓存（1 分钟 TTL、按字节限容、同键单飞；读写在 `console::stats_cache`）。
-    pub stats_query_cache: QueryCache,
-    /// NATS（epoch 广播等）；None = 单机形态走轮询/直连。
-    pub nats: Option<async_nats::Client>,
-    /// 信封加密主密钥（hex）；None = TOTP 注册不可用（fail-closed）。
-    pub master_key: Option<std::sync::Arc<str>>,
-    /// settings 表热路径缓存（60s TTL；用户×模型限流等低频配置）。
-    pub settings_cache: moka::future::Cache<String, std::sync::Arc<Option<serde_json::Value>>>,
-    /// 结算写入闸（压测驱动修正 #3，docs/perf-report.md）：
-    /// 后台结算任务先过信号量再碰 PG，把 pool 竞争者钳制住——
-    /// 高 RPS 下等待发生在信号量（无超时）而非 pool acquire（5s 超时丢账）。
-    pub settle_gate: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Image download buffers stay bounded until each response body finishes or is dropped.
-    pub image_download_gate: Arc<tokio::sync::Semaphore>,
-    pub batch_submit_gate: Arc<tokio::sync::Semaphore>,
-    /// Private image object stores; credentials stay in process configuration.
-    pub image_storage: Arc<super::images::tasks::objects::Storage>,
-    /// 本进程在途数据面请求数（surge 规则的负载输入，DESIGN §3.4）。
-    /// 计数覆盖响应体流完为止；仅在价簿含 surge 规则时才挂计数中间件。
-    pub in_flight: super::inflight::InFlightGauge,
+    /// 订阅 OAuth 凭证刷新的进程内单飞闸（§11.38，四步锁第一步）。
+    pub refresh_gate: Arc<super::oauth_cred::RefreshGate>,
+}
+
+/// 选路用的进程内短缓存（渠道 / 模型 / 别名 / 分组绑定变更后由 `invalidate_routing_caches` 一并失效）。
+#[derive(Clone)]
+pub struct RoutingCaches {
+    /// 模型解析缓存（canonical + max_output，60s）。
+    pub model_cache: Cache<String, Arc<Option<ResolvedModel>>>,
+    /// 渠道候选缓存（model|groups → 候选行，5s；渠道状态分钟级变化可容忍）。
+    pub cand_cache: Cache<String, Arc<Vec<ChannelCandidate>>>,
     /// 渠道相对成本系数缓存（channel_id → 千分比，60s；结算路径折算上游成本用）。
     pub channel_cost_cache: Cache<i64, i64>,
     pub channel_control_cache: Cache<i64, Arc<super::account_control::policy::Policy>>,
+    /// 负毛利熔断表进程缓存（§11.34）：单键 → 此刻生效的 `<group>|<channel_id>` 集合，10s；
+    /// 一次 HGETALL 供所有请求共用，HASH 为空时只是一次空往返。
+    pub margin_cache: Cache<u8, Arc<std::collections::HashSet<String>>>,
+}
+
+/// 渠道 key 与出口代理的健康标记：只记本进程见过的失败，成功时才回 PG 清零。
+#[derive(Clone)]
+pub struct HealthMarks {
     /// 本进程登记过瞬态失败的渠道 key（24h）：该 key 下一次成功才回 PG 清零连续失败计数
     /// （`key_health`），健康 key 的成功请求零额外 IO。
     pub key_failures: Cache<i64, ()>,
@@ -112,17 +104,19 @@ pub struct AppState {
     pub egress_failures: Cache<i64, ()>,
     /// 一分钟内后台核实过的出口代理（§11.41）：分不清是代理还是目标的连接失败，同一代理只核实一次。
     pub egress_verifying: Cache<i64, ()>,
+}
+
+/// 准入与结算的流控：按用户排队、结算写入闸与积压泄压。
+#[derive(Clone)]
+pub struct FlowControl {
     /// 同一用户的预扣先在进程内排队，再拿 PG 连接与用户锁（`user_turns`）。
     pub admission_turns: super::user_turns::UserTurns,
     /// 同一用户的结算另排一队：等全局结算闸的结算不能挡住该用户新请求的准入。
     pub settlement_turns: super::user_turns::UserTurns,
-    /// 负毛利熔断表进程缓存（§11.34）：单键 → 此刻生效的 `<group>|<channel_id>` 集合，10s；
-    /// 一次 HGETALL 供所有请求共用，HASH 为空时只是一次空往返。
-    pub margin_cache: Cache<u8, Arc<std::collections::HashSet<String>>>,
-    /// 订阅 OAuth 凭证刷新的进程内单飞闸（§11.38，四步锁第一步）。
-    pub refresh_gate: Arc<super::oauth_cred::RefreshGate>,
-    /// 后台结算任务计数（响应先行、结算后台的两条 chat 路径）；优雅下线等它归零（§14.3）。
-    pub settlements: crate::shutdown::Pending,
+    /// 结算写入闸（压测驱动修正 #3，docs/perf-report.md）：
+    /// 后台结算任务先过信号量再碰 PG，把 pool 竞争者钳制住——
+    /// 高 RPS 下等待发生在信号量（无超时）而非 pool acquire（5s 超时丢账）。
+    pub settle_gate: Arc<tokio::sync::Semaphore>,
     /// 正在 `settle_write` 里排队或写 PG 的结算数（与 `settlements` 不同：不含仍在流式
     /// 泵送的请求）。PG 记账速率是它的唯一出口，进量持续高于出口就无界增长——
     /// 超过 `settle_backlog_max` 时数据面泄压（§12.2）。
@@ -131,6 +125,19 @@ pub struct AppState {
     pub settle_backlog_max: usize,
     /// 当前是否处于泄压态——只在状态翻转时各记一条 WARN，不按请求刷日志。
     pub settle_shedding: Arc<std::sync::atomic::AtomicBool>,
+    /// Unit tests must not expose their settlement journal to a live worker.
+    #[cfg(test)]
+    pub(crate) settlement_journal_tag: Arc<str>,
+}
+
+/// 媒体端点：图片下载与批量提交的并发闸、私有对象存储。
+#[derive(Clone)]
+pub struct Media {
+    /// Image download buffers stay bounded until each response body finishes or is dropped.
+    pub image_download_gate: Arc<tokio::sync::Semaphore>,
+    pub batch_submit_gate: Arc<tokio::sync::Semaphore>,
+    /// Private image object stores; credentials stay in process configuration.
+    pub image_storage: Arc<super::images::tasks::objects::Storage>,
 }
 
 /// `settle_backlog` 的进出计数：Drop 归还，覆盖提前 return 与任务被取消的路径。
@@ -156,12 +163,12 @@ impl AppState {
     /// 每落几笔就放几笔，状态每秒翻转十来次，翻转日志本身就成了刷屏。
     pub fn check_settle_backlog(&self) -> Result<(), crate::kernel::error::AppError> {
         use std::sync::atomic::Ordering;
-        let max = self.settle_backlog_max;
+        let max = self.flow.settle_backlog_max;
         if max == 0 {
             return Ok(());
         }
-        let pending = self.settle_backlog.load(Ordering::Relaxed);
-        let was_shedding = self.settle_shedding.load(Ordering::Relaxed);
+        let pending = self.flow.settle_backlog.load(Ordering::Relaxed);
+        let was_shedding = self.flow.settle_shedding.load(Ordering::Relaxed);
         let shedding = if was_shedding {
             pending > max - max / 4
         } else {
@@ -169,6 +176,7 @@ impl AppState {
         };
         if shedding != was_shedding
             && self
+                .flow
                 .settle_shedding
                 .compare_exchange(was_shedding, shedding, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
@@ -213,6 +221,7 @@ impl AppState {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<okapi_ledger::ReserveOutcome, okapi_ledger::LedgerError> {
         let _turn = self
+            .flow
             .admission_turns
             .wait(request.user_id, super::user_turns::ADMISSION_WAIT)
             .await?;
@@ -259,7 +268,7 @@ impl AppState {
     }
 
     async fn settle_write_inner(&self, mut input: okapi_ledger::SettlementInput<'_>) {
-        let backlog = BacklogGuard::enter(&self.settle_backlog);
+        let backlog = BacklogGuard::enter(&self.flow.settle_backlog);
         self.prepare_settlement(&mut input).await;
         // 实时 KPI 挂在这里而非各计费端点：七个端点（chat/embeddings/images/
         // audio/videos/realtime/custom_pass）全部经此收口，加一处即全覆盖，
@@ -276,7 +285,7 @@ impl AppState {
                 .await;
         }
         // 信号量关闭不可能（进程生命周期内不 close）；acquire 失败按直写降级
-        let permit = self.settle_gate.acquire().await;
+        let permit = self.flow.settle_gate.acquire().await;
         let journaled = super::settlement_retry::save_in_flight(self, &input)
             .await
             .is_ok();
@@ -308,7 +317,7 @@ impl AppState {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     let persisted = {
-                        let _permit = state.settle_gate.acquire().await;
+                        let _permit = state.flow.settle_gate.acquire().await;
                         okapi_ledger::record_settlement(&state.pg, owned.as_input())
                             .await
                             .is_ok()
@@ -328,21 +337,24 @@ impl AppState {
     /// 渠道相对成本系数（60s 进程缓存；缺省 1000）。None = 渠道不存在或 PG 读失败
     /// （不猜成本：记录留 None，毛利口径里按"成本未知"处理）。
     pub async fn channel_cost_milli(&self, channel_id: i64) -> Option<i64> {
-        if let Some(hit) = self.channel_cost_cache.get(&channel_id).await {
+        if let Some(hit) = self.routing.channel_cost_cache.get(&channel_id).await {
             return Some(hit);
         }
         let value = okapi_store::admin::channel_cost_milli(&self.pg, channel_id)
             .await
             .ok()
             .flatten()?;
-        self.channel_cost_cache.insert(channel_id, value).await;
+        self.routing
+            .channel_cost_cache
+            .insert(channel_id, value)
+            .await;
         Some(value)
     }
 
     /// 此刻生效的负毛利熔断对（`<group>|<channel_id>`，10s 进程缓存；§11.34）。
     /// Redis 故障按空集处理（fail-open：熔断是止损手段，不该因缓存抖动把请求拒掉）。
     pub async fn margin_blocked_fields(&self) -> Arc<std::collections::HashSet<String>> {
-        if let Some(hit) = self.margin_cache.get(&0).await {
+        if let Some(hit) = self.routing.margin_cache.get(&0).await {
             return hit;
         }
         let now = chrono::Utc::now().timestamp();
@@ -356,7 +368,7 @@ impl AppState {
             .map(|(k, _)| k)
             .collect();
         let set = Arc::new(set);
-        self.margin_cache.insert(0, Arc::clone(&set)).await;
+        self.routing.margin_cache.insert(0, Arc::clone(&set)).await;
         set
     }
 
@@ -403,47 +415,6 @@ impl AppState {
         }
     }
 
-    /// 是否记录请求来源 IP（`settings.record_ip_log`）。缺省 true——此前一直在记，
-    /// 缺省关掉会让存量站点的日志无声地少一列。只认显式的 `false`。
-    pub async fn record_ip_log(&self) -> bool {
-        self.setting_cached("record_ip_log")
-            .await
-            .as_ref()
-            .as_ref()
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-    }
-
-    /// Typed settings read: absence is cacheable; database failure is not absence.
-    pub async fn try_setting_cached(
-        &self,
-        key: &str,
-    ) -> Result<std::sync::Arc<Option<serde_json::Value>>, AppError> {
-        if let Some(hit) = self.settings_cache.get(key).await {
-            return Ok(hit);
-        }
-        let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, key)
-            .fetch_optional(&self.pg)
-            .await
-            .map_err(okapi_store::StoreError::from)?;
-        let value = std::sync::Arc::new(value);
-        self.settings_cache
-            .insert(key.to_owned(), std::sync::Arc::clone(&value))
-            .await;
-        Ok(value)
-    }
-
-    /// Best-effort reads are reserved for non-security display/telemetry defaults.
-    pub async fn setting_cached(&self, key: &str) -> std::sync::Arc<Option<serde_json::Value>> {
-        match self.try_setting_cached(key).await {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(key, error_code = error.code, "settings read unavailable");
-                std::sync::Arc::new(None)
-            }
-        }
-    }
-
     /// 路由类缓存失效（渠道/模型/别名/分组绑定/settings 变更后调用）。
     /// 失效本进程的路由缓存，并广播给其它实例。
     ///
@@ -468,10 +439,10 @@ impl AppState {
 
     /// 只失效本进程（广播的接收端用；避免收到自己的广播再转发出去打环）。
     pub fn invalidate_routing_caches_local(&self) {
-        self.model_cache.invalidate_all();
-        self.cand_cache.invalidate_all();
-        self.channel_cost_cache.invalidate_all();
-        self.channel_control_cache.invalidate_all();
+        self.routing.model_cache.invalidate_all();
+        self.routing.cand_cache.invalidate_all();
+        self.routing.channel_cost_cache.invalidate_all();
+        self.routing.channel_control_cache.invalidate_all();
         self.settings_cache.invalidate_all();
     }
 }

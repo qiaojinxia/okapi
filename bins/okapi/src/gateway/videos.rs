@@ -200,7 +200,7 @@ async fn handle_create(
             &cand,
             &upstream_model,
             "/v1/videos",
-            state.upstream.videos_create(
+            state.upstreams.openai.videos_create(
                 &base,
                 &cand.credential,
                 body_up,
@@ -401,7 +401,8 @@ async fn relay_task(
     } else {
         let path = format!("/videos/{task_id}");
         let resp = state
-            .upstream
+            .upstreams
+            .openai
             .get_json(
                 &base,
                 &path,
@@ -443,7 +444,8 @@ async fn download_response(
     for hop in 0..=5 {
         let same_origin = url.origin() == upstream_origin;
         let response = state
-            .upstream
+            .upstreams
+            .openai
             .get_stream_url(
                 url.as_str(),
                 same_origin.then_some(credential),
@@ -668,7 +670,8 @@ async fn poll_batch(state: &AppState) -> anyhow::Result<usize> {
                     .await?
                     .ok_or_else(AppError::internal)?;
                     state
-                        .upstream
+                        .upstreams
+                        .openai
                         .get_json(
                             ch.api_base.as_deref().unwrap_or(DEFAULT_OPENAI_BASE),
                             &format!("/videos/{task_id}"),

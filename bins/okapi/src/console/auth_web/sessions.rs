@@ -231,7 +231,7 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     let current = session_id(&headers);
     let data: Vec<Value> = state
         .sched
@@ -261,7 +261,7 @@ pub async fn revoke_session(
     headers: HeaderMap,
     Path(sid): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     if sid.len() != 32 || !sid.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(AppError::bad_request().with_param("session"));
     }
@@ -301,7 +301,7 @@ pub async fn revoke_all_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     state.sched.web_session_revoke_user(key.user_id).await;
     audit_session_revoke(
         &state,

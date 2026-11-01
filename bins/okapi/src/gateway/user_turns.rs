@@ -5,7 +5,7 @@
 //! 一个大客户就能让所有人的结算排队。这里按用户 FIFO 排队，其余等待者不占任何共享资源；
 //! 跨进程的串行仍由 PG 锁负责。
 //!
-//! 预扣与结算各用一个登记表（`AppState::admission_turns` / `settlement_turns`）：结算先排队
+//! 预扣与结算各用一个登记表（`AppState` 的 `flow.admission_turns` / `flow.settlement_turns`）：结算先排队
 //! 再等全局结算闸，若与预扣共用一队，闸满时排着的结算会挡住同一用户的新请求准入。
 //! 分开后每个用户在每个进程至多两条连接等锁；结算持闸只等 PG 锁，预扣不碰闸，无环形等待。
 use okapi_ledger::LedgerError;

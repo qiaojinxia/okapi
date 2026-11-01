@@ -122,10 +122,11 @@ impl AppState {
         // 一个大客户的结算堆积不会挡住其他用户落账；结算队列与准入队列分开，
         // 闸满时等待中的结算也不会挡住该用户的新请求预扣。
         let _turn = self
+            .flow
             .settlement_turns
             .wait(input.user_id, super::super::user_turns::SETTLEMENT_WAIT)
             .await?;
-        let _permit = self.settle_gate.acquire().await;
+        let _permit = self.flow.settle_gate.acquire().await;
         if input.dimensions.endpoint != "/v1/videos" {
             return okapi_ledger::sync::record(&self.pg, &self.ledger, input).await;
         }
@@ -173,7 +174,7 @@ impl AppState {
         &self,
         mut input: SettlementInput<'_>,
     ) -> Result<bool, crate::kernel::error::AppError> {
-        let _backlog = super::BacklogGuard::enter(&self.settle_backlog);
+        let _backlog = super::BacklogGuard::enter(&self.flow.settle_backlog);
         self.prepare_settlement(&mut input).await;
         let journaled = super::super::settlement_retry::save_in_flight(self, &input)
             .await
@@ -236,7 +237,7 @@ const BACKGROUND_SETTLEMENT_MAX_DELAY: std::time::Duration = std::time::Duration
 
 impl AppState {
     async fn settle_in_background(&self, input: SettlementInput<'_>) {
-        let _backlog = super::BacklogGuard::enter(&self.settle_backlog);
+        let _backlog = super::BacklogGuard::enter(&self.flow.settle_backlog);
         let started = std::time::Instant::now();
         let mut delay = std::time::Duration::from_secs(2);
         while started.elapsed() < BACKGROUND_SETTLEMENT_WINDOW {

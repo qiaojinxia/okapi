@@ -38,7 +38,7 @@ impl AppState {
             let account_id = credential
                 .oauth()
                 .and_then(|credential| credential.account_id.as_deref());
-            let inference = self.inference.infer(
+            let inference = self.upstreams.inference.infer(
                 &cand.provider,
                 Request {
                     surface,

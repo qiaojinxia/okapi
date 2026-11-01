@@ -405,7 +405,7 @@ async fn breaker_trips_blocks_lists_lifts_and_clears() {
     assert_eq!(mine["margin_bp"], -20_000);
 
     // 网关：该分组的唯一候选被摘掉 → 503 margin_blocked（不是 no_available_channel）
-    env.state.margin_cache.invalidate_all();
+    env.state.routing.margin_cache.invalidate_all();
     let (status, body) = chat(&env).await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], "margin_blocked");

@@ -302,7 +302,7 @@ async fn separate_process_gates_wait_for_a_slow_refresh_instead_of_replaying() {
     expire_cred(&env, key).await;
     env.mock_state.delay_refresh.store(true, Ordering::SeqCst);
     let mut worker_state = env.state.clone();
-    worker_state.refresh_gate = Arc::default();
+    worker_state.upstreams.refresh_gate = Arc::default();
     let worker = tokio::spawn(async move {
         refresh_once(&worker_state, RefreshPolicy::default(), &mut (key - 1))
             .await

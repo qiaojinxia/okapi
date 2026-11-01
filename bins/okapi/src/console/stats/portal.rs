@@ -35,7 +35,7 @@ pub async fn my_breakdown(
     headers: HeaderMap,
     Query(q): Query<BreakdownQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     let ch = ch_or_disabled(&state)?;
     let window = super::super::usage_details::CalendarWindow::read(
         ch,
@@ -190,7 +190,7 @@ pub async fn my_daily(
     headers: HeaderMap,
     Query(q): Query<WindowQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     let ch = ch_or_disabled(&state)?;
     let calendar =
         super::super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;

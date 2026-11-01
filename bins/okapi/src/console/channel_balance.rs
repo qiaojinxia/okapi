@@ -262,6 +262,7 @@ async fn get_json(
     outbound: &okapi_providers::Outbound,
 ) -> Result<Value, AppError> {
     let outcome = state
+        .upstreams
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::GET,

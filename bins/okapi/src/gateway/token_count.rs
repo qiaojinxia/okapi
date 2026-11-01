@@ -319,7 +319,7 @@ async fn forward_count(
     tokio::time::timeout(
         Duration::from_secs(candidate.first_output_timeout_secs.min(20)),
         okapi_providers::responses::count_input_tokens_at(
-            state.upstream.http(),
+            state.upstreams.openai.http(),
             base,
             &auth_headers,
             body,

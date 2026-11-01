@@ -4,8 +4,8 @@
 //! 本文件只放各处理器共用的守卫（权限点、own/all 范围、渠道属主、超管）与审计；处理器按资源
 //! 分在子模块里，并从这里原路径再导出（`console/mod.rs` 的路由与其它模块的引用不变）。
 
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

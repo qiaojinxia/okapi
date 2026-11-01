@@ -246,7 +246,7 @@ pub async fn exchange(
     if let Some(url) = token_url.as_deref() {
         crate::kernel::ssrf::validate_api_base(&state.pg, url).await?;
     }
-    let http = state.upstream.http();
+    let http = state.upstreams.openai.http();
     let tokens: Tokens = hook
         .exchange(ExchangeContext {
             http,

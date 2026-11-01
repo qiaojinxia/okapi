@@ -395,7 +395,7 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
         ..Default::default()
     };
     let upstream = okapi_providers::responses_ws::connect_raw(
-        state.upstream.http(),
+        state.upstreams.openai.http(),
         &prep.upstream_url,
         &[("authorization", authorization.as_str())],
         &outbound,

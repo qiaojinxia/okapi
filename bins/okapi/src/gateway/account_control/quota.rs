@@ -226,7 +226,7 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
     };
     let outbound = okapi_providers::Outbound::from_settings(&row.settings, proxy_url);
     let context = || okapi_providers::account::QuotaContext {
-        http: state.upstream.http(),
+        http: state.upstreams.openai.http(),
         api_base: &base,
         access_token: credential.material(),
         account_id: credential

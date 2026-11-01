@@ -172,7 +172,7 @@ async fn archive_backpressure_keeps_cleanup_safe_without_holding_database_connec
     }
     assert_eq!(leases(&env, &job).await, 4);
     assert_eq!(direct(&env, &job).await.status(), 429);
-    assert_eq!(env.state.image_download_gate.available_permits(), 0);
+    assert_eq!(env.state.media.image_download_gate.available_permits(), 0);
     tokio::time::timeout(
         Duration::from_secs(2),
         sqlx::query("SELECT 1").execute(&env.state.pg),
@@ -189,7 +189,7 @@ async fn archive_backpressure_keeps_cleanup_safe_without_holding_database_connec
         .unwrap();
     assert_eq!(unzip(bytes.to_vec()).await["images/0000.png"], data);
     released(&env, &job).await;
-    assert_eq!(env.state.image_download_gate.available_permits(), 4);
+    assert_eq!(env.state.media.image_download_gate.available_permits(), 4);
     assert!(env.cleanup(&job).await.unwrap());
     assert!(env.cleaned(&job).await);
     env.money(&job, PRICE / 2).await;
@@ -215,7 +215,7 @@ async fn archive_corruption_fails_the_body_and_releases_capacity() {
             .is_err()
     );
     released(&env, &job).await;
-    assert_eq!(env.state.image_download_gate.available_permits(), 4);
+    assert_eq!(env.state.media.image_download_gate.available_permits(), 4);
     env.money(&job, PRICE / 2).await;
     env.close().await;
 }

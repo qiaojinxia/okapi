@@ -304,7 +304,7 @@ pub async fn callback(
 /// 经 PassUpstream 请求并解析 JSON（token/userinfo 共用）。
 async fn fetch_json(state: &AppState, req: PassRequest) -> Result<Value, AppError> {
     crate::kernel::ssrf::validate_api_base(&state.pg, &req.url).await?;
-    match state.pass.probe(req).await {
+    match state.upstreams.pass.probe(req).await {
         Ok(PassResponse::Ok { stream, .. }) => {
             let buf = super::outbound_body::collect(stream, 1024 * 1024).await?;
             serde_json::from_slice(&buf)

@@ -110,15 +110,16 @@ pub(super) fn error(error: StorageError) -> AppError {
 
 pub(super) async fn run_one(state: &AppState) -> Result<bool, AppError> {
     let active = state
+        .media
         .image_storage
         .active
         .as_ref()
-        .and_then(|id| state.image_storage.stores.get(id));
+        .and_then(|id| state.media.image_storage.stores.get(id));
     let Some(mut work) = db::claim(&state.pg, active).await? else {
         return Ok(false);
     };
     let result = async {
-        let store = state.image_storage.find(&work.reference)?;
+        let store = state.media.image_storage.find(&work.reference)?;
         if work.deleting {
             store.delete(&work.reference).await?;
             Ok(None)

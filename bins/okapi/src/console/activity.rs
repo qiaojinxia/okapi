@@ -77,7 +77,7 @@ pub async fn my_activity(
     headers: HeaderMap,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let key = crate::kernel::auth::authenticate(&state, &headers).await?;
     let ch = state
         .ch
         .as_ref()

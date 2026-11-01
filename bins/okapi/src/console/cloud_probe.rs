@@ -71,7 +71,7 @@ pub(super) async fn probe(
                     // 与数据面同一条出站路径：渠道配置了请求风格就按它整形，
                     // 测活结果才代表真实请求能否打通
                     okapi_providers::oauth::anthropic_max::messages(
-                        state.anthropic.http(),
+                        state.upstreams.anthropic.http(),
                         base,
                         &cred.access_token,
                         body,
@@ -95,7 +95,7 @@ pub(super) async fn probe(
                             .to_string(),
                     );
                     okapi_providers::oauth::codex::responses(
-                        state.upstream.http(),
+                        state.upstreams.openai.http(),
                         base,
                         &cred.access_token,
                         cred.account_id.as_deref(),
@@ -115,18 +115,21 @@ pub(super) async fn probe(
         ("bedrock", None) => {
             if okapi_providers::aws_sigv4::AwsCredentials::parse(credential).is_some() {
                 state
+                    .upstreams
                     .bedrock
                     .list_foundation_models(base, region, credential, &outbound)
                     .await
                     .map(|_| 200)
             } else {
                 state
+                    .upstreams
                     .bedrock
                     .list_openai_models(base, credential, &outbound)
                     .await
             }
         }
         ("bedrock", Some(m)) => state
+            .upstreams
             .bedrock
             .messages(
                 base,
@@ -140,16 +143,19 @@ pub(super) async fn probe(
             .await
             .map(|r| messages_status(&r)),
         ("vertex", None) => state
+            .upstreams
             .vertex
             .access_token(credential, &outbound)
             .await
             .map(|_| 200),
         ("vertex", Some(m)) if okapi_providers::vertex::is_anthropic_model(m) => state
+            .upstreams
             .vertex
             .messages(base, credential, m, anthropic_ping(), false, &outbound)
             .await
             .map(|r| messages_status(&r)),
         ("vertex", Some(m)) => state
+            .upstreams
             .vertex
             .generate(base, credential, m, gemini_ping(), false, &outbound)
             .await
@@ -214,6 +220,7 @@ pub(super) async fn fetch_models(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
             state
+                .upstreams
                 .bedrock
                 .list_foundation_models(base, region, credential, &outbound)
                 .await
@@ -235,7 +242,7 @@ pub(super) async fn fetch_models(
                     .await
                     .map_err(upstream_error)?;
             okapi_providers::oauth::codex::list_models(
-                state.upstream.http(),
+                state.upstreams.openai.http(),
                 base,
                 &cred.access_token,
                 cred.account_id.as_deref(),

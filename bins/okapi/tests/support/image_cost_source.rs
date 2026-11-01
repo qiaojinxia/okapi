@@ -20,7 +20,7 @@ async fn image_cost_is_pinned_for_sync_and_async_requests() {
                 .execute(&env.state.pg)
                 .await
                 .unwrap();
-            env.state.channel_cost_cache.invalidate_all();
+            env.state.routing.channel_cost_cache.invalidate_all();
             peer.images(2);
             timeout(WAIT, pending).await.unwrap().unwrap();
             env.assert_money(PRICE * 2, 1).await;

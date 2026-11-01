@@ -217,6 +217,7 @@ pub async fn content(
             .filter(|v| (0..10).contains(v))
             .ok_or_else(not_found)?;
         let permit = state
+            .media
             .image_download_gate
             .clone()
             .try_acquire_owned()
@@ -228,6 +229,7 @@ pub async fn content(
             .await?
             .ok_or_else(not_found)?;
         let (bytes, mime) = state
+            .media
             .image_storage
             .download(artifact)
             .await
@@ -280,7 +282,7 @@ async fn artifacts(
                     .decode(base64)
                     .map_err(|_| invalid())?,
             )
-        } else if state.image_storage.copy_urls {
+        } else if state.media.image_storage.copy_urls {
             let url = image
                 .get("url")
                 .and_then(Value::as_str)
@@ -288,7 +290,7 @@ async fn artifacts(
             Some(
                 okapi_providers::image_store::fetch::image(
                     url,
-                    &state.image_storage.fetch,
+                    &state.media.image_storage.fetch,
                     remaining,
                 )
                 .await

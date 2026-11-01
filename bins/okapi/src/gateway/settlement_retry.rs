@@ -14,11 +14,11 @@ fn keys(state: &AppState) -> [std::borrow::Cow<'static, str>; 4] {
     #[cfg(not(test))]
     let _ = state;
     #[cfg(test)]
-    if !state.settlement_journal_tag.is_empty() {
+    if !state.flow.settlement_journal_tag.is_empty() {
         return ["payloads", "order", "attempts", "quarantine"].map(|suffix| {
             std::borrow::Cow::Owned(format!(
                 "settlement:{{{}}}:{suffix}",
-                state.settlement_journal_tag
+                state.flow.settlement_journal_tag
             ))
         });
     }
@@ -186,7 +186,7 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
         // 用户轮次与结算闸由 persist_success 按序获取
         state.persist_success(input.clone()).await
     } else {
-        let _permit = state.settle_gate.acquire().await?;
+        let _permit = state.flow.settle_gate.acquire().await?;
         okapi_ledger::record_settlement(&state.pg, input.clone())
             .await
             .map(|()| false)
@@ -508,8 +508,9 @@ mod tests {
             .build()
             .unwrap();
         unavailable.sched = crate::kernel::sched_redis::SchedulerRedis::new(client);
-        unavailable.settle_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-        unavailable.settle_backlog = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        unavailable.flow.settle_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        unavailable.flow.settle_backlog =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         unavailable.settlements = crate::shutdown::Pending::default();
         let mut failed = input.clone();
         failed.request_id = uuid::Uuid::new_v4();
@@ -526,10 +527,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(unavailable.settle_gate.available_permits(), 1);
+        assert_eq!(unavailable.flow.settle_gate.available_permits(), 1);
         assert_eq!(unavailable.settlements.in_flight(), 1);
         assert_eq!(
             unavailable
+                .flow
                 .settle_backlog
                 .load(std::sync::atomic::Ordering::Relaxed),
             1

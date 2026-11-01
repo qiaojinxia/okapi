@@ -190,7 +190,8 @@ async fn probe_one(
         }
     };
     let result =
-        okapi_providers::egress_probe::probe(state.upstream.http(), Some(&url), target).await;
+        okapi_providers::egress_probe::probe(state.upstreams.openai.http(), Some(&url), target)
+            .await;
     let (record, ok) = match &result {
         Ok(r) => (
             okapi_store::egress::ProbeRecord {

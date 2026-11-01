@@ -1,8 +1,8 @@
 //! 用户的钱与量：用量汇总、余额流水、充值订单。
 use super::super::query::Query;
 use super::{ch_i64, ch_or_disabled, default_limit};
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;

@@ -263,6 +263,7 @@ pub(crate) async fn probe_channel(
 
     let started = std::time::Instant::now();
     let outcome = state
+        .upstreams
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
             method,
@@ -463,6 +464,7 @@ pub(super) async fn discover_models(
     let (url, auth_header, auth_value) = models_probe_target(provider, base, credential);
     let outbound = okapi_providers::Outbound::from_settings(settings, proxy_url);
     let outcome = state
+        .upstreams
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::GET,

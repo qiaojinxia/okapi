@@ -1,6 +1,6 @@
 //! 可自选的定价分组与邀请返利（aff）。
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;

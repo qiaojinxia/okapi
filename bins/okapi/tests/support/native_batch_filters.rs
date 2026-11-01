@@ -32,7 +32,7 @@ async fn batch_filters_apply_before_pagination_and_head_does_not_mark_downloaded
         assert!(response.bytes().await.unwrap().is_empty());
     }
     assert!(env.poll(&first).await["downloaded_at"].is_null());
-    assert_eq!(env.state.image_download_gate.available_permits(), 4);
+    assert_eq!(env.state.media.image_download_gate.available_permits(), 4);
     let page = env
         .value(
             reqwest::Method::GET,

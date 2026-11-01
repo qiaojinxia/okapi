@@ -68,11 +68,12 @@ pub(crate) async fn resolve_model_cached(
     state: &AppState,
     requested: &str,
 ) -> Result<Arc<Option<okapi_store::channels::ResolvedModel>>, AppError> {
-    if let Some(hit) = state.model_cache.get(requested).await {
+    if let Some(hit) = state.routing.model_cache.get(requested).await {
         return Ok(hit);
     }
     let resolved = Arc::new(okapi_store::channels::resolve_model(&state.pg, requested).await?);
     state
+        .routing
         .model_cache
         .insert(requested.to_owned(), Arc::clone(&resolved))
         .await;
@@ -498,7 +499,7 @@ pub(crate) async fn cached_candidates(
     fresh: bool,
 ) -> Result<Arc<Vec<ChannelCandidate>>, okapi_store::StoreError> {
     let cache_key = format!("{model}|{}", pool_chain.join(">"));
-    if !fresh && let Some(hit) = state.cand_cache.get(&cache_key).await {
+    if !fresh && let Some(hit) = state.routing.cand_cache.get(&cache_key).await {
         return Ok(hit);
     }
     let rows = Arc::new(
@@ -510,7 +511,11 @@ pub(crate) async fn cached_candidates(
         )
         .await?,
     );
-    state.cand_cache.insert(cache_key, Arc::clone(&rows)).await;
+    state
+        .routing
+        .cand_cache
+        .insert(cache_key, Arc::clone(&rows))
+        .await;
     Ok(rows)
 }
 

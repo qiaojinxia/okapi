@@ -432,7 +432,7 @@ async fn durable_execution_usage_and_unknown_cost_replay_frozen_metadata_once() 
             .execute(&env.state.pg)
             .await
             .unwrap();
-        env.state.channel_cost_cache.invalidate_all();
+        env.state.routing.channel_cost_cache.invalidate_all();
         // An already filled Token/search-only estimate cannot bypass incomplete coverage.
         saved.upstream_cost = Some(okapi_domain::Money::from_micros(27000));
         assert!(env.state.settle_success(saved.as_input()).await.unwrap());

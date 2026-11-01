@@ -27,7 +27,11 @@ pub(crate) async fn failure(
         tracing::warn!(channel_key_id = cand.channel_key_id, code, %error, "channel key failure could not be recorded");
     }
     if matches!(kind, KeyFailure::Transient) {
-        state.key_failures.insert(cand.channel_key_id, ()).await;
+        state
+            .health
+            .key_failures
+            .insert(cand.channel_key_id, ())
+            .await;
     }
     if let KeyFailure::Unreachable { proxy_hop } = kind
         && let Some(proxy) = cand.egress_proxy_id
@@ -67,7 +71,7 @@ pub(crate) async fn proxy_unreachable(
 }
 
 async fn record_proxy_failure(state: &AppState, proxy: i64, reason: &str, confirmed: bool) {
-    state.egress_failures.insert(proxy, ()).await;
+    state.health.egress_failures.insert(proxy, ()).await;
     let tripped = match okapi_store::egress::mark_failure(&state.pg, proxy, reason, confirmed).await
     {
         Ok(tripped) => tripped,
@@ -94,6 +98,7 @@ async fn verify_proxy(state: &AppState, proxy: i64, proxy_url: String) {
         .unwrap_or_default();
     if !policy.enabled
         || !state
+            .health
             .egress_verifying
             .entry(proxy)
             .or_insert(())
@@ -106,7 +111,7 @@ async fn verify_proxy(state: &AppState, proxy: i64, proxy_url: String) {
     // detach 说明：后台核实，最长一次探测的时长；进程退出时丢掉只是少记一次熔断
     tokio::spawn(async move {
         let probe = okapi_providers::egress_probe::probe(
-            state.upstream.http(),
+            state.upstreams.openai.http(),
             Some(&proxy_url),
             policy.target(),
         )
@@ -120,14 +125,18 @@ async fn verify_proxy(state: &AppState, proxy: i64, proxy_url: String) {
 /// 上游给出了可用响应：这把 key 是好的，清掉它的连续失败计数；走的出口代理同理。
 pub(crate) async fn success(state: &AppState, cand: &ChannelCandidate) {
     if let Some(proxy) = cand.egress_proxy_id
-        && state.egress_failures.contains_key(&proxy)
+        && state.health.egress_failures.contains_key(&proxy)
     {
-        state.egress_failures.invalidate(&proxy).await;
+        state.health.egress_failures.invalidate(&proxy).await;
         let _ = okapi_store::egress::clear_failures(&state.pg, proxy).await;
     }
-    if !state.key_failures.contains_key(&cand.channel_key_id) {
+    if !state.health.key_failures.contains_key(&cand.channel_key_id) {
         return;
     }
-    state.key_failures.invalidate(&cand.channel_key_id).await;
+    state
+        .health
+        .key_failures
+        .invalidate(&cand.channel_key_id)
+        .await;
     let _ = channels::clear_key_failures(&state.pg, cand.channel_key_id).await;
 }

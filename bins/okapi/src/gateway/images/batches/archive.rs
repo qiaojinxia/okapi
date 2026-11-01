@@ -114,6 +114,7 @@ pub async fn download(
         } else {
             Some(
                 state
+                    .media
                     .image_download_gate
                     .clone()
                     .try_acquire_owned()

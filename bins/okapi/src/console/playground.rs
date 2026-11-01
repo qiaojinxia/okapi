@@ -73,7 +73,7 @@ pub async fn parameters(
     query: Result<Query<ParameterQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<Value>, AppError> {
     // Authenticate before reporting malformed metadata queries, and keep the common error envelope.
-    crate::gateway::auth::authenticate(&state, &headers).await?;
+    crate::kernel::auth::authenticate(&state, &headers).await?;
     let Query(query) = query.map_err(|_| AppError::bad_request().with_param("query"))?;
     if query.model.trim().is_empty() || query.model.len() > 256 {
         return Err(AppError::bad_request());
@@ -103,7 +103,7 @@ async fn with_selected_key(
         .and_then(|v| v.trim().parse().ok())
         .filter(|id| *id > 0)
         .ok_or_else(AppError::bad_request)?;
-    let login = crate::gateway::auth::authenticate(state, &headers).await?;
+    let login = crate::kernel::auth::authenticate(state, &headers).await?;
     let row: Option<(String, Option<Vec<u8>>)> = sqlx::query_as(
         "SELECT key_hash, key_ciphertext FROM api_keys WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
     )

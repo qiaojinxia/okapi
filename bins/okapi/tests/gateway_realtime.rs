@@ -525,7 +525,7 @@ async fn realtime_cost_keeps_selected_config_until_disconnect() {
         .execute(&env.pg)
         .await
         .unwrap();
-    env.state.channel_cost_cache.invalidate_all();
+    env.state.routing.channel_cost_cache.invalidate_all();
     ws.send(CliMsg::text(json!({"type":"response.create"}).to_string()))
         .await
         .unwrap();

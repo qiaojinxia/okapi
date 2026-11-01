@@ -25,8 +25,8 @@ pub use self::keys::{PatchKeyReq, delete_key, keys, patch_key};
 pub(super) use self::keys::{normalize_allowlist, normalize_ip_allowlist, validate_key_limits};
 pub use self::redeem::{RedeemReq, redeem};
 
-use crate::gateway::auth::authenticate;
 use crate::gateway::state::AppState;
+use crate::kernel::auth::authenticate;
 use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;

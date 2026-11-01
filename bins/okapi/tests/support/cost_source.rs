@@ -82,7 +82,7 @@ async fn run(initial_cost: i64, expected_cost: i64) {
                 .execute(&env.state.pg)
                 .await
                 .unwrap();
-            env.state.channel_cost_cache.invalidate_all();
+            env.state.routing.channel_cost_cache.invalidate_all();
             gate.release.notify_one();
             let (status, body) = tokio::time::timeout(Duration::from_secs(10), call)
                 .await

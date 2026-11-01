@@ -366,6 +366,7 @@ pub(super) async fn verify_turnstile(
     let verify_url = verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned());
     crate::kernel::ssrf::validate_url(&state.pg, &verify_url).await?;
     let outcome = state
+        .upstreams
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::POST,

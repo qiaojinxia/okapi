@@ -214,7 +214,7 @@ async fn primary(env: &Env, available: bool) -> String {
             .execute(&env.state.pg)
             .await
             .unwrap();
-        env.state.cand_cache.invalidate_all();
+        env.state.routing.cand_cache.invalidate_all();
     }
     publish(env).await;
     primary
@@ -272,7 +272,7 @@ async fn frozen_fallback_case(available: bool, stream: bool) {
             .unwrap();
     }
     assert!(publish(&env).await > epoch);
-    env.state.model_cache.invalidate_all();
+    env.state.routing.model_cache.invalidate_all();
     gate.release.notify_one();
     let (status, body) = tokio::time::timeout(Duration::from_secs(10), call)
         .await
@@ -361,7 +361,7 @@ async fn excluded_fallbacks_are_absent_from_the_actual_hold_evidence() {
             }
             _ => unreachable!(),
         }
-        env.state.model_cache.invalidate_all();
+        env.state.routing.model_cache.invalidate_all();
         let response = primary_request(&env, &primary, false, prefs).await;
         assert_eq!(response.status(), 200);
         assert!(!response.text().await.unwrap().contains("upstream_error"));
