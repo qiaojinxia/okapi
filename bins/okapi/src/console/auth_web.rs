@@ -8,7 +8,7 @@
 
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde_json::Value;
@@ -31,7 +31,7 @@ pub use self::sessions::{
 };
 pub(super) use self::sessions::{open_web_session, secure_cookie, session_cookie};
 
-const SESSION_COOKIE: &str = "okapi_session";
+use crate::gateway::auth::{SESSION_COOKIE, session_id};
 
 /// 直连 socket 地址的可缺省提取器（serve 未挂 with_connect_info 时为 None，
 /// 如集成测试的裸 serve；生产 console 已挂，见 mod.rs run）。
@@ -101,15 +101,6 @@ fn rand_token(len: usize) -> String {
         .take(len)
         .map(char::from)
         .collect()
-}
-
-/// Cookie 头解析会话 id（网关校验登录 key 时也用）。
-pub(crate) fn session_id(headers: &HeaderMap) -> Option<String> {
-    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
-    cookies.split(';').find_map(|pair| {
-        let (name, value) = pair.trim().split_once('=')?;
-        (name == SESSION_COOKIE).then(|| value.to_owned())
-    })
 }
 
 /// 会话鉴权：Cookie → Redis → user_id。

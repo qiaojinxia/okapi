@@ -37,6 +37,7 @@ pub mod sched_redis;
 pub mod scheduler;
 pub(crate) mod server_tools;
 pub(crate) mod settlement_retry;
+pub mod ssrf;
 pub mod state;
 pub(crate) mod stream_policy;
 pub mod token_count;
@@ -141,7 +142,7 @@ pub(crate) async fn build_state_with_resources(
         pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,
         node: Arc::from(node),
         ch,
-        stats_query_cache: crate::console::stats_cache::build(),
+        stats_query_cache: state::build_query_cache(),
         nats,
         master_key: {
             let key = crate::config::master_key_from_env();

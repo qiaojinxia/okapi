@@ -45,7 +45,7 @@ pub async fn set_setting(
         };
         // 探测地址由后台按时请求：与上游地址同一道 SSRF 闸
         if let Some(target) = policy.target.as_deref() {
-            super::super::ssrf::validate_api_base(&state, target).await?;
+            crate::gateway::ssrf::validate_api_base(&state, target).await?;
         }
     }
     // 清理任务按 `(value #>> '{}')::bigint` 读：null / 小数 / 字符串会让它每轮报错且永不清理

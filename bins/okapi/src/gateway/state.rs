@@ -38,6 +38,21 @@ pub struct Retained {
 /// 鉴权缓存在 Redis（docs/database.md §2.1 auth:key:*，console 跨进程失效）；
 /// 下面两个进程内短缓存消除热路径 PG 读，console 写路径主动失效（同进程即时，
 /// 多副本靠 TTL 收敛）。
+/// 控制台看板查询缓存：SQL + 绑定参数 → 结果行。
+pub(crate) type QueryCache = Cache<String, Arc<Vec<serde_json::Value>>>;
+
+pub(crate) fn build_query_cache() -> QueryCache {
+    Cache::builder()
+        .max_capacity(16 * 1024 * 1024)
+        .weigher(|key: &String, rows: &Arc<Vec<serde_json::Value>>| {
+            let bytes = serde_json::to_vec(rows.as_ref()).map_or(usize::MAX, |v| v.len());
+            u32::try_from(key.len().saturating_add(bytes)).unwrap_or(u32::MAX)
+        })
+        // 运营概览每分钟自动刷新一次：15s 时每次都落空，多个管理员 / 标签页也各算一遍
+        .time_to_live(std::time::Duration::from_mins(1))
+        .build()
+}
+
 #[derive(Clone)]
 pub struct AppState {
     /// Unit tests must not expose their settlement journal to a live worker.
@@ -67,8 +82,8 @@ pub struct AppState {
     pub node: Arc<str>,
     /// 统计查询（console 门户/管理用）；None = 统计接口 fail-closed 501。
     pub ch: Option<ChClient>,
-    /// Opt-in console dashboard queries, 15s TTL with bounded memory and single-flight.
-    pub stats_query_cache: crate::console::stats_cache::QueryCache,
+    /// 控制台看板查询的可选缓存（1 分钟 TTL、按字节限容、同键单飞；读写在 `console::stats_cache`）。
+    pub stats_query_cache: QueryCache,
     /// NATS（epoch 广播等）；None = 单机形态走轮询/直连。
     pub nats: Option<async_nats::Client>,
     /// 信封加密主密钥（hex）；None = TOTP 注册不可用（fail-closed）。

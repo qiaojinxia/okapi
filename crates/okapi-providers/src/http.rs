@@ -196,7 +196,7 @@ pub fn is_forbidden_header(name: &str) -> bool {
 ///
 /// 数据面、管理面探针与 WebSocket 握手均不自动跟随重定向。
 /// WS 单独限制为 HTTP/1：仅给请求设置 version 不会限制 TLS 的 ALPN 协商。
-/// SSRF 闸（`console::ssrf`）只校验管理员填进来的那个 URL，跟着 30x 走就能被一个公网地址
+/// SSRF 闸（`gateway::ssrf`）只校验管理员填进来的那个 URL，跟着 30x 走就能被一个公网地址
 /// 引到私网 / 云元数据地址；测活、拉模型、余额、Turnstile、支付回调、订阅 OAuth 换码 / 刷新、
 /// Vertex 服务账号换 token、Bedrock 列模型这些外呼都不跟随重定向。
 /// 视频下载的有限跳转由 gateway 逐跳校验目标并按 origin 移除凭证。

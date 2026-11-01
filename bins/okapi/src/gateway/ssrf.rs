@@ -1,6 +1,6 @@
 //! 上游 URL SSRF 校验（IMPLEMENTATION §14.4，Sub2API url_allowlist 吸收）：
 //! 管理面写入 channels.api_base、`settings.oauth_token_url` 与 Vertex 服务账号 `token_uri`
-//! 时执行——目标默认禁私网/环回/链路本地（IP 字面量 + 保存时解析一次域名）。这是第一层；
+//! 时执行，网关的图片批量绑定、视频下载跳转与 worker 的通知 webhook 也用同一套判据——目标默认禁私网/环回/链路本地（IP 字面量 + 保存时解析一次域名）。这是第一层；
 //! 域名保存之后可以改指内网（DNS 重绑定），所以出站直连在**连接时**还会按同一判据再校验一次、
 //! 并只连校验过的地址（第二层，`okapi_providers::ssrf`，策略由 `gateway::sync_ssrf_policy` 同步）。
 //!

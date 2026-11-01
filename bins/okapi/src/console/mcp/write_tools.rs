@@ -35,7 +35,7 @@ pub(super) async fn channel_create(
         .get("credential")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request().with_param("credential"))?;
-    super::super::ssrf::validate_credential(state, credential).await?;
+    crate::gateway::ssrf::validate_credential(state, credential).await?;
     let credential = super::super::channel_credentials::normalize(provider, credential)?;
     let name = super::super::identifiers::ensure_display_name("name", name, 128)?;
     let requested: Vec<String> = args

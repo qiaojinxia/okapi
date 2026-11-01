@@ -244,7 +244,7 @@ pub async fn exchange(
     }
 
     if let Some(url) = token_url.as_deref() {
-        super::ssrf::validate_api_base(&state, url).await?;
+        crate::gateway::ssrf::validate_api_base(&state, url).await?;
     }
     let http = state.upstream.http();
     let tokens: Tokens = hook
@@ -426,7 +426,7 @@ pub async fn refresh(
         okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let token_url = row.settings.get("oauth_token_url").and_then(Value::as_str);
     if let Some(url) = token_url {
-        super::ssrf::validate_api_base(&state, url).await?;
+        crate::gateway::ssrf::validate_api_base(&state, url).await?;
     }
     let proxy = super::egress::key_proxy(&state, key).await?;
     let credential = crate::gateway::credentials::oauth::force_refresh_for(

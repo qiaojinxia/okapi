@@ -47,7 +47,6 @@ pub mod ratio_sync;
 pub mod registration;
 mod server_tools;
 pub mod setup;
-pub mod ssrf;
 pub mod stats;
 pub(crate) mod stats_cache;
 pub mod subscriptions;

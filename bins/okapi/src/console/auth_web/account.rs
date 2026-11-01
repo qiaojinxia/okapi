@@ -364,7 +364,7 @@ pub(super) async fn verify_turnstile(
         urlencoding_escape(token)
     );
     let verify_url = verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned());
-    super::super::ssrf::validate_url(&state.pg, &verify_url).await?;
+    crate::gateway::ssrf::validate_url(&state.pg, &verify_url).await?;
     let outcome = state
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {

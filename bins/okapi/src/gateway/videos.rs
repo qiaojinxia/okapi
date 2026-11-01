@@ -473,7 +473,7 @@ async fn download_response(
         if url.scheme() == "https" && next.scheme() != "https" {
             return Err(invalid("video_download_redirect_scheme"));
         }
-        crate::console::ssrf::validate_url(&state.pg, next.as_str())
+        crate::gateway::ssrf::validate_url(&state.pg, next.as_str())
             .await
             .map_err(|_| invalid("video_download_redirect_target"))?;
         url = next;

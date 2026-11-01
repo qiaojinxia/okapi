@@ -3332,6 +3332,19 @@ RPM / 当日消费闸只在 chat 里生效；渠道删除、api_key 删除在 st
 **没动**：价目目录 `okapi_pricing::catalog` 仍留在 pricing（挪去 console 会丢掉 pricing crate 的禁浮点 / 禁 panic 守卫）；各入口的 failover 循环语义不同（images 非幂等只对
 401/402/403/429 换渠道、audio / realtime 只发一次），只统一了闸，没统一循环。
 
+### 11.56 依赖方向：gateway / worker 不再引用 console（2026-11-01）
+
+角色之间的依赖只许一个方向：console、worker → gateway，反过来不行（gateway 是数据面，也是眼下各角色共用的内核所在）。
+此前有 8 处反向引用，挪到它们真正的归属后归零，行为不变：
+
+- **SSRF 校验** `console/ssrf.rs` → `gateway/ssrf.rs`：管理面写入、网关的图片批量绑定与视频下载跳转、worker 的通知 webhook 共用同一套判据。
+  §11.31、§11.52 里的 `console::ssrf` 指的就是它。
+- **看板查询缓存的类型与构造** → `gateway::state::{QueryCache, build_query_cache}`：缓存本体本来就挂在 `AppState` 上，网关构造状态时不该引用 console。
+  读写（`allowed`、`query`）仍在 `console::stats_cache`。
+- **会话 cookie 名与解析** → `gateway::auth::{SESSION_COOKIE, session_id}`：网关校验会话绑定的登录 key 时要用，控制台的登录 / 会话管理照旧从这里取。
+
+之后若把 gateway 里各角色共用的部分（error / extract / state / auth / ssrf 等）抽成独立模块或 crate，这几项随之一起走。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

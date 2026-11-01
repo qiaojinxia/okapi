@@ -79,13 +79,25 @@ pub async fn authenticate(
     Ok(authed)
 }
 
+/// web 会话 cookie 名（门户 / 管理后台登录后由 `console::auth_web` 下发）。
+pub(crate) const SESSION_COOKIE: &str = "okapi_session";
+
+/// Cookie 头解析会话 id：控制台按它找会话，网关校验会话绑定的登录 key 时也用。
+pub(crate) fn session_id(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|pair| {
+        let (name, value) = pair.trim().split_once('=')?;
+        (name == SESSION_COOKIE).then(|| value.to_owned())
+    })
+}
+
 async fn session_alive(
     state: &AppState,
     headers: &HeaderMap,
     bound: &str,
     user_id: i64,
 ) -> Result<bool, fred::error::Error> {
-    let Some(sid) = crate::console::auth_web::session_id(headers) else {
+    let Some(sid) = session_id(headers) else {
         return Ok(false);
     };
     if hex::encode(Sha256::digest(sid.as_bytes())) != bound {

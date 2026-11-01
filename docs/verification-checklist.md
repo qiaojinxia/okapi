@@ -102,7 +102,7 @@
 | `subscriptions.rs` | 套餐 CRUD、购买、配额窗、订阅池优先扣 | A B | `console_subscriptions`（Lua 契约、网关优先扣、worker 滚窗、回调激活、校验）、e2e `subscriptions.spec`（接口桩） | 升降级 / 多订阅并存 backlog |
 | `teams.rs` | 建团 / 成员限额 / 团 key / 分账 | A B C | 单元；`console_teams` 全生命周期 | — |
 | 兑换码（manage + portal） | 批量生成、核销、绑用户、限 IP | A C | `console_redemption`（并发恰一成功、过期拒绝、IP 上限）、e2e `redemptions.spec` | 多次核销 `max_uses` backlog |
-| `ssrf.rs` | 上游 URL 校验：`api_base`、`settings.oauth_token_url`、Vertex 服务账号 `token_uri`（凭证三个写入口） | C | 单元；`console_ssrf`（三种地址各自的 400 参数与放行） | — |
+| `gateway/ssrf.rs`（2026-11-01 前在 console） | 上游 URL 校验：`api_base`、`settings.oauth_token_url`、Vertex 服务账号 `token_uri`（凭证三个写入口） | C | 单元；`console_ssrf`（三种地址各自的 400 参数与放行） | — |
 | SPA 托管 / 内容协商 | `/admin/*` 同挂 API 与 SPA | A | `console_spa_navigation` | — |
 | 公告 / settings | `site_notice` 公开端点、设置读写 | A | `console_portal_pages::public_notice_whitelists_and_gates`、`console_ops::settings_get_and_leaderboard`、e2e smoke 公告 | — |
 | `playground.rs` | Playground 同源流式中继 + 站点预设（§11.39） | A B C | `console_playground`（中继强制流式回 SSE、逐块透出与记账落同一 key、无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口）；单元 `force_stream` / `sanitize_presets` | 中继直调数据面处理器，鉴权 / 限流 / 计费全部复用 gateway，不另测 |

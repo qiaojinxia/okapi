@@ -1,23 +1,14 @@
 //! Opt-in dashboard query cache. Guards run before this helper; errors aren't cached.
-use crate::gateway::{error::AppError, state::AppState};
+//! 缓存本体挂在 `AppState` 上，类型与构造在 `gateway::state`（网关构造状态时不引用 console）。
+#[cfg(test)]
+use crate::gateway::state::build_query_cache as build;
+use crate::gateway::{
+    error::AppError,
+    state::{AppState, QueryCache},
+};
 use axum::http::HeaderMap;
-use moka::future::Cache;
 use serde_json::Value;
-use std::{future::Future, sync::Arc, time::Duration};
-
-pub(crate) type QueryCache = Cache<String, Arc<Vec<Value>>>;
-
-pub(crate) fn build() -> QueryCache {
-    Cache::builder()
-        .max_capacity(16 * 1024 * 1024)
-        .weigher(|key: &String, rows: &Arc<Vec<Value>>| {
-            let bytes = serde_json::to_vec(rows.as_ref()).map_or(usize::MAX, |v| v.len());
-            u32::try_from(key.len().saturating_add(bytes)).unwrap_or(u32::MAX)
-        })
-        // 运营概览每分钟自动刷新一次：15s 时每次都落空，多个管理员 / 标签页也各算一遍
-        .time_to_live(Duration::from_mins(1))
-        .build()
-}
+use std::{future::Future, sync::Arc};
 
 pub(super) fn allowed(headers: &HeaderMap) -> bool {
     !headers

@@ -94,7 +94,7 @@ impl Notifier {
                 self.finish_claim(idx, event, &claim, interval, false).await;
                 continue;
             };
-            if let Err(error) = crate::console::ssrf::validate_url(&self.pg, url).await {
+            if let Err(error) = crate::gateway::ssrf::validate_url(&self.pg, url).await {
                 tracing::error!(event, channel=idx, code = %error.code, "notification URL rejected; configure ssrf_policy for private deployments");
                 if self.mute_acquire(idx, "ssrf_rejected_audit", 86400).await {
                     let detail = serde_json::json!({"channel_index":idx,"event":event,"error_code":error.code,"reason":error.param});

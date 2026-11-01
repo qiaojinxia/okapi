@@ -105,10 +105,10 @@ impl Binding {
         Ok(binding)
     }
     async fn validate(&self, state: &AppState) -> Result<(), AppError> {
-        crate::console::ssrf::validate_upstream_base(state, &self.api_base).await?;
-        crate::console::ssrf::validate_credential(state, &self.credential).await?;
+        crate::gateway::ssrf::validate_upstream_base(state, &self.api_base).await?;
+        crate::gateway::ssrf::validate_credential(state, &self.credential).await?;
         if let Some(gcs) = &self.gcs {
-            crate::console::ssrf::validate_api_base(state, &gcs.api_base).await?;
+            crate::gateway::ssrf::validate_api_base(state, &gcs.api_base).await?;
         }
         let outbound = Outbound {
             proxy_url: self.proxy_url.clone(),
