@@ -480,7 +480,9 @@ test('模型规则防重复，零值不限流，访问开关保留扩展字段',
   expect(values.model_rpm_limits).toEqual({})
   await page.getByRole('article', { name: '上游访问策略' }).getByRole('button').click()
   dialog = page.getByRole('dialog', { name: '上游访问策略' })
-  await dialog.getByRole('switch', { name: '允许 HTTP 上游', exact: true }).click()
+  // 渠道 API 地址缺省就允许 HTTP（没写 allow_http_upstream 也是开）；这里关的是「其它地址」那一档
+  await expect(dialog.getByRole('switch', { name: '渠道 API 地址允许 HTTP', exact: true })).toBeChecked()
+  await dialog.getByRole('switch', { name: '其它地址允许 HTTP', exact: true }).click()
   await page.route('**/admin/settings', async (route) => {
     if (route.request().isNavigationRequest()) return route.fallback()
     if (route.request().method() === 'POST') {
@@ -516,7 +518,15 @@ test('模型规则防重复，零值不限流，访问开关保留扩展字段',
   })
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toHaveCount(0)
-  expect(values.ssrf_policy).toEqual({ allow_http: false, allow_private: true, custom: 'keep' })
+  expect(values.ssrf_policy).toEqual({ allow_http: false, allow_http_upstream: true, allow_private: true, custom: 'keep' })
+  // 再把渠道这一档关掉：两个开关互不牵连，未识别字段照旧保留
+  await page.getByRole('article', { name: '上游访问策略' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '上游访问策略' })
+  await dialog.getByRole('switch', { name: '渠道 API 地址允许 HTTP', exact: true }).click()
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(values.ssrf_policy).toEqual({ allow_http: false, allow_http_upstream: false, allow_private: true, custom: 'keep' })
+  await expect(page.getByRole('article', { name: '上游访问策略' })).toContainText('渠道仅 HTTPS')
 })
 
 test('登录服务商保留密钥，扩展 JSON 明确展开并校验，通知入口跳转专用表单', async ({ page }) => {

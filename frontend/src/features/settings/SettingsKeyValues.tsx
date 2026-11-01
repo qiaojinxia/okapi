@@ -141,6 +141,7 @@ function SettingSummary({ row }: { row: SettingRow }) {
   if (row.key === 'pricing_base_per_1m_micro' && typeof value === 'number') return <div className="space-y-1 tabular-nums"><p className="font-semibold">${value / 1_000_000} / 1M tokens</p><p className="text-xs text-muted-foreground">{t('admin:pricingBasePublished', { price: (row.published_value ?? 2_000_000) / 1_000_000 })}</p></div>
   if (row.key === 'aff_percent_bp' && typeof value === 'number') return <span className="font-semibold tabular-nums">{(value / 100).toLocaleString(i18n.language, { maximumFractionDigits: 2 })}% <span className="font-normal text-muted-foreground">{t('admin:settingRebateUnit')}</span></span>
   if (row.key === 'ssrf_policy' && isRecord(value)) return <>
+    <Badge variant={value.allow_http_upstream === false ? 'muted' : 'warning'}>{t(value.allow_http_upstream === false ? 'admin:settingUpstreamHttpsOnly' : 'admin:settingUpstreamHttpAllowed')}</Badge>
     <Badge variant={value.allow_http ? 'warning' : 'muted'}>{t(value.allow_http ? 'admin:settingHttpAllowed' : 'admin:settingHttpsOnly')}</Badge>
     <Badge variant={value.allow_private ? 'warning' : 'muted'}>{t(value.allow_private ? 'admin:settingPrivateAllowed' : 'admin:settingPublicOnly')}</Badge>
   </>

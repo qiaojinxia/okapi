@@ -47,7 +47,7 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
   const parsed = (() : { value: unknown; error?: FormError } => {
     if (mode === 'epay' || mode === 'stripe') return parseFields(draft, fields)
     if (mode === 'oauth_refresh') return parseRefreshPolicy(draft)
-    if (mode === 'ssrf') return { value: { ...draft, allow_http: draft.allow_http === true, allow_private: draft.allow_private === true } }
+    if (mode === 'ssrf') return { value: { ...draft, allow_http: draft.allow_http === true, allow_http_upstream: draft.allow_http_upstream !== false, allow_private: draft.allow_private === true } }
     if (mode === 'percent') {
       const value = scaledInteger(text, 2)
       return { value, error: value === null || value > 10000 ? { key: 'admin:settingInvalidPercent' } : undefined }
@@ -100,6 +100,7 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
           </div>}
           {(mode === 'epay' || mode === 'stripe') && <ObjectFields fields={fields} draft={draft} onChange={patch} prefix={formId} />}
           {mode === 'ssrf' && <>
+            <Switch label={t('admin:settingAllowHttpUpstream')} description={t('admin:settingAllowHttpUpstreamHint')} checked={draft.allow_http_upstream !== false} onChange={(v) => patch('allow_http_upstream', v)} />
             <Switch label={t('admin:settingAllowHttp')} description={t('admin:settingAllowHttpHint')} checked={draft.allow_http === true} onChange={(v) => patch('allow_http', v)} />
             <Switch label={t('admin:settingAllowPrivate')} description={t('admin:settingAllowPrivateHint')} checked={draft.allow_private === true} onChange={(v) => patch('allow_private', v)} />
           </>}

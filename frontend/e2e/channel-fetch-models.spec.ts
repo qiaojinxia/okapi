@@ -85,6 +85,23 @@ test('新建渠道还没保存时就能拉上游模型：凭证没填按钮不�
   })
 })
 
+test('API 地址填的是 http:// 时提示明文传输（不分大小写、忽略首尾空白）；https 或留空不提示', async ({ page }) => {
+  await prepare(page)
+  const drawer = await openNew(page)
+  await drawer.locator('#channel-connection-options > summary').click()
+  const base = drawer.locator('#d-base')
+  const warning = drawer.getByRole('note').filter({ hasText: 'HTTP 是明文传输' })
+  await expect(warning).toHaveCount(0)
+  await base.fill('http://38.92.24.38:8893/v1')
+  await expect(warning).toBeVisible()
+  await base.fill('https://relay.example.test/v1')
+  await expect(warning).toHaveCount(0)
+  await base.fill('  HTTP://relay.example.test:8893/v1 ')
+  await expect(warning).toBeVisible()
+  await base.fill('')
+  await expect(warning).toHaveCount(0)
+})
+
 test('拉取失败不动清单，错误提示出来；没有定价读取权限时照样能拉，只是不提示价簿缺口', async ({ page }) => {
   const calls = await prepare(page, { models: 'denied' })
   const drawer = await openNew(page)

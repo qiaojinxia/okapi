@@ -361,6 +361,7 @@ export function ChannelDrawer({
     <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
     <Input id="d-base" value={form.api_base} placeholder={defaultBase ?? apiBasePlaceholder(form.provider)} required={endpointRequired}
       onChange={(e) => setForm((f) => ({ ...f, api_base: e.target.value }))} />
+    {/^http:\/\//i.test(form.api_base.trim()) && <p role="note" className="text-xs text-warning">{t('admin:apiBaseHttpWarning')}</p>}
     {form.provider === 'azure' && <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>}
     {form.provider === 'bedrock' && <p className="text-xs text-muted-foreground">{t('admin:bedrockApiBaseHint')}</p>}
     {form.provider === 'vertex' && <p className="text-xs text-muted-foreground">{t('admin:vertexApiBaseHint')}</p>}
