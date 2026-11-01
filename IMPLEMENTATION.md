@@ -3305,6 +3305,33 @@ thinking 签名失配没有矫正（"签名是否绑账号"没验证）；key �
 `chat::non_json_body_tests`（种类归类、BOM / 空白、诊断文本）；七处后端变异（不检查、不记 2xx 状态、count_tokens 编 0、embeddings 不检查、html / 残缺 JSON 当成功、
 不容忍 BOM）与五处前端变异（提示不显示 / 对 OpenAI 兼容也显示 / 带路径也显示、拉取失败回通用文案、测试 toast 丢专用文案）均被抓住。
 
+### 11.55 架构评审第一批：收口重复实现、媒体端点补渠道 key 闸（2026-11-01）
+
+起因：架构评审发现几处「同一件事写了好几份，各份口径不同」：七个计费入口各拼一遍计价上下文与预扣；渠道 key 的
+RPM / 当日消费闸只在 chat 里生效；渠道删除、api_key 删除在 store 里各有两三份实现；`okapi-store` 只为一张协议表依赖 `okapi-api`。
+
+- **准入片段收口**（`gateway::admission`）：`calc_context`（计价上下文，含站点本地分钟数）、`limit_caps`、`reserve`（预扣 + 429 映射）。
+  chat / embeddings / audio / images / videos / realtime / custom_pass 改用它们；各入口自己的准入顺序（成员月限、分组限流、候选、失败退款）不变。
+- **渠道 key 闸各入口一致**（`gateway::key_gate`）：`check` = key 级 RPM + 当日消费上限，chat 主链路、Responses WS、embeddings、images（含流式）、videos、
+  audio、realtime 都在真要用某个候选时才判（RPM 是固定窗计数，判一次占一格）；被挡下的候选不算一次尝试，全部被挡回 503 `no_available_channel`
+  （与 chat 同口径）。count_tokens 不花钱，只判 RPM（`rpm_ok`）。`rpm_limit <= 0` 一律当作不限（此前 chat 当作全挡、count_tokens 当作不限；控制台没有写这一列的入口）。
+  custom_pass 绑定的是渠道而非 key 候选，没有这道闸。
+- **当日消费在落账处累加**（`AppState::record_key_spend`）：成功落账（`log_type = 2`）且带 `channel_key_id` 的账，在
+  `settle_success` / 后台补写 / 重试日志补写三处插入成功时累加 `spend:ck:*`；同一 request_id 只落账一次，不会重复。此前只有 chat 的成功结算与重试补写会累加，
+  媒体端点的花费 least_usage 与日消费上限都看不见。chat 的选路反馈只剩时延 EWMA（`record_channel_key_latency`），媒体请求不进时延样本（出图、转写的耗时与对话不可比）。
+- **媒体端点落 `client_ip`**：embeddings / audio / images / videos / custom_pass 的结算与失败账、realtime 的会话账都记来源 IP（此前只有 chat 记；
+  `settings.record_ip_log` 开关照旧在 `prepare_settlement` 统一生效）。
+- **单删渠道与批删同口径**：`DELETE /admin/channels/{id}` 改走 `mutate::delete_channel`，软删的同时停用其下 key（`status = 2`）；
+  删掉只有测试在用的 `admin::soft_delete_channel`。退出登录作废会话 key 的裸 SQL 收进 `admin::soft_delete_session_keys`。
+- **删掉没有调用方的 store 函数**：`mutate::{ChannelPatch, patch_channel, delete_api_key, set_api_key_status, api_key_owner}`、`admin::claim_redemption`
+  （不带事务的版本一调用就作废兑换码却不入账）、`egress::resolve_for_channel`、`listing::role_user_count`，连同 7 个 `.sqlx` 缓存。
+- **协议目录挪到 `okapi-domain::provider_contract`**：存储解码与适配器注册共用；`okapi-store` 不再依赖 `okapi-api`（改 usage 解析不再连带重编 store / ledger）。
+- **providers 样板**：`error::classify`（reqwest 传输错误分类，原先四份逐字相同）、`openai::status_error`（非 2xx → `Status`，九处逐字相同）。
+- **日志标签**：`anthropic_max` 渠道的上游端点记成 `/v1/messages`（此前落到 `/v1/chat/completions`）；`AppState.gemini` 从未被读，删掉。
+
+**没动**：价目目录 `okapi_pricing::catalog` 仍留在 pricing（挪去 console 会丢掉 pricing crate 的禁浮点 / 禁 panic 守卫）；各入口的 failover 循环语义不同（images 非幂等只对
+401/402/403/429 换渠道、audio / realtime 只发一次），只统一了闸，没统一循环。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

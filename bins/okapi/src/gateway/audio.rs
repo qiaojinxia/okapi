@@ -13,9 +13,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
-use okapi_domain::{BillingState, GroupCode, ModelCode, TokenUsage, UserId};
-use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, Quote, RatioFp, calculate, calculate_characters};
+use okapi_domain::{BillingState, TokenUsage};
+use okapi_ledger::SettlementInput;
+use okapi_pricing::{Quote, calculate, calculate_characters};
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,45 +27,6 @@ struct SpeechProbe {
     model: String,
     #[serde(default)]
     input: String,
-}
-
-fn calc_ctx(
-    key: &okapi_store::AuthedKey,
-    model: &str,
-    rules_in: super::rule_inputs::RuleInputs,
-) -> CalcContext {
-    let now = chrono::Utc::now();
-    CalcContext {
-        user: UserId::new(key.user_id),
-        model: ModelCode::from(model),
-        group: GroupCode::from(key.group_code.as_str()),
-        user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: rules_in.monthly_tokens,
-        monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: u16::try_from(
-            (now.timestamp()
-                .saturating_add(i64::from(
-                    now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-                ))
-                .div_euclid(60))
-            .rem_euclid(1440),
-        )
-        .unwrap_or(0),
-        now_unix: now.timestamp(),
-        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-        surge_active: rules_in.surge_active,
-        service_tier: None,
-    }
-}
-
-fn caps_of(key: &okapi_store::AuthedKey) -> LimitCaps {
-    let cap = |v: Option<i32>| v.map_or(0, i64::from);
-    LimitCaps {
-        rpm: cap(key.rpm_limit),
-        tpm: cap(key.tpm_limit),
-        rpd: cap(key.rpd_limit),
-        concurrency: cap(key.max_concurrency),
-    }
 }
 
 /// 候选（openai 系）：audio 只走 openai/openai_compat 渠道。
@@ -88,12 +49,22 @@ async fn first_candidate(
     let margin_removed = state
         .retain_margin_ok(&key.group_code, &mut candidates)
         .await;
-    candidates.into_iter().next().ok_or_else(|| {
-        AppError::new(
+    if candidates.is_empty() {
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             super::state::no_candidates_code(margin_removed),
-        )
-    })
+        ));
+    }
+    // 只发一次（不 failover）：取第一个过得了 key 级 RPM / 当日消费闸的候选
+    for cand in candidates {
+        if super::key_gate::check(state, &cand).await.is_ok() {
+            return Ok(cand);
+        }
+    }
+    Err(AppError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        codes::NO_AVAILABLE_CHANNEL,
+    ))
 }
 
 // ---- speech ----
@@ -135,43 +106,16 @@ async fn handle_speech(
     let usage = TokenUsage::default();
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
-    let calc = calc_ctx(&key, &canonical, rules_in);
+    let calc = super::admission::calc_context(&key, &canonical, rules_in, chrono::Utc::now(), None);
     let quote = calculate_characters(&book, &calc, chars)?;
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    let (reservation_pool, source_window) = match state
-        .reserve_for_key(
-            key.quota_limited,
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: quote.amount,
-                caps: caps_of(&key),
-                est_tokens: 0,
-            },
-            chrono::Utc::now(),
-        )
-        .await?
-    {
-        ReserveOutcome::Reserved {
-            pool,
-            source_window,
-            ..
-        } => (pool, source_window),
-        ReserveOutcome::Insufficient { .. } => {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        ReserveOutcome::RateLimited { which } => {
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
-    };
+    let super::admission::Reserved {
+        pool: reservation_pool,
+        source_window,
+    } = super::admission::reserve(state, &key, request_id, quote.amount, 0, chrono::Utc::now())
+        .await?;
 
     let mut failure = super::failure::Guard::new(
         state,
@@ -356,7 +300,7 @@ async fn handle_transcriptions(
     // per_call：预扣即终额（时长无法本地解码，§4.4 定案）
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
-    let calc = calc_ctx(&key, &canonical, rules_in);
+    let calc = super::admission::calc_context(&key, &canonical, rules_in, chrono::Utc::now(), None);
     let quote = calculate(&book, &calc, TokenUsage::default())?;
     if quote.snapshot.mode != "per_call" {
         return Err(AppError::bad_request().with_param("transcriptions_requires_per_call_model"));
@@ -364,38 +308,11 @@ async fn handle_transcriptions(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    let (reservation_pool, source_window) = match state
-        .reserve_for_key(
-            key.quota_limited,
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: quote.amount,
-                caps: caps_of(&key),
-                est_tokens: 0,
-            },
-            chrono::Utc::now(),
-        )
-        .await?
-    {
-        ReserveOutcome::Reserved {
-            pool,
-            source_window,
-            ..
-        } => (pool, source_window),
-        ReserveOutcome::Insufficient { .. } => {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        ReserveOutcome::RateLimited { which } => {
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
-    };
+    let super::admission::Reserved {
+        pool: reservation_pool,
+        source_window,
+    } = super::admission::reserve(state, &key, request_id, quote.amount, 0, chrono::Utc::now())
+        .await?;
 
     let endpoint = if path == "/audio/translations" {
         "/v1/audio/translations"
@@ -534,6 +451,7 @@ async fn settle(
             quote.list_price,
         );
     }
+    let client_ip = super::clients::detect_client_ip(headers);
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -570,7 +488,7 @@ async fn settle(
         node: state.node.as_ref(),
         sticky_layer: 0,
         client_type: detect_client_type(headers),
-        client_ip: None,
+        client_ip: client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
         balance_after: None,
         event_type: "commit",

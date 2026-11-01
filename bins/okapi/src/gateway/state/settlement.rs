@@ -39,6 +39,21 @@ impl AppState {
         self.prepare_upstream_cost(input).await;
     }
 
+    /// 成功落账的金额记进渠道 key 的当日消费（`spend:ck:*`，日消费上限闸与 least_usage 选路的输入）。
+    /// 七个计费端点与补写路径都在落账成功处调它，同一 request_id 只会落账一次，所以不会重复累加。
+    pub(in crate::gateway) async fn record_key_spend(&self, input: &SettlementInput<'_>) {
+        if input.log_type != 2 {
+            return;
+        }
+        if let Some(key) = input.channel_key_id
+            && input.amount.as_micros() > 0
+        {
+            self.sched
+                .channel_key_spend_add(key, input.amount.as_micros())
+                .await;
+        }
+    }
+
     /// 这笔账的上游成本（API 等价）记进渠道 key 的烧速计数：额度预判拿它外推两次观测之间的用量。
     /// 只算聊天类请求；成本未知（没有定价基准）就不记。
     pub(in crate::gateway) async fn record_key_burn(&self, input: &SettlementInput<'_>) {
@@ -171,6 +186,7 @@ impl AppState {
                         self.sched
                             .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
                             .await;
+                        self.record_key_spend(&input).await;
                         self.record_key_burn(&input).await;
                     }
                     let _ = super::super::settlement_retry::remove(self, input.request_id).await;
@@ -232,6 +248,7 @@ impl AppState {
                         self.sched
                             .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
                             .await;
+                        self.record_key_spend(&input).await;
                     }
                     tracing::warn!(request_id=%input.request_id, waited_secs = started.elapsed().as_secs(), "background settlement persisted");
                     return;

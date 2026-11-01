@@ -1,6 +1,7 @@
 //! gateway 角色：数据面（鉴权、限流、预扣/结算、SSE 透传）。
 
 pub mod account_control;
+pub(crate) mod admission;
 pub mod audio;
 pub mod auth;
 pub mod bootstrap;
@@ -22,6 +23,7 @@ pub(crate) mod failure;
 pub mod images;
 pub mod inflight;
 pub(crate) mod ingress;
+pub(crate) mod key_gate;
 pub(crate) mod key_health;
 pub mod models;
 pub mod oauth_cred;
@@ -134,7 +136,6 @@ pub(crate) async fn build_state_with_resources(
         upstream,
         inference,
         anthropic: resources.anthropic,
-        gemini: resources.gemini,
         bedrock: resources.bedrock,
         vertex: resources.vertex,
         pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,

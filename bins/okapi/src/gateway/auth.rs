@@ -208,26 +208,17 @@ pub async fn record_settlement_counters(
     super::rule_inputs::record_tokens(state, key_user_id, tokens, amount_micro).await;
 }
 
-/// 渠道 key 的选路反馈：时延 EWMA（least_latency 池排序输入）+ 当日消费（上限闸输入）。
+/// 渠道 key 的时延反馈（least_latency 池排序输入）。
 ///
 /// 只在结算后调用，故只有成功请求进入时延样本——失败请求的耗时多半是超时或握手失败，
-/// 混进去会把一个刚恢复的 key 长时间压在队尾。
-pub async fn record_channel_key_feedback(
-    state: &AppState,
-    channel_key_id: i64,
-    latency_ms: i32,
-    amount_micro: i64,
-) {
+/// 混进去会把一个刚恢复的 key 长时间压在队尾。当日消费在落账成功处统一累加
+/// （`AppState::record_key_spend`），不在这里。只有对话类请求调它：媒体请求的耗时
+/// （出图、转写）与对话不可比，混进同一把 key 的样本会扭曲排序。
+pub async fn record_channel_key_latency(state: &AppState, channel_key_id: i64, latency_ms: i32) {
     if let Ok(sample) = u32::try_from(latency_ms) {
         state
             .sched
             .channel_key_latency_record(channel_key_id, sample)
-            .await;
-    }
-    if amount_micro > 0 {
-        state
-            .sched
-            .channel_key_spend_add(channel_key_id, amount_micro)
             .await;
     }
 }

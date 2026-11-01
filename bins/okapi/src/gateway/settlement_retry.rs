@@ -211,15 +211,8 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
                     input.usage.total_raw(),
                 )
                 .await;
-                // 网关在这笔落账前就放弃了，不会再做渠道 key 反馈：日消费上限照样要计入
-                if let Some(channel_key) = input.channel_key_id
-                    && input.amount.as_micros() > 0
-                {
-                    state
-                        .sched
-                        .channel_key_spend_add(channel_key, input.amount.as_micros())
-                        .await;
-                }
+                // 网关在这笔落账前就放弃了：日消费上限照样要计入
+                state.record_key_spend(&input).await;
                 state
                     .sched
                     .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)

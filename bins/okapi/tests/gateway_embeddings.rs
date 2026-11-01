@@ -129,7 +129,13 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // 带对端地址：结算记 client_ip 的断言要用
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestEnv {
@@ -319,4 +325,123 @@ async fn embeddings_failover_uses_the_successful_channel_cost() {
             10_000_000 - 240
         );
     }
+}
+
+async fn key_of(pg: &PgPool, model: &str, priority: i32) -> i64 {
+    sqlx::query_scalar(
+        "SELECT k.id FROM channel_keys k JOIN channels c ON c.id = k.channel_id
+         WHERE c.models @> $1 AND c.priority = $2",
+    )
+    .bind(json!([model]))
+    .bind(priority)
+    .fetch_one(pg)
+    .await
+    .unwrap()
+}
+
+async fn spend_today(redis: &fred::clients::Client, key: i64) -> Option<i64> {
+    use fred::interfaces::KeysInterface;
+    let day = chrono::Utc::now().format("%Y%m%d");
+    redis.get(format!("spend:ck:{key}:{day}")).await.unwrap()
+}
+
+/// 渠道 key 的当日消费上限对 embeddings 也生效：到顶的高优先级 key 被跳过（不算一次 failover），
+/// 请求落到下一把；这次的花费记进那把 key 的当日消费，账上记来源 IP。
+#[tokio::test]
+async fn embeddings_skip_a_key_over_its_daily_spend_cap_and_count_the_spend() {
+    let env = setup(&[("/ok/v1", 10), ("/ok/v1", 0)]).await;
+    let capped = key_of(&env.pg, &env.model, 10).await;
+    let spare = key_of(&env.pg, &env.model, 0).await;
+    sqlx::query("UPDATE channel_keys SET daily_spend_cap_micro = 100 WHERE id = $1")
+        .bind(capped)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    {
+        use fred::interfaces::KeysInterface;
+        let day = chrono::Utc::now().format("%Y%m%d");
+        let _: () = redis
+            .set(
+                format!("spend:ck:{capped}:{day}"),
+                100_i64,
+                Some(fred::types::Expiration::EX(600)),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/embeddings", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model": env.model, "input": ["hello world", "second doc"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (status, amount, _, failover) = wait_record(&env.pg, env.user_id).await;
+    assert_eq!(
+        (status, amount, failover),
+        (20, 240, 0),
+        "被闸挡下的候选不算一次尝试"
+    );
+    let (served, ip): (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT channel_key_id, host(client_ip) FROM billing_records WHERE user_id = $1 AND log_type = 2",
+    )
+    .bind(env.user_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(served, Some(spare));
+    assert_eq!(ip.as_deref(), Some("127.0.0.1"), "媒体端点也记来源 IP");
+    let mut spent = None;
+    for _ in 0..50 {
+        spent = spend_today(&redis, spare).await;
+        if spent.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(spent, Some(240), "embeddings 的花费计入渠道 key 当日消费");
+    assert_eq!(
+        spend_today(&redis, capped).await,
+        Some(100),
+        "没用上的 key 不动"
+    );
+}
+
+/// 所有候选都被 key 闸挡下：503 no_available_channel（与 chat 同口径），预扣退回。
+#[tokio::test]
+async fn embeddings_answer_503_when_every_key_is_over_its_cap() {
+    let env = setup(&[("/ok/v1", 0)]).await;
+    let only = key_of(&env.pg, &env.model, 0).await;
+    sqlx::query("UPDATE channel_keys SET rpm_limit = 1 WHERE id = $1")
+        .bind(only)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(post_embeddings(&env).await.status(), 200);
+    let resp = post_embeddings(&env).await;
+    assert_eq!(resp.status(), 503);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_available_channel");
+    let mut held = usize::MAX;
+    for _ in 0..50 {
+        held = env
+            .state
+            .ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .len();
+        if held == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(held, 0, "被挡下的请求不留预扣");
 }

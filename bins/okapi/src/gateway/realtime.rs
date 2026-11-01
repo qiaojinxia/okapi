@@ -16,9 +16,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
 use okapi_api::codes;
-use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, RatioFp, calculate};
+use okapi_domain::{BillingState, Money, TokenUsage};
+use okapi_ledger::{Pool, SettlementInput};
+use okapi_pricing::{CalcContext, calculate};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -90,6 +90,7 @@ pub async fn realtime(
     match prepare(&state, &key, &q.model, request_id).await {
         Ok(mut prep) => {
             prep.auth_headers = auth_headers.unwrap_or_default();
+            prep.client_ip = super::clients::detect_client_ip(&headers);
             ws.protocols(["realtime"])
                 .on_upgrade(move |socket| async move {
                     // 受下线跟踪：进程退出前等会话收尾落账，不留给 10 分钟后的过期退款
@@ -132,6 +133,8 @@ struct Prep {
     key: std::sync::Arc<okapi_store::AuthedKey>,
     /// 握手时用来鉴权的请求头（`Authorization` 或由子协议合成），会话期间复查 key 用。
     auth_headers: HeaderMap,
+    /// 握手请求的来源 IP（落 billing_records / CH 的 client_ip，同 HTTP 端点）。
+    client_ip: Option<String>,
     request_id: Uuid,
     reserved: Money,
     reservation_pool: Pool,
@@ -178,27 +181,7 @@ async fn prepare(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let calc = CalcContext {
-        user: UserId::new(key.user_id),
-        model: ModelCode::from(canonical.as_str()),
-        group: GroupCode::from(key.group_code.as_str()),
-        user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: rules_in.monthly_tokens,
-        monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: u16::try_from(
-            (now.timestamp()
-                .saturating_add(i64::from(
-                    now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-                ))
-                .div_euclid(60))
-            .rem_euclid(1440),
-        )
-        .unwrap_or(0),
-        now_unix: now.timestamp(),
-        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-        surge_active: rules_in.surge_active,
-        service_tier: None,
-    };
+    let calc = super::admission::calc_context(key, canonical.as_str(), rules_in, now, None);
     let cap = meta
         .max_output
         .and_then(|v| u32::try_from(v).ok())
@@ -239,51 +222,17 @@ async fn prepare(
         );
     }
 
-    let caps = {
-        let c = |v: Option<i32>| v.map_or(0, i64::from);
-        LimitCaps {
-            rpm: c(key.rpm_limit),
-            tpm: c(key.tpm_limit),
-            rpd: c(key.rpd_limit),
-            concurrency: c(key.max_concurrency),
-        }
-    };
-    let reserve = state
-        .reserve_for_key(
-            key.quota_limited,
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: est.amount,
-                caps,
-                est_tokens: u64::from(cap) * 2,
-            },
-            now,
-        )
-        .await;
-    let (reservation_pool, source_window) = match reserve {
-        Ok(ReserveOutcome::Reserved {
-            pool,
-            source_window,
-            ..
-        }) => (pool, source_window),
-        Ok(ReserveOutcome::Insufficient { .. }) => {
-            state.sched.ws_lease_release(key.key_id, &conn_id).await;
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        Ok(ReserveOutcome::RateLimited { which }) => {
-            state.sched.ws_lease_release(key.key_id, &conn_id).await;
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
+    let reserved =
+        super::admission::reserve(state, key, request_id, est.amount, u64::from(cap) * 2, now)
+            .await;
+    let super::admission::Reserved {
+        pool: reservation_pool,
+        source_window,
+    } = match reserved {
+        Ok(reserved) => reserved,
         Err(err) => {
             state.sched.ws_lease_release(key.key_id, &conn_id).await;
-            return Err(err.into());
+            return Err(err);
         }
     };
     let mut admission = Admission {
@@ -330,13 +279,24 @@ async fn prepare(
     let margin_removed = state
         .retain_margin_ok(&key.group_code, &mut candidates)
         .await;
-    let Some(cand) = candidates.into_iter().next() else {
+    let no_candidates = candidates.is_empty();
+    // 一条会话只接一个上游：取第一个过得了 key 级 RPM / 当日消费闸的候选
+    let mut picked = None;
+    for cand in candidates {
+        if super::key_gate::check(state, &cand).await.is_ok() {
+            picked = Some(cand);
+            break;
+        }
+    }
+    let Some(cand) = picked else {
         admission.disarm();
         release_reservation_and_slot(state, key, request_id, reservation_pool).await;
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            super::state::no_candidates_code(margin_removed),
-        ));
+        let code = if no_candidates {
+            super::state::no_candidates_code(margin_removed)
+        } else {
+            codes::NO_AVAILABLE_CHANNEL
+        };
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, code));
     };
     let upstream_model = cand.upstream_model(&canonical).to_owned();
     let base = cand
@@ -355,6 +315,7 @@ async fn prepare(
         admission,
         key: std::sync::Arc::clone(key),
         auth_headers: HeaderMap::new(),
+        client_ip: None,
         request_id,
         reserved: est.amount,
         reservation_pool,
@@ -714,7 +675,7 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         node: state.node.as_ref(),
         sticky_layer: 0,
         client_type: "realtime",
-        client_ip: None,
+        client_ip: prep.client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
         balance_after: None,
         event_type: "commit",
@@ -778,7 +739,7 @@ async fn record_failure(
         node: state.node.as_ref(),
         sticky_layer: 0,
         client_type: "realtime",
-        client_ip: None,
+        client_ip: prep.client_ip.as_deref(),
         delta_micro: 0,
         balance_after: None,
         event_type: "refund",

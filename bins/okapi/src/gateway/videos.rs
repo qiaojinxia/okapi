@@ -17,9 +17,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
-use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, Quote, RatioFp, calculate};
+use okapi_domain::{BillingState, Money, TokenUsage};
+use okapi_ledger::SettlementInput;
+use okapi_pricing::{Quote, calculate};
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
 use serde_json::Value;
@@ -108,28 +108,7 @@ async fn handle_create(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day = u16::try_from(
-        (now.timestamp()
-            .saturating_add(i64::from(
-                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-            ))
-            .div_euclid(60))
-        .rem_euclid(1440),
-    )
-    .unwrap_or(0);
-    let calc = CalcContext {
-        user: UserId::new(key.user_id),
-        model: ModelCode::from(canonical.as_str()),
-        group: GroupCode::from(key.group_code.as_str()),
-        user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: rules_in.monthly_tokens,
-        monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: minute_of_day,
-        now_unix: now.timestamp(),
-        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-        surge_active: rules_in.surge_active,
-        service_tier: None,
-    };
+    let calc = super::admission::calc_context(&key, canonical.as_str(), rules_in, now, None);
     let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
     if quote.snapshot.mode != "per_call" {
         return Err(AppError::bad_request().with_param("per_call_required"));
@@ -137,45 +116,10 @@ async fn handle_create(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    let cap = |v: Option<i32>| v.map_or(0, i64::from);
-    let caps = LimitCaps {
-        rpm: cap(key.rpm_limit),
-        tpm: cap(key.tpm_limit),
-        rpd: cap(key.rpd_limit),
-        concurrency: cap(key.max_concurrency),
-    };
-    let (reservation_pool, source_window) = match state
-        .reserve_for_key(
-            key.quota_limited,
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: quote.amount,
-                caps,
-                est_tokens: 0,
-            },
-            now,
-        )
-        .await?
-    {
-        ReserveOutcome::Reserved {
-            pool,
-            source_window,
-            ..
-        } => (pool, source_window),
-        ReserveOutcome::Insufficient { .. } => {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        ReserveOutcome::RateLimited { which } => {
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
-    };
+    let super::admission::Reserved {
+        pool: reservation_pool,
+        source_window,
+    } = super::admission::reserve(state, &key, request_id, quote.amount, 0, now).await?;
 
     let mut failure = super::failure::Guard::new(
         state,
@@ -226,7 +170,16 @@ async fn handle_create(
 
     let mut failover: i16 = 0;
     let mut last_err: Option<AppError> = None;
-    for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
+    let mut attempted = 0;
+    for cand in candidates {
+        if attempted >= MAX_ATTEMPTS {
+            break;
+        }
+        // key 级 RPM / 当日消费闸挡下的候选不算一次尝试（与 chat 同一套闸）
+        if super::key_gate::check(state, &cand).await.is_err() {
+            continue;
+        }
+        attempted += 1;
         failure.channel(&cand);
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         let Ok(body_up) = rewrite_model(&body, &probe.model, &upstream_model) else {
@@ -326,8 +279,13 @@ async fn handle_create(
     }
 
     refund(state, &key, request_id, "videos").await;
-    let error =
-        last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR));
+    let error = last_err.unwrap_or_else(|| {
+        if attempted == 0 {
+            AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL)
+        } else {
+            AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+        }
+    });
     failure.error(&error);
     Err(error)
 }
@@ -551,6 +509,7 @@ async fn commit_and_record(
     source_window: Option<&str>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
+    let client_ip = super::clients::detect_client_ip(headers);
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -592,7 +551,7 @@ async fn commit_and_record(
         node: state.node.as_ref(),
         sticky_layer: 0,
         client_type: detect_client_type(headers),
-        client_ip: None,
+        client_ip: client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
         balance_after: None,
         event_type: "commit",

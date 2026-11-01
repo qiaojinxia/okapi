@@ -75,26 +75,9 @@ fn failure(
 }
 
 async fn slot(bill: &RequestBilling, cand: &ChannelCandidate) -> bool {
-    if let Some(limit) = cand.rpm_limit
-        && !bill
-            .state
-            .sched
-            .channel_key_rate_ok(cand.channel_key_id, i64::from(limit))
-            .await
-    {
-        return false;
-    }
-    if let Some(cap) = cand.daily_spend_cap_micro
-        && bill
-            .state
-            .sched
-            .channel_key_spend_get(cand.channel_key_id)
-            .await
-            >= cap
-    {
-        return false;
-    }
-    true
+    crate::gateway::key_gate::check(&bill.state, cand)
+        .await
+        .is_ok()
 }
 
 fn body(

@@ -22,8 +22,8 @@ use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, UsageProbe, codes};
-use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
+use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage};
+use okapi_ledger::{Pool, SettlementInput};
 use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp};
 use okapi_providers::account_fault::AccountFault;
 use okapi_providers::convert::tool_loss::{ForeignTools, ToolLossPolicy};
@@ -890,13 +890,8 @@ async fn count_tokens_inner(
         {
             continue;
         }
-        if let Some(limit) = cand.rpm_limit
-            && !state
-                .sched
-                .channel_key_rate_ok(cand.channel_key_id, i64::from(limit))
-                .await
-        {
-            limited = Some("channel_rpm");
+        if !super::key_gate::rpm_ok(state, &cand).await {
+            limited = Some(super::key_gate::Closed::Rpm.param());
             continue;
         }
         let Some(_slot) =
@@ -1436,35 +1431,20 @@ async fn prepare_chat(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day = u16::try_from(
-        (now.timestamp()
-            .saturating_add(i64::from(
-                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-            ))
-            .div_euclid(60))
-        .rem_euclid(1440),
-    )
-    .unwrap_or(0);
     // 计价名（§11.25）：变体在价簿里配了价就按变体收，否则回退基座——修饰符改的是
     // 上游行为，站长愿不愿意为它单独定价是另一回事，没配价不该让请求失败。
     // 路由仍用 `canonical`：渠道声明的是基座模型名。
     let billing_model = variant
         .filter(|v| book.has_model(&ModelCode::from(v.as_str())))
         .unwrap_or_else(|| canonical.clone());
-    let calc = CalcContext {
-        user: UserId::new(key.user_id),
-        model: ModelCode::from(billing_model.as_str()),
-        group: GroupCode::from(key.group_code.as_str()),
-        user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: rules_in.monthly_tokens,
-        monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: minute_of_day,
-        now_unix: now.timestamp(),
-        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-        surge_active: rules_in.surge_active,
-        // 预扣按请求声明档估（贵档多预扣；结算档只降不升另选）
-        service_tier: info.service_tier.clone(),
-    };
+    // 预扣按请求声明档估（贵档多预扣；结算档只降不升另选）
+    let calc = super::admission::calc_context(
+        &key,
+        billing_model.as_str(),
+        rules_in,
+        now,
+        info.service_tier.clone(),
+    );
 
     // 估价（预扣补全缺省 = models.max_output，无则 2048，§5.1）
     let est_prompt = info.prompt_tokens;
@@ -1654,46 +1634,18 @@ async fn prepare_chat(
     }
 
     // 预扣（余额 + RPM/TPM/RPD + 并发，单 Lua 原子）
-    let cap = |v: Option<i32>| v.map_or(0, i64::from);
-    let caps = LimitCaps {
-        rpm: cap(key.rpm_limit),
-        tpm: cap(key.tpm_limit),
-        rpd: cap(key.rpd_limit),
-        concurrency: cap(key.max_concurrency),
-    };
-    let est_tokens = reserved_tokens;
-    let (reservation_pool, source_window) = match state
-        .reserve_for_key(
-            key.quota_limited,
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: reserved_amount,
-                caps,
-                est_tokens,
-            },
-            now,
-        )
-        .await?
-    {
-        ReserveOutcome::Reserved {
-            pool,
-            source_window,
-            ..
-        } => (pool, source_window),
-        ReserveOutcome::Insufficient { .. } => {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        ReserveOutcome::RateLimited { which } => {
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
-    };
+    let super::admission::Reserved {
+        pool: reservation_pool,
+        source_window,
+    } = super::admission::reserve(
+        state,
+        &key,
+        request_id,
+        reserved_amount,
+        reserved_tokens,
+        now,
+    )
+    .await?;
 
     // —— 预扣已建立：此后一切失败路径必须退款（settle_failure）——
     let bill_model_for_tier = canonical.clone();
@@ -2277,29 +2229,12 @@ async fn try_model(
             stopped_early = true;
             break;
         }
-        // key 级 RPM 闸：未配置上限时不产生任何 Redis 往返
-        if let Some(limit) = cand.rpm_limit
-            && !bill
-                .state
-                .sched
-                .channel_key_rate_ok(cand.channel_key_id, i64::from(limit))
-                .await
-        {
-            tracing::debug!(channel_key = cand.channel_key_id, "key RPM 超限，跳过候选");
-            continue;
-        }
-        // key 级当日消费闸（软实时：结算后累加，故可能略超）
-        if let Some(cap) = cand.daily_spend_cap_micro
-            && bill
-                .state
-                .sched
-                .channel_key_spend_get(cand.channel_key_id)
-                .await
-                >= cap
-        {
+        // key 级 RPM / 当日消费闸：挡下的候选不算一次尝试
+        if let Err(closed) = super::key_gate::check(&bill.state, &cand).await {
             tracing::debug!(
                 channel_key = cand.channel_key_id,
-                "key 当日消费已达上限，跳过候选"
+                gate = closed.param(),
+                "key 闸已关，跳过候选"
             );
             continue;
         }
@@ -3659,7 +3594,7 @@ fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) ->
     match (ingress, cand.provider.as_str()) {
         (Ingress::ResponsesCompact, _) => "/v1/responses/compact",
         (Ingress::Responses, _) if cand.responses_native => "/v1/responses",
-        (_, "anthropic") => "/v1/messages",
+        (_, "anthropic" | "anthropic_max") => "/v1/messages",
         (_, "bedrock") if stream => "/model/{model}/invoke-with-response-stream",
         (_, "bedrock") => "/model/{model}/invoke",
         (_, "vertex") if stream => "/publishers/{publisher}/models/{model}:stream",
@@ -3919,6 +3854,29 @@ impl TerminalGate {
         }
         self.closed = self.finished.len() >= self.candidates;
         self.closed
+    }
+}
+
+#[cfg(test)]
+mod upstream_endpoint_tests {
+    use super::{Ingress, upstream_endpoint};
+
+    #[test]
+    fn subscription_anthropic_is_labelled_as_messages() {
+        let mut cand = crate::gateway::scheduler::tests::cand(0, 1, 1000);
+        for provider in ["anthropic", "anthropic_max"] {
+            cand.provider = provider.into();
+            assert_eq!(
+                upstream_endpoint(&cand, true, Ingress::Anthropic),
+                "/v1/messages",
+                "{provider}"
+            );
+        }
+        cand.provider = "openai".into();
+        assert_eq!(
+            upstream_endpoint(&cand, false, Ingress::OpenAi),
+            "/v1/chat/completions"
+        );
     }
 }
 
@@ -4578,13 +4536,12 @@ async fn settle_commit(
         usage.total_raw(),
     )
     .await;
-    // 选路反馈：时延 EWMA 供 least_latency 池排序，key 日消费供上限闸。
+    // 选路反馈：时延 EWMA 供 least_latency 池排序（key 日消费在落账时已累加）。
     // 放在结算之后 = 不占热路径，且只有成功请求才计入时延样本。
-    super::auth::record_channel_key_feedback(
+    super::auth::record_channel_key_latency(
         &bill.state,
         info.key,
         ttft_ms.unwrap_or_else(|| elapsed_ms_i32(bill.started)),
-        quote.amount.as_micros(),
     )
     .await;
     Ok(())

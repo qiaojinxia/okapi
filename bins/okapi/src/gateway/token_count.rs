@@ -259,15 +259,10 @@ async fn count_authorized(
 
 /// 该候选此刻不能拿来计数的原因（渠道 RPM、账号准入）；None = 可以试。
 async fn unavailable(state: &AppState, candidate: &ChannelCandidate) -> Option<AppError> {
-    if let Some(limit) = candidate.rpm_limit.filter(|n| *n > 0)
-        && !state
-            .sched
-            .channel_key_rate_ok(candidate.channel_key_id, i64::from(limit))
-            .await
-    {
+    if !super::key_gate::rpm_ok(state, candidate).await {
         return Some(
             AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
-                .with_param("channel_rpm"),
+                .with_param(super::key_gate::Closed::Rpm.param()),
         );
     }
     // 账号准入与主链路同一套（本地 token 上限、上游额度窗）：被挡住的账号不碰

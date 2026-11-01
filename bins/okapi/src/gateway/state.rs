@@ -5,8 +5,7 @@ use moka::future::Cache;
 use okapi_ledger::BalanceLedger;
 use okapi_pricing::PriceBookHandle;
 use okapi_providers::{
-    AnthropicUpstream, AzureUpstream, BedrockUpstream, GeminiUpstream, OpenAiUpstream,
-    PassUpstream, VertexUpstream,
+    AnthropicUpstream, AzureUpstream, BedrockUpstream, OpenAiUpstream, PassUpstream, VertexUpstream,
 };
 use okapi_store::ChClient;
 use okapi_store::channels::{ChannelCandidate, ResolvedModel};
@@ -59,8 +58,6 @@ pub struct AppState {
     pub azure: AzureUpstream,
     /// Anthropic 原生上游（/v1/messages）。
     pub anthropic: AnthropicUpstream,
-    /// Gemini 原生上游（generateContent）。
-    pub gemini: GeminiUpstream,
     /// Amazon Bedrock（InvokeModel，Anthropic 方言 + SigV4 / API key；§11.35）。
     pub bedrock: BedrockUpstream,
     /// Google Vertex AI（服务账号 OAuth；Claude rawPredict / Gemini generateContent；§11.35）。

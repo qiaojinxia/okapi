@@ -106,7 +106,20 @@ async fn open(
     candidates: Vec<okapi_store::ChannelCandidate>,
 ) -> Result<(ImageResponse, okapi_store::ChannelCandidate, i16, Mode), AppError> {
     let mut last: Option<AppError> = None;
-    for (index, candidate) in candidates.into_iter().take(super::MAX_ATTEMPTS).enumerate() {
+    let mut index = 0;
+    for candidate in candidates {
+        if index >= super::MAX_ATTEMPTS {
+            break;
+        }
+        // key 级 RPM / 当日消费闸挡下的候选不算一次尝试（与 chat 同一套闸）
+        if super::super::key_gate::check(&ctx.state, &candidate)
+            .await
+            .is_err()
+        {
+            continue;
+        }
+        index += 1;
+        let failovers = i16::try_from(index - 1).unwrap_or(i16::MAX);
         // 一个渠道的设置读坏了只跳过它，别让后面健康的候选也试不到
         let mode = match Mode::load(&ctx.state, candidate.channel_id).await {
             Ok(mode) => mode,
@@ -124,12 +137,7 @@ async fn open(
         {
             Ok(response) => {
                 super::super::key_health::success(&ctx.state, &candidate).await;
-                return Ok((
-                    response,
-                    candidate,
-                    i16::try_from(index).unwrap_or(i16::MAX),
-                    mode,
-                ));
+                return Ok((response, candidate, failovers, mode));
             }
             // 准入被拒（渠道忙 / 满载 / 额度挡下）：请求还没发给上游，换下一个渠道是安全的——
             // 非流式图片路径与 chat 主链对同一情形都是这样；此前这里直接回 502 放弃，池里其余健康渠道白白闲着
@@ -154,8 +162,14 @@ async fn open(
             Err(error) => return Err(super::super::account_control::attempt_error(&error)),
         }
     }
-    // 状态码与非流式路径同口径：全部候选都是准入被拒回 503 `no_available_channel`，其余 502
-    Err(last.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)))
+    // 状态码与非流式路径同口径：全部候选都是准入被拒（或都被 key 闸挡下）回 503 `no_available_channel`，其余 502
+    Err(last.unwrap_or_else(|| {
+        if index == 0 {
+            AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL)
+        } else {
+            AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+        }
+    }))
 }
 
 async fn settle(

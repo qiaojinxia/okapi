@@ -12,9 +12,9 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
-use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, RatioFp, calculate};
+use okapi_domain::{BillingState, Money, TokenUsage};
+use okapi_ledger::{Pool, SettlementInput};
+use okapi_pricing::calculate;
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
 use serde::Deserialize;
 use std::time::Instant;
@@ -67,6 +67,7 @@ async fn handle(
     started: Instant,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
+    let client_ip = super::clients::detect_client_ip(headers);
 
     // 渠道点查（透传非热路径，直接 PG；可见性与 chat 同一矩阵语义）
     let channel = okapi_store::channels::custom_pass_channel(
@@ -113,28 +114,7 @@ async fn handle(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day = u16::try_from(
-        (now.timestamp()
-            .saturating_add(i64::from(
-                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-            ))
-            .div_euclid(60))
-        .rem_euclid(1440),
-    )
-    .unwrap_or(0);
-    let calc = CalcContext {
-        user: UserId::new(key.user_id),
-        model: ModelCode::from(billing_model),
-        group: GroupCode::from(key.group_code.as_str()),
-        user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: rules_in.monthly_tokens,
-        monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: minute_of_day,
-        now_unix: now.timestamp(),
-        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
-        surge_active: rules_in.surge_active,
-        service_tier: None,
-    };
+    let calc = super::admission::calc_context(&key, billing_model, rules_in, now, None);
     // per_call：金额与 usage 无关，预扣即终额
     let quote = calculate(&book, &calc, TokenUsage::default())?;
     if quote.snapshot.mode != "per_call" {
@@ -143,45 +123,10 @@ async fn handle(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    let cap = |v: Option<i32>| v.map_or(0, i64::from);
-    let caps = LimitCaps {
-        rpm: cap(key.rpm_limit),
-        tpm: cap(key.tpm_limit),
-        rpd: cap(key.rpd_limit),
-        concurrency: cap(key.max_concurrency),
-    };
-    let (reservation_pool, source_window) = match state
-        .reserve_for_key(
-            key.quota_limited,
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: quote.amount,
-                caps,
-                est_tokens: 0,
-            },
-            now,
-        )
-        .await?
-    {
-        ReserveOutcome::Reserved {
-            pool,
-            source_window,
-            ..
-        } => (pool, source_window),
-        ReserveOutcome::Insufficient { .. } => {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        ReserveOutcome::RateLimited { which } => {
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
-    };
+    let super::admission::Reserved {
+        pool: reservation_pool,
+        source_window,
+    } = super::admission::reserve(state, &key, request_id, quote.amount, 0, now).await?;
 
     // —— 预扣已建立：失败路径必须退款 ——
     // 下面各分支都显式结算；守卫只兜客户端断开时 handler 被丢弃的情形
@@ -263,6 +208,7 @@ async fn handle(
                 None,
                 reservation_pool,
                 source_window.as_deref(),
+                client_ip.as_deref(),
                 &mut failure,
             )
             .await?;
@@ -295,6 +241,7 @@ async fn handle(
                 Some(i16::try_from(status).unwrap_or(0)),
                 reservation_pool,
                 source_window.as_deref(),
+                client_ip.as_deref(),
                 &mut failure,
             )
             .await?;
@@ -321,6 +268,7 @@ async fn handle(
                 None,
                 reservation_pool,
                 source_window.as_deref(),
+                client_ip.as_deref(),
                 &mut failure,
             )
             .await?;
@@ -349,6 +297,7 @@ async fn settle(
     upstream_status: Option<i16>,
     reservation_pool: Pool,
     source_window: Option<&str>,
+    client_ip: Option<&str>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
     // 本函数接手终态：成功走 settle_success，失败自行退款留痕
@@ -417,7 +366,7 @@ async fn settle(
         node: state.node.as_ref(),
         sticky_layer: 0,
         client_type: "custom_pass",
-        client_ip: None,
+        client_ip,
         delta_micro: delta,
         balance_after: None,
         event_type,
