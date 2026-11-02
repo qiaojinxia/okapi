@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import { Segmented } from '@/components/ui/segmented'
-import type { Scope } from '@/features/portal-overview/types'
+import type { Scope } from '@/hooks/use-usage-scope'
 
 export function UsageScope({ scope, onChange, accountLogin, keyLabel, ariaLabel }: {
   scope: Scope; onChange: (value: Scope) => void; accountLogin: boolean; keyLabel: string; ariaLabel?: string

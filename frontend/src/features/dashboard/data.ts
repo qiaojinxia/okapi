@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { cubeParams } from '@/features/analytics/search'
-import type { InventoryResp, TrendResp } from '@/features/analytics/types'
+import { cubeParams } from '@/lib/cube'
+import type { InventoryResp, TrendResp } from '@/lib/cube'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
 import type { RankingMetric } from './types'

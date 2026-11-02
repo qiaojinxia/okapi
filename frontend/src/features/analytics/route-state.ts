@@ -1,5 +1,5 @@
 import type { TrendMetric } from './trend-data'
-import type { AdvancedSearch } from './advanced-search'
+import type { CubeQuery } from '@/lib/cube'
 
 export const ANALYTICS_VIEWS = ['trend', 'breakdown', 'flow'] as const
 export type AnalyticsView = (typeof ANALYTICS_VIEWS)[number]
@@ -18,13 +18,7 @@ export type FlowMetric = (typeof FLOW_METRICS)[number]
 /// 与日志页同一理由，且这页更需要：用户抽屉 / 渠道行 / 模型行都可以
 /// `<Link search={{ channel_id }}>` 深链过来落地即已过滤；拆分表里点一行"聚焦"
 /// 就是改一次 search——下钻路径（模型 → 哪些渠道 → 哪些用户）天然可前进后退。
-export interface AnalyticsSearch extends AdvancedSearch {
-  user_id?: number
-  api_key_id?: number
-  channel_id?: number
-  model?: string
-  group?: string
-  days?: number
+export interface AnalyticsSearch extends CubeQuery {
   view?: AnalyticsView
   by?: BreakdownDim
   stack?: StackDim

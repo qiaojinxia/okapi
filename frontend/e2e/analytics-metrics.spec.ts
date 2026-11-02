@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import type { CubeMetrics, TrendResp } from '../src/features/analytics/types'
+import type { CubeMetrics, TrendResp } from '../src/lib/cube'
 import { trendChart } from '../src/features/analytics/trend-data'
 
 // Three calls: 100+50, 900+450 and 100+0 tokens. Durations are 1s, 9s

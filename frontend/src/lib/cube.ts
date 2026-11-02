@@ -1,3 +1,7 @@
+// 用量立方体（/admin/stats/{trend,breakdown,flow,inventory,entity-usage,…}）的查询客户端：响应类型、URL 筛选解析、
+// 查询参数。分析页、首页、质量页、渠道健康时间线、用户 / 密钥列表的用量列都从这里取，不再引用 analytics 这个 feature。
+import { oneOf } from '@/lib/search-params'
+
 /// 立方体端点共用的一组度量（比率全部基点，金额 micro-USD）。
 export interface Freshness { last_event_at: string | null; last_ingested_at: string | null; pending_events: number; failed_events: number; queue_age_seconds: number | null; event_gap_seconds: number | null; stale: boolean; checked_at: string }
 export interface CubeMetrics {
@@ -200,4 +204,82 @@ export interface TimelineResp {
   errors: number
   error_rate_bp: number
   data: TimelinePoint[]
+}
+
+export const ADVANCED_KEYS = ['start_date', 'end_date', 'granularity', 'model_source', 'endpoint', 'upstream_endpoint', 'node', 'request_type', 'billing_type', 'stream', 'models', 'groups'] as const
+
+export interface AdvancedSearch {
+  start_date?: string
+  end_date?: string
+  granularity?: 'hour' | 'day'
+  model_source?: 'billed' | 'requested' | 'upstream'
+  endpoint?: string
+  upstream_endpoint?: string
+  node?: string
+  request_type?: string
+  billing_type?: string
+  stream?: boolean
+  models?: string[]
+  groups?: string[]
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+function choices(value: unknown): string[] | undefined {
+  if (typeof value === 'string') { try { value = JSON.parse(value) } catch { return undefined } }
+  return Array.isArray(value) && value.length <= 8 && value.every((v) => typeof v === 'string' && v.length > 0 && v.length <= 256) ? value : undefined
+}
+
+// 用量与质量趋势共用 URL 解析；空值显式清除，重置不会残留旧筛选。
+export function advancedSearch(search: Record<string, unknown>): AdvancedSearch {
+  return {
+    start_date: str(search.start_date), end_date: str(search.end_date),
+    granularity: oneOf(search.granularity, ['hour', 'day']),
+    model_source: oneOf(search.model_source, ['billed', 'requested', 'upstream']),
+    endpoint: str(search.endpoint), upstream_endpoint: str(search.upstream_endpoint), node: str(search.node),
+    request_type: str(search.request_type), billing_type: str(search.billing_type),
+    stream: search.stream === true || search.stream === 'true' ? true : search.stream === false || search.stream === 'false' ? false : undefined,
+    models: choices(search.models), groups: choices(search.groups),
+  }
+}
+
+/// 立方体端点的查询条件：过滤维度 + 时间窗 + 高级筛选（分析页的 URL 状态在此之上再加视图参数）。
+export interface CubeQuery extends AdvancedSearch {
+  user_id?: number
+  api_key_id?: number
+  channel_id?: number
+  model?: string
+  group?: string
+  days?: number
+}
+
+export const DEFAULT_DAYS = 7
+
+export function effectiveDays(s: CubeQuery): number {
+  if (s.start_date && s.end_date) {
+    const days = Math.round((Date.parse(`${s.end_date}T00:00:00Z`) - Date.parse(`${s.start_date}T00:00:00Z`)) / 86400_000) + 1
+    if (days > 0 && days <= 366) return days
+  }
+  return s.days ?? DEFAULT_DAYS
+}
+
+/// 查询条件 → 立方体端点的 query string（只带过滤维度与时间窗；视图参数另加）。
+export function cubeParams(s: CubeQuery, extra?: Record<string, string | undefined>): string {
+  const p = new URLSearchParams()
+  p.set('days', String(effectiveDays(s)))
+  if (s.user_id !== undefined) p.set('user_id', String(s.user_id))
+  if (s.api_key_id !== undefined) p.set('api_key_id', String(s.api_key_id))
+  if (s.channel_id !== undefined) p.set('channel_id', String(s.channel_id))
+  if (s.model !== undefined) p.set('model', s.model)
+  if (s.group !== undefined) p.set('group', s.group)
+  for (const key of ['start_date', 'end_date', 'granularity', 'model_source', 'endpoint', 'upstream_endpoint', 'node', 'request_type', 'billing_type', 'stream'] as const) {
+    if (s[key] !== undefined) p.set(key, String(s[key]))
+  }
+  for (const key of ['models', 'groups'] as const) { if (s[key]?.length) p.set(key, JSON.stringify(s[key])) }
+  for (const [k, v] of Object.entries(extra ?? {})) {
+    if (v !== undefined && v !== '') p.set(k, v)
+  }
+  return p.toString()
 }

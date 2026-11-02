@@ -7,8 +7,8 @@ import { Button } from '@/components/ui/button'
 import { DateRangeField } from '@/components/ui/date-range'
 import { Input } from '@/components/ui/input'
 import { ModelInput } from '@/features/models/model-input'
-import { ADVANCED_KEYS } from './advanced-search'
-export { ADVANCED_KEYS } from './advanced-search'
+import { ADVANCED_KEYS } from '@/lib/cube'
+export { ADVANCED_KEYS } from '@/lib/cube'
 
 export function dimensionLabel(t: TFunction, dim: string): string {
   const basic: Record<string, string> = { model: 'dimModel', channel: 'dimChannel', provider: 'dimProvider', user: 'dimUser', api_key: 'dimApiKey', group: 'dimGroup' }

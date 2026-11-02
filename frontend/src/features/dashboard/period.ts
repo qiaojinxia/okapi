@@ -1,7 +1,7 @@
 import type { TFunction } from 'i18next'
 import type { DateRange } from '@/components/ui/date-range'
 import type { AnalyticsSearch } from '@/routes/admin.stats'
-import { effectiveDays } from '@/features/analytics/search'
+import { effectiveDays } from '@/lib/cube'
 import { qk } from '@/lib/query-keys'
 
 export function dashboardSearch(days: number, range?: DateRange | null): AnalyticsSearch {

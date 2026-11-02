@@ -22,7 +22,7 @@ import { describeError } from '@/lib/i18n'
 import { invalidateUser } from '@/lib/invalidate'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
-import { roleLabel } from '@/features/users/types'
+import { roleLabel } from '@/lib/roles'
 import { useConfirm } from '@/components/ui/confirm'
 
 const USER_TABS = ['usage', 'actions', 'role', 'balance', 'subscription', 'groups'] as const

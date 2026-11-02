@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { calendarDays, usageChart } from '../src/features/portal-overview/usage-chart-data'
 import type { BreakdownResp, BreakdownRow } from '../src/features/portal-overview/types'
 import { trendChart } from '../src/features/analytics/trend-data'
-import type { TrendResp } from '../src/features/analytics/types'
+import type { TrendResp } from '../src/lib/cube'
 
 
 /// 当前窗口的用量查询（带 days）；总览另发一条只带日期的上一期对比查询，不计入「不重复请求」
@@ -600,7 +600,7 @@ test('质量趋势切换比较维度恢复新序列，刷新失败不继续显�
     const data = adminTrend()
     data.stack = stack
     data.series = [{ key: 'a', label: `${stack}-A` }, { key: 'b', label: `${stack}-B` }]
-    data.data = (data.data as import('../src/features/analytics/types').TrendBucket[]).map((row) => ({ bucket: row.bucket, values: { a: row, b: { ...row, avg_latency_ms: 900 } } }))
+    data.data = (data.data as import('../src/lib/cube').TrendBucket[]).map((row) => ({ bucket: row.bucket, values: { a: row, b: { ...row, avg_latency_ms: 900 } } }))
     return route.fulfill({ json: data })
   })
   await page.goto('/admin/quality?measure=latency&stack=model')
@@ -635,7 +635,7 @@ for (const width of [320, 390]) {
 
 test('性能比较保持各序列独立，空样本留空，组合名称可读', () => {
   const report = adminTrend()
-  const sample = report.data[0] as import('../src/features/analytics/types').TrendBucket
+  const sample = report.data[0] as import('../src/lib/cube').TrendBucket
   report.stack = 'model_group'
   const a = '["up.a","vip"]', b = '["up.b","default"]'
   report.series = [{ key: a, label: null }, { key: b, label: null }]
@@ -664,7 +664,7 @@ test('高级筛选提交后才查询，跨视图与刷新保留，模型分组�
     if (q.get('stack') === 'model_group') {
       const key = '["up.a","vip"]', second = '["up.b","vip"]'
       data.stack = 'model_group'; data.series = [{ key, label: null }, { key: second, label: null }]
-      data.data = (data.data as import('../src/features/analytics/types').TrendBucket[]).map((r) => ({ bucket: r.bucket, values: { [key]: r, [second]: { ...r, avg_latency_ms: r.avg_latency_ms * 2 - 750 } } }))
+      data.data = (data.data as import('../src/lib/cube').TrendBucket[]).map((r) => ({ bucket: r.bucket, values: { [key]: r, [second]: { ...r, avg_latency_ms: r.avg_latency_ms * 2 - 750 } } }))
     }
     queries.push(new URL(route.request().url()))
     return route.fulfill({ json: data })

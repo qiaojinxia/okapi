@@ -5,7 +5,7 @@ import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { flowIdentity } from '../src/features/analytics/flow-labels'
 import { trendChart } from '../src/features/analytics/trend-data'
-import type { FlowNode, TrendResp } from '../src/features/analytics/types'
+import type { FlowNode, TrendResp } from '../src/lib/cube'
 import { maskAccount, maskChannelName, maskEmails } from '../src/lib/mask'
 
 // 订阅账号（OAuth 登录的邮箱）展示时遮住中间部分，渠道名只有被识别为账号名才遮，其余原样。

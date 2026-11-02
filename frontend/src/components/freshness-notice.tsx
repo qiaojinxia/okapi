@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import type { Freshness } from './types'
+import type { Freshness } from '@/lib/cube'
 import { cn } from '@/lib/utils'
 export function FreshnessNotice({ value }: { value?: Freshness }) {
   const { t, i18n } = useTranslation()

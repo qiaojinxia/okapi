@@ -11,7 +11,7 @@ import { EntitySearchInput, malformedEntityId, validEntityId } from '@/features/
 import type { EntityKind, EntityOption } from '@/features/entity-search/EntitySearchInput'
 import { FILTER_DIMS, cleanSearch } from '@/features/analytics/search'
 import type { FilterDim } from '@/features/analytics/search'
-import type { ScopeEcho } from '@/features/analytics/types'
+import type { ScopeEcho } from '@/lib/cube'
 import { maskEmails } from '@/lib/mask'
 
 /// 过滤条：一个"维度 + 值"输入器 + 生效中的过滤芯片。

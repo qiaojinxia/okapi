@@ -10,7 +10,7 @@ import { OperationsSummary } from '@/features/dashboard/OperationsSummary'
 import { DistributionSummary } from '@/features/dashboard/DistributionSummary'
 import { dashboardBreakdownParams, dashboardChartParams, dashboardTrendParams, useDashboardChart, useDashboardOverview, withFreshDashboardQueries } from '@/features/dashboard/data'
 import { dashboardOverviewKey, dashboardPeriodLabel } from './period'
-import { effectiveDays } from '@/features/analytics/search'
+import { effectiveDays } from '@/lib/cube'
 import { qk } from '@/lib/query-keys'
 
 const routeApi = getRouteApi('/admin/')

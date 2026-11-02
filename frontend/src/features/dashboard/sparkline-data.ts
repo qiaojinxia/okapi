@@ -1,5 +1,5 @@
 import { trendChart } from '@/features/analytics/trend-data'
-import type { TrendBucket, TrendResp } from '@/features/analytics/types'
+import type { TrendBucket, TrendResp } from '@/lib/cube'
 
 export type SparkMeasure = 'tokens' | 'requests' | 'amount' | 'error_rate'
 

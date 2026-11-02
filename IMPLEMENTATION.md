@@ -3540,6 +3540,27 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
 其余内联的 `apiFetch` 调用（115 个文件里 224 处）按 feature 逐步迁，改到哪个 feature 顺手收进它的 `api.ts`；管理端日志页的
 行类型随 `AdminLogsPage.tsx` 的拆分收进 `admin-logs`。
 
+### 11.67 前端共享件挪出 feature，analytics 与 stats 不再互相引用（2026-11-02）
+
+依赖方向定为 `routes → features → components / hooks / lib`，下层不引上层。此前有几处倒挂：
+
+| 原位置 | 现位置 | 谁在用 |
+|---|---|---|
+| `features/analytics/types.ts`（立方体端点的响应类型）+ `advanced-search.ts` + `search.ts` 里的 `cubeParams` / `effectiveDays` | `lib/cube.ts`（新增 `CubeQuery`，`AnalyticsSearch` 在它之上加视图参数） | 分析页、首页、质量页、渠道健康时间线、管理端日志、用户 / 密钥的用量列 |
+| `features/analytics/FreshnessNotice.tsx` | `components/freshness-notice.tsx` | 分析页、质量趋势、收入卡 |
+| `features/analytics/UsageCell.tsx` | `components/usage-cell.tsx` | 用户列表、管理端密钥列表（analytics 自己并不用） |
+| `features/stats/DaysPicker.tsx` | `components/days-picker.tsx` | 分析页、质量页、收入页 |
+| `features/public-pricing/VendorIcon.tsx` | `components/vendor-icon.tsx`（入参改成只要 `{ name, icon? }`） | 价目页、试用台、模型页、渠道的模型选择 |
+| `stats/types.ts` 的 `WARN_BP` / `BAD_BP` | `lib/health.ts` | 渠道列表与时间线、统计卡片、用量拆分表 |
+| `users/types.ts` 的 `roleLabel` / `BUILTIN_ROLES` | `lib/roles.ts` | 顶栏（`components/layout.tsx` 原来反向引用 users）、个人中心、用户列表与抽屉 |
+| `portal-overview/types.ts` 的 `Scope` | `hooks/use-usage-scope.ts` | `components/usage-scope.tsx` 原来反向引用 portal-overview |
+
+- analytics ↔ stats 的环（分析页借 stats 的 `DaysPicker` 与阈值、stats 借 analytics 的 `FreshnessNotice` 与 `Freshness` 类型）随之拆掉；
+  `components/`、`hooks/`、`lib/` 里已没有 `@/features/…` 的引用。
+- `stats/types.ts` 暂时转出 `WARN_BP` / `BAD_BP`：渠道列表的 `ChannelHealthCell.tsx` 手上有未提交的改动，等它落地再改引 `lib/health`、删掉转出。
+- 有业务归属、被别的 feature 复用的组件留在原处，作为那个 feature 对外的入口：`models/model-input`（候选来自已配置的模型目录）、
+  `entity-search/EntitySearchInput`（本来就是单独的目录）、`logs/LogSummary`（日志汇总；管理端日志与密钥用量抽屉复用是正当的）。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

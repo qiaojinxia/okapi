@@ -33,7 +33,7 @@ import { readLocal, rememberLocal } from '@/lib/storage'
 import { formatMoney } from '@/lib/money'
 import { useTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
-import { roleLabel } from '@/features/users/types'
+import { roleLabel } from '@/lib/roles'
 
 export type { NavItem, NavGroup } from '@/components/sidebar-nav'
 

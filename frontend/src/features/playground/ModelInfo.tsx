@@ -3,7 +3,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { formatContextWindow, modelCapabilities, modelPrice, modelVendor, nonnegative } from '@/features/public-pricing/catalog-data'
 import type { PricingModel } from '@/features/public-pricing/types'
-import { VendorIcon } from '@/features/public-pricing/VendorIcon'
+import { VendorIcon } from '@/components/vendor-icon'
 import { Badge } from '@/components/ui/badge'
 import { formatUnitPrice } from '@/lib/money'
 

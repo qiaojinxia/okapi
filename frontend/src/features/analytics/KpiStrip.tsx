@@ -1,7 +1,7 @@
 import { Activity, AlertTriangle, Coins, Cpu, Database, Timer } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Stat } from '@/components/ui/stat'
-import type { CubeMetrics } from '@/features/analytics/types'
+import type { CubeMetrics } from '@/lib/cube'
 import { formatBp, formatCount, formatMoneyAggregate } from '@/lib/money'
 import { cn } from '@/lib/utils'
 

@@ -2,7 +2,7 @@ import type { UseQueryResult } from '@tanstack/react-query'
 import { AlertTriangle, Clock3, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '@/components/ui/tooltip'
-import type { TrendResp } from '@/features/analytics/types'
+import type { TrendResp } from '@/lib/cube'
 import { cn } from '@/lib/utils'
 
 // 查询刚完成不等于入库已追平；使用服务端的队列状态单独提醒数据缺口。

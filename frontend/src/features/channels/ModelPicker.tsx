@@ -10,7 +10,7 @@ import { SearchInput } from '@/components/ui/search-input'
 import { describeError } from '@/lib/i18n'
 import { configuredModelsOptions } from '@/features/models/configured-models'
 import type { ConfiguredModel } from '@/features/models/configured-models'
-import { VendorIcon } from '@/features/public-pricing/VendorIcon'
+import { VendorIcon } from '@/components/vendor-icon'
 import { modelVendor } from '@/features/public-pricing/catalog-data'
 import { cn } from '@/lib/utils'
 

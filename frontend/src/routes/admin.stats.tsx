@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { TREND_METRICS } from '@/features/analytics/trend-data'
 import { AnalyticsPage } from '@/features/analytics/AnalyticsPage'
-import { advancedSearch } from '@/features/analytics/advanced-search'
+import { advancedSearch } from '@/lib/cube'
 
 import { ANALYTICS_VIEWS, BREAKDOWN_DIMS, STACK_DIMS, FLOW_METRICS } from '@/features/analytics/route-state'
 import type { AnalyticsSearch } from '@/features/analytics/route-state'

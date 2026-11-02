@@ -1,5 +1,5 @@
-import { advancedSearch } from '@/features/analytics/advanced-search'
-import type { AdvancedSearch } from '@/features/analytics/advanced-search'
+import { advancedSearch } from '@/lib/cube'
+import type { AdvancedSearch } from '@/lib/cube'
 import { oneOf } from '@/lib/search-params'
 import { pageSearch } from '@/hooks/use-pagination'
 import type { PageSearch } from '@/hooks/use-pagination'

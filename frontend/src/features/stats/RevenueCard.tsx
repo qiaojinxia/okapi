@@ -1,4 +1,4 @@
-import { FreshnessNotice } from '@/features/analytics/FreshnessNotice'
+import { FreshnessNotice } from '@/components/freshness-notice'
 import { TimeChart } from '@/components/ui/time-chart'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { useQuery } from '@tanstack/react-query'

@@ -1,8 +1,10 @@
 import { useEffect, useSyncExternalStore } from 'react'
-import type { Scope } from '@/features/portal-overview/types'
 import { getLoginMode, USAGE_SCOPE_STORAGE } from '@/lib/api'
 import { readLocal, rememberLocal } from '@/lib/storage'
 import { useMe } from './use-auth'
+
+/// 用量口径：按当前密钥（key）还是整个账号（user）。
+export type Scope = 'key' | 'user'
 
 const event = 'okapi:usage-scope'
 function subscribe(callback: () => void) {

@@ -4,13 +4,13 @@ import { PageHeader } from '@/components/ui/page'
 import { Tabs } from '@/components/ui/tabs'
 import { ChannelHealthCard } from '@/features/stats/ChannelHealthCard'
 import { ClientsCard } from '@/features/stats/ClientsCard'
-import { DaysPicker } from '@/features/stats/DaysPicker'
+import { DaysPicker } from '@/components/days-picker'
 import { ErrorBreakdownCard } from '@/features/stats/ErrorBreakdownCard'
 import { ModelLatencyCard } from '@/features/stats/ModelLatencyCard'
 import { QualityTrend } from './QualityTrend'
 import { QUALITY_TABS } from './search'
 import type { QualityTab } from './search'
-import { ADVANCED_KEYS } from '@/features/analytics/advanced-search'
+import { ADVANCED_KEYS } from '@/lib/cube'
 
 const routeApi = getRouteApi('/admin/quality')
 

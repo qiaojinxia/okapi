@@ -1,4 +1,6 @@
-export type Scope = 'key' | 'user'
+import type { Scope } from '@/hooks/use-usage-scope'
+
+export type { Scope }
 
 export interface CacheMetrics {
   cache_hit_bp?: number | null

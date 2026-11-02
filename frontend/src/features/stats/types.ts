@@ -1,8 +1,5 @@
-/// 错误率红绿灯阈值（基点）：<1% 绿、<5% 黄、其余红。
-export const WARN_BP = 100
-
-
-export const BAD_BP = 500
+// 阈值已挪到 lib/health；渠道列表的健康单元格（ChannelHealthCell）改引那里之前先在这里转出。
+export { BAD_BP, WARN_BP } from '@/lib/health'
 
 
 
@@ -59,7 +56,7 @@ export interface MarginDay extends CostCoverage {
 
 
 export interface MarginResp {
-  window?: { start_date: string; end_date: string; today: string; timezone: string; generated_at: string; freshness?: import('@/features/analytics/types').Freshness }
+  window?: { start_date: string; end_date: string; today: string; timezone: string; generated_at: string; freshness?: import('@/lib/cube').Freshness }
   data: MarginDay[]
   total: CostCoverage & {
     requests: number

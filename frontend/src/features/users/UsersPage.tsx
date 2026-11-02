@@ -12,7 +12,7 @@ import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { UsageCell, useEntityUsage } from '@/features/analytics/UsageCell'
+import { UsageCell, useEntityUsage } from '@/components/usage-cell'
 import { UserDrawer } from '@/features/users/UserDrawer'
 import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
@@ -21,7 +21,7 @@ import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { text } from '@/lib/search-params'
-import { roleLabel } from '@/features/users/types'
+import { roleLabel } from '@/lib/roles'
 
 const routeApi = getRouteApi('/admin/users')
 

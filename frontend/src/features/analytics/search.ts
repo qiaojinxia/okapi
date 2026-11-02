@@ -1,18 +1,9 @@
+import { DEFAULT_DAYS } from '@/lib/cube'
 import type { AnalyticsSearch } from '@/routes/admin.stats'
-
-export const DEFAULT_DAYS = 7
 
 /// 可作过滤的五个维度（与后端 CubeQuery 一一对应）。
 export const FILTER_DIMS = ['user_id', 'api_key_id', 'channel_id', 'model', 'group'] as const
 export type FilterDim = (typeof FILTER_DIMS)[number]
-
-export function effectiveDays(s: AnalyticsSearch): number {
-  if (s.start_date && s.end_date) {
-    const days = Math.round((Date.parse(`${s.end_date}T00:00:00Z`) - Date.parse(`${s.start_date}T00:00:00Z`)) / 86400_000) + 1
-    if (days > 0 && days <= 366) return days
-  }
-  return s.days ?? DEFAULT_DAYS
-}
 
 /// 日志页「回看小时数」的后端上限（console/logs.rs 把 hours 钳到 1–2160，e2e/analytics-search.spec.ts 钉着两边同值）。
 /// 分析窗口更长时再塞 hours 会被静默截成 90 天，对账就漏掉更早的记录。
@@ -23,25 +14,6 @@ export const LOG_MAX_HOURS = 2160
 export function logsWindow(days: number, now: number = Date.now()): { hours?: number; from?: string } {
   const hours = days * 24
   return hours <= LOG_MAX_HOURS ? { hours } : { from: new Date(now - days * 86_400_000).toISOString() }
-}
-
-/// URL search → 立方体端点的 query string（只带过滤维度与时间窗；视图参数另加）。
-export function cubeParams(s: AnalyticsSearch, extra?: Record<string, string | undefined>): string {
-  const p = new URLSearchParams()
-  p.set('days', String(effectiveDays(s)))
-  if (s.user_id !== undefined) p.set('user_id', String(s.user_id))
-  if (s.api_key_id !== undefined) p.set('api_key_id', String(s.api_key_id))
-  if (s.channel_id !== undefined) p.set('channel_id', String(s.channel_id))
-  if (s.model !== undefined) p.set('model', s.model)
-  if (s.group !== undefined) p.set('group', s.group)
-  for (const key of ['start_date', 'end_date', 'granularity', 'model_source', 'endpoint', 'upstream_endpoint', 'node', 'request_type', 'billing_type', 'stream'] as const) {
-    if (s[key] !== undefined) p.set(key, String(s[key]))
-  }
-  for (const key of ['models', 'groups'] as const) { if (s[key]?.length) p.set(key, JSON.stringify(s[key])) }
-  for (const [k, v] of Object.entries(extra ?? {})) {
-    if (v !== undefined && v !== '') p.set(k, v)
-  }
-  return p.toString()
 }
 
 export function hasFilter(s: AnalyticsSearch): boolean {

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { PageHeader } from '@/components/ui/page'
 import { Tabs } from '@/components/ui/tabs'
-import { DaysPicker } from '@/features/stats/DaysPicker'
+import { DaysPicker } from '@/components/days-picker'
 import { LeaderboardCard } from '@/features/stats/LeaderboardCard'
 import { RevenueCard } from '@/features/stats/RevenueCard'
 

@@ -1,5 +1,5 @@
 import type { ChartPoint, ChartSeries } from '@/components/ui/time-chart'
-import type { CubeMetrics, StackedBucket, TrendBucket, TrendResp } from './types'
+import type { CubeMetrics, StackedBucket, TrendBucket, TrendResp } from '@/lib/cube'
 import { chartColor, OTHER_COLOR, OTHER_KEY } from '../../lib/chart'
 import { maskEmails } from '@/lib/mask'
 

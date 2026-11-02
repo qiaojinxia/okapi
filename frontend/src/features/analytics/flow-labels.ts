@@ -1,5 +1,5 @@
 import type { TFunction } from 'i18next'
-import type { FlowNode } from './types'
+import type { FlowNode } from '@/lib/cube'
 import { maskEmails } from '@/lib/mask'
 
 const ENTITY_STAGES = ['user', 'api_key', 'channel']
