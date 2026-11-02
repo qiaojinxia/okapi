@@ -27,12 +27,15 @@ import { Shell } from '@/components/layout'
 import type { NavGroup } from '@/components/layout'
 import { useMe } from '@/hooks/use-auth'
 import { getKey } from '@/lib/api'
+import { loadAdminCopy } from '@/lib/i18n'
 
 export const Route = createFileRoute('/admin')({
-  beforeLoad: () => {
+  beforeLoad: async () => {
     if (getKey() === null) {
       throw redirect({ to: '/' })
     }
+    // admin 文案单独成块，到位前不渲染管理端（否则第一帧露出原始键）
+    await loadAdminCopy()
   },
   component: AdminLayout,
 })

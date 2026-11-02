@@ -5,12 +5,18 @@
 直接渲染到界面上——本地跑一遍未必点到那个页面，等用户看见就晚了。
 
 「已定义的键」由 scripts/locale-keys.mjs 让 Node 对前端实际装载的资源求值得到（含嵌套键
-`admin:modelMeta.callUnit`），而不是用正则切 TS 源码：此前只认到每个命名空间的直接子键，
-前端里 `t('admin:modelMeta.xxx')` 这类点分调用（70 多处）整体逃过校验。
+`catalog:modelMeta.callUnit`），而不是用正则切 TS 源码：此前只认到每个命名空间的直接子键，
+前端里 `t('catalog:modelMeta.xxx')` 这类点分调用（70 多处）整体逃过校验。
+
+admin 命名空间随 /admin 路由才加载（lib/i18n.ts 的 loadAdminCopy），所以还要查：/admin 以外的
+路由（含根布局）顺着静态 import 能走到的文件里不许出现 admin 键，否则那些页面会露出原始键。
 """
+
+from __future__ import annotations
 
 import glob
 import json
+import pathlib
 import re
 import subprocess
 import sys
@@ -104,6 +110,60 @@ def report_unused(keys: set[str]) -> None:
         print(f'ℹ️  另有键只可能经整个命名空间的动态拼接用到，静态证不了死：{counts}')
 
 
+SRC = pathlib.Path('frontend/src')
+# 运行时会加载的 import：静态 import / export … from、动态 import()；`import type` 编译后不留。
+IMPORT = re.compile(
+    r"""(?:import|export)\s(?!type\s)[^'"]*?from\s*['"]([^'"]+)['"]"""
+    r"""|import\(\s*['"]([^'"]+)['"]\s*\)|^import\s+['"]([^'"]+)['"]""",
+    re.M,
+)
+ADMIN_KEY = re.compile(r"""['"`]admin:""")
+
+
+def resolve(importer: pathlib.Path, spec: str) -> pathlib.Path | None:
+    if spec.startswith('@/'):
+        base = SRC / spec[2:]
+    elif spec.startswith('.'):
+        base = importer.parent / spec
+    else:
+        return None
+    for candidate in (base, *(pathlib.Path(f'{base}{ext}') for ext in ('.ts', '.tsx', '/index.ts', '/index.tsx'))):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def admin_outside_admin_routes() -> list[str]:
+    """/admin 以外的路由（含根布局）顺着运行时 import 走到的、写了 admin 键的文件。"""
+    graph: dict[pathlib.Path, set[pathlib.Path]] = {}
+    mentions: set[pathlib.Path] = set()
+    for f in source_files():
+        path = pathlib.Path(f).resolve()
+        text = path.read_text(encoding='utf-8')
+        graph[path] = {
+            target for m in IMPORT.finditer(text)
+            if (target := resolve(path, m.group(1) or m.group(2) or m.group(3))) is not None
+        }
+        # 注释里举例的不算
+        code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith(('//', '*', '/*')))
+        if ADMIN_KEY.search(code):
+            mentions.add(path)
+    problems = []
+    for route in sorted((SRC / 'routes').glob('*.tsx')):
+        if route.stem == 'admin' or route.stem.startswith('admin.'):
+            continue
+        seen: set[pathlib.Path] = set()
+        stack = [route.resolve()]
+        while stack:
+            node = stack.pop()
+            if node not in seen:
+                seen.add(node)
+                stack.extend(graph.get(node, ()))
+        for path in sorted(seen & mentions):
+            problems.append(f'{route.name} → {path.relative_to(SRC.resolve())}')
+    return problems
+
+
 def main() -> int:
     defined = defined_keys()
     used = used_keys()
@@ -127,6 +187,13 @@ def main() -> int:
             print(f'❌ en 缺少 {len(only_zh)} 个键: {", ".join(only_zh[:12])}')
         if only_en:
             print(f'❌ zh-CN 缺少 {len(only_en)} 个键: {", ".join(only_en[:12])}')
+
+    leaks = admin_outside_admin_routes()
+    if leaks:
+        failed = True
+        print(f'❌ {len(leaks)} 处 /admin 以外的页面会用到 admin 键（admin 语言包只随 /admin 路由加载，那里会露出原始键）:')
+        for leak in leaks:
+            print(f'   {leak}')
 
     if not failed:
         nested = sum(1 for k in used if '.' in k)

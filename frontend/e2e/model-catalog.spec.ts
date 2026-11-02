@@ -3,10 +3,14 @@ import { fileURLToPath } from 'node:url'
 import { deviates, mergeCatalogSpecs, NOTE_CODES, priceRatio, type CatalogHit, type CatalogSuggestion } from '../src/features/models/catalog'
 import { metadataDraft, validLimit } from '../src/features/models/model-config'
 import zhBase from '../src/locales/zh-CN'
-import { withModelEditorZh } from '../src/locales/model-editor-zh'
-import en from '../src/locales/en'
+import zhAdmin from '../src/locales/zh-CN.admin'
+import { withModelAdminZh, withModelMetaZh } from '../src/locales/model-editor-zh'
+import enBase from '../src/locales/en'
+import enAdmin from '../src/locales/en.admin'
 
-const zh = withModelEditorZh(zhBase)
+// 与 lib/i18n.ts 的组合方式一致：通用包 + 随 /admin 路由加载的 admin 包
+const zh = { ...withModelMetaZh(zhBase), admin: withModelAdminZh(zhAdmin) }
+const en = { ...enBase, admin: enAdmin }
 
 const snapshot = { dataset: 'litellm', commit: 'a'.repeat(40), generated_at: '2026-10-24', source: 'https://example.test/litellm' }
 

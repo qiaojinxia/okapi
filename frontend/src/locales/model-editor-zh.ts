@@ -107,14 +107,12 @@ export const modelAdminZh = {
   },
 }
 
-/** Compose only model editor keys; do not replace other admin or locale resources. */
-export function withModelEditorZh<T extends { admin: { modelSimple: object }; catalog: { modelMeta: object } }>(base: T) {
-  return {
-    ...base,
-    admin: {
-      ...base.admin, ...modelAdminZh.admin,
-      modelSimple: { ...base.admin.modelSimple, ...modelAdminZh.admin.modelSimple },
-    },
-    catalog: { ...base.catalog, modelMeta: { ...base.catalog.modelMeta, ...modelAdminZh.catalog.modelMeta } },
-  }
+/** Compose only model editor keys into the zh base pack; other namespaces stay as they are. */
+export function withModelMetaZh<T extends { catalog: { modelMeta: object } }>(base: T) {
+  return { ...base, catalog: { ...base.catalog, modelMeta: { ...base.catalog.modelMeta, ...modelAdminZh.catalog.modelMeta } } }
+}
+
+/** Compose only model editor keys into the zh admin namespace; other admin keys stay as they are. */
+export function withModelAdminZh<T extends { modelSimple: object }>(admin: T) {
+  return { ...admin, ...modelAdminZh.admin, modelSimple: { ...admin.modelSimple, ...modelAdminZh.admin.modelSimple } }
 }

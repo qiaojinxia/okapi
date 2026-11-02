@@ -9,10 +9,14 @@ import { MODEL_PRESETS, findModelPreset, presetMetadata, presetCache, referenceP
 import { CAPABILITY_KEYS, MODEL_KINDS, TEXT_AXES, MODAL_AXES, INDEPENDENT_AXES } from '../src/features/models/types'
 import { pricingDisabledReason } from '../src/features/models/model-pricing-availability'
 import zhBase from '../src/locales/zh-CN'
-import { withModelEditorZh } from '../src/locales/model-editor-zh'
-import en from '../src/locales/en'
+import zhAdmin from '../src/locales/zh-CN.admin'
+import { withModelAdminZh, withModelMetaZh } from '../src/locales/model-editor-zh'
+import enBase from '../src/locales/en'
+import enAdmin from '../src/locales/en.admin'
 
-const zh = withModelEditorZh(zhBase)
+// 与 lib/i18n.ts 的组合方式一致：通用包 + 随 /admin 路由加载的 admin 包
+const zh = { ...withModelMetaZh(zhBase), admin: withModelAdminZh(zhAdmin) }
+const en = { ...enBase, admin: enAdmin }
 
 const existing: ModelListRow = {
   model_name: 'custom-vision', display_name: '视觉助手', vendor: 'Example', status: 1,
@@ -59,7 +63,7 @@ async function setup(page: Page, models: ModelListRow[] = [], base = 2_000_000) 
 test('模型表单基础校验和精确价格，未声明不会伪装成不支持', () => {
   expect(zh.common).toBe(zhBase.common)
   expect(zh.logs).toBe(zhBase.logs)
-  expect(zh.admin.pricingBase).toBe(zhBase.admin.pricingBase)
+  expect(zh.admin.pricingBase).toBe(zhAdmin.pricingBase)
   expect(zh.catalog.modelMeta.kind).toBe(zhBase.catalog.modelMeta.kind)
   expect(metadataPayload(metadataDraft()).capabilities).toEqual({})
   expect(metadataPayload(metadataDraft()).context_window).toBeNull()

@@ -453,7 +453,8 @@ release 构建下启用本模式须同时设 `OKAPI_SINGLE_USER_CONFIRM=true`（
 ## 8. i18n 工程规范（定案，非可选项）
 
 1. 全部界面文案 key 化，禁止硬编码中英文；CI lint（前端 ESLint 规则 + 后端 guard 脚本）拦截裸文案。
-2. 语言包按命名空间拆文件：`locales/{lang}/{common,console,admin,pricing,errors}.json`；社区新语言 = 新增目录 + PR，不改代码。
+2. 语言包按命名空间分块：每种语言一份通用包 `frontend/src/locales/{lang}.ts`（admin 以外的命名空间，首屏按当前语言下载）
+   加一份 `{lang}.admin.ts`（随 /admin 路由下载）；/admin 以外的页面不许用 admin 键，`guard-i18n-keys.py` 会查（§11.64）。
 3. 首发 zh-CN + en；默认跟随浏览器，用户偏好落库 `users.language`。
 4. **后端 API 只返回 `error_code` + 参数**，由前端语言包映射；禁止后端拼接人类语言（吸取 new-api 中文错误直传国际用户的教训）。
 5. 邮件/站内通知模板按用户语言双套。
@@ -3484,6 +3485,23 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
   MCP 不带它：它的 dry-run 只回模型数和分组数，没有底价可比对。
 - 编译失败的 warn 日志随之对两条路径都打（原来只有 REST 打）。
 - 鉴权、审计与发布人仍各归各的调用方：REST 记 `admin:{actor_user_id}` 审计，MCP 记 MCP 审计、发布人取密钥的 `user_id`。
+
+### 11.64 前端语言包按语言、按 admin 分块下载（2026-11-02）
+
+原来 `lib/i18n.ts` 静态引入两种语言，全站共享块 478 KB 里约 365 KB 是语言包，登录页、门户、公开价目页都要整份下载。
+
+- 每种语言拆成两块各自成 chunk：通用包 `locales/{lang}.ts`（admin 以外的命名空间）由 `initI18n` 按当前语言下载，下载完再挂 React；
+  `locales/{lang}.admin.ts`（admin 命名空间，约占原语言包六成）由 `/admin` 路由的 `beforeLoad` 调 `loadAdminCopy` 下载，
+  到位前不渲染管理端。切语言时把已用到的块一并补齐；zh 的模型编辑器覆盖（`model-editor-zh.ts`）分别并进两块。
+- 构建实测：共享块 478 → 108 KB；门户与公开页首屏的文案块 en 74 KB / zh 71 KB（zh 另加 8 KB 模型编辑器覆盖）；
+  admin 块 en 107 KB / zh 96 KB，只在进管理端时下载。
+- 为此先把门户与公开价目页用到的 admin 键搬到 common / portal / logs / catalog（角色名、密钥启停、套餐名与额度、日志详情字段、
+  倍率名、模型规格词表，文案不变），`admin:keyTotal`（七个管理页当通用计数用）改为 `common:totalCount`。
+- 守卫（`guard-i18n-keys.py`）：
+  - 从每个 /admin 以外的路由（含根布局）顺着运行时 import 走，走到的文件里出现 admin 键就失败——那里 admin 包还没下载，会露出原始键。
+  - 死键报告，只报不拦：语言包里有、代码里找不到引用的叶子键（写死的键字符串、复数形式、引用上级对象、模板字符串前缀都算引用）。
+    整个命名空间都被动态拼键的（`logs:${key}` 之类）证不了死，只报个数。本次按报告删掉 159 个键（admin 137 个）。
+- 渠道控制项的三个标签原来在渲染时拼 `admin:` 前缀，是 admin 唯一的整命名空间动态拼键，改成在配置里写全键。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
