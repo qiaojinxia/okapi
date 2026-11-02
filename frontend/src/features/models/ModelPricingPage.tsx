@@ -157,7 +157,7 @@ export function ModelPricingPage() {
       />
 
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span>{t('admin:pricingBasePreview', { price: basePrice / 1_000_000 })}</span>
+        <span>{t('catalog:pricingBasePreview', { price: basePrice / 1_000_000 })}</span>
         {basePrice !== publishedBase && <Badge variant="warning">{t('admin:pricingBasePublished', { price: publishedBase / 1_000_000 })} · {t('admin:requiresPublish')}</Badge>}
         {can('settings.read') && <Link to="/admin/settings" className="text-primary hover:underline">{t('admin:pricingBaseSettings')}</Link>}
       </div>
@@ -240,13 +240,13 @@ export function ModelPricingPage() {
               <Th>{t('admin:modelName')}</Th>
               <Th>{t('admin:vendor')}</Th>
               <Th>{t('admin:pricingMode')}</Th>
-              <Th numeric>{t('admin:modelRatio')}</Th>
-              <Th numeric>{t('admin:completionRatio')}</Th>
+              <Th numeric>{t('catalog:modelRatio')}</Th>
+              <Th numeric>{t('catalog:completionRatio')}</Th>
               <Th numeric>{t('admin:perMillionCol')}</Th>
-              <Th numeric>{t('admin:cacheRatio')}</Th>
+              <Th numeric>{t('catalog:cacheRatio')}</Th>
               <Th numeric>{t('admin:cacheWriteRatioShort')}</Th>
               <Th numeric>{t('admin:audioRatioShort')}</Th>
-              <Th numeric>{t('admin:imageRatio')}</Th>
+              <Th numeric>{t('catalog:imageRatio')}</Th>
               <Th>{t('admin:modelChannelsCol')}</Th>
               <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
@@ -260,7 +260,7 @@ export function ModelPricingPage() {
                     <div className="min-w-0">
                       <p className="font-mono font-medium">{m.model_name}</p>
                       {(m.display_name || m.catalog_config?.kind) && <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
-                        {m.catalog_config?.kind && <Badge variant="muted">{t(`admin:modelKinds.${m.catalog_config.kind}`, { defaultValue: m.catalog_config.kind })}</Badge>}
+                        {m.catalog_config?.kind && <Badge variant="muted">{t(`catalog:modelKinds.${m.catalog_config.kind}`, { defaultValue: m.catalog_config.kind })}</Badge>}
                         {m.display_name && m.display_name !== m.model_name && <span>{m.display_name}</span>}
                       </div>}
                     </div>
@@ -273,7 +273,7 @@ export function ModelPricingPage() {
                   ) : (
                     <Badge variant="muted">{m.pricing_mode}</Badge>
                   )}
-                  {m.pricing_mode === 'per_call' && <p className="mt-1 whitespace-nowrap text-xs text-muted-foreground">{formatUnitPrice(m.per_call_price_micro, i18n.language)} / {t('admin:modelMeta.callUnit')}</p>}
+                  {m.pricing_mode === 'per_call' && <p className="mt-1 whitespace-nowrap text-xs text-muted-foreground">{formatUnitPrice(m.per_call_price_micro, i18n.language)} / {t('catalog:modelMeta.callUnit')}</p>}
                 </Td>
                 <Td numeric>{formatRatio(m.model_ratio)}</Td>
                 <Td numeric>{formatRatio(m.completion_ratio)}</Td>

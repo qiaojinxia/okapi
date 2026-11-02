@@ -109,7 +109,7 @@ export function TeamDetailCard({ teamId }: { teamId: number }) {
           <Table dense>
             <THead>
               <Tr>
-                <Th className="w-full">{t('admin:username')}</Th>
+                <Th className="w-full">{t('common:username')}</Th>
                 <Th className="w-0">{t('team:memberRole')}</Th>
                 <Th numeric className="w-0">{t('team:monthSpend')}</Th>
                 <Th numeric className="w-0">{t('team:monthlyLimit')}</Th>

@@ -92,7 +92,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
         ) : (
           <div className="flex flex-wrap gap-2">
             <Badge variant="muted">
-              {t('admin:username')} {ov?.user.username ?? '—'}
+              {t('common:username')} {ov?.user.username ?? '—'}
             </Badge>
             <Badge variant="muted">
               {t('common:balance')} {formatMoney(ov?.user.balance_micro ?? 0, i18n.language)}

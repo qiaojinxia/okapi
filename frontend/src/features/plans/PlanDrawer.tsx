@@ -169,7 +169,7 @@ export function PlanDrawer({
             {codeInvalid && <p role="alert" className="text-xs text-destructive">{t('admin:codeFormatInvalid', { max: 64 })}</p>}
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="p-name">{t('admin:planName')}</Label>
+            <Label htmlFor="p-name">{t('portal:planName')}</Label>
             <Input
               id="p-name"
               value={form.display_name}
@@ -226,10 +226,10 @@ export function PlanDrawer({
         </FieldGroup>
       ) : (
         <>
-          <FieldGroup title={t('admin:planQuota')} hint={t('admin:planQuotaHint')}>
+          <FieldGroup title={t('portal:planQuota')} hint={t('admin:planQuotaHint')}>
             <div className="flex flex-wrap items-end gap-3">
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="p-quota">{t('admin:planQuota')}</Label>
+                <Label htmlFor="p-quota">{t('portal:planQuota')}</Label>
                 <Input
                   id="p-quota"
                   className="w-28"

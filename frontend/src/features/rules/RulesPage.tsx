@@ -132,7 +132,7 @@ export function RulesPage() {
       <PageHeader
         title={t('admin:rulesTitle')}
         description={t('admin:rulesHint')}
-        meta={t('admin:keyTotal', { n: rules.data?.total ?? 0 })}
+        meta={t('common:totalCount', { n: rules.data?.total ?? 0 })}
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />

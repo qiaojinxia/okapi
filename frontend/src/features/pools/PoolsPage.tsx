@@ -59,7 +59,7 @@ export function PoolsPage() {
       <PageHeader
         title={t('admin:poolsTitle')}
         description={t('admin:poolsDesc')}
-        meta={t('admin:keyTotal', { n: pools.data?.total ?? 0 })}
+        meta={t('common:totalCount', { n: pools.data?.total ?? 0 })}
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />

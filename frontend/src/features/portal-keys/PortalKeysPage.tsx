@@ -377,7 +377,7 @@ export function PortalKeysPage() {
                   <div className="flex items-center justify-center gap-0.5">
                     <IconButton
                       icon={k.status === 1 ? PowerOff : Power}
-                      label={current && k.status === 1 ? t('portal:keyCurrentNoDisable') : k.status === 1 ? t('admin:keyDisable') : t('admin:keyEnable')}
+                      label={current && k.status === 1 ? t('portal:keyCurrentNoDisable') : k.status === 1 ? t('common:disable') : t('common:enable')}
                       disabled={current && k.status === 1}
                       onClick={() =>
                         patch.mutate({ id: k.id, body: { status: k.status === 1 ? 2 : 1 } })

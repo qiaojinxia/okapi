@@ -105,7 +105,7 @@ export function PlansPage() {
           <THead>
             <Tr>
               <Th>{t('admin:planCode')}</Th>
-              <Th>{t('admin:planName')}</Th>
+              <Th>{t('portal:planName')}</Th>
               <Th>{t('admin:planKind')}</Th>
               <Th numeric>{t('admin:planGrant')}</Th>
               <Th numeric>{t('admin:planPrice')}</Th>

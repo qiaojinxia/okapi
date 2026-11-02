@@ -131,7 +131,7 @@ export function RedemptionsPage() {
         }
         selection={
           <Badge variant="muted" className="tabular-nums">
-            {t('admin:keyTotal', { n: codes.data?.total ?? 0 })}
+            {t('common:totalCount', { n: codes.data?.total ?? 0 })}
           </Badge>
         }
       />

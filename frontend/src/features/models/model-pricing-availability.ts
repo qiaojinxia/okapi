@@ -21,8 +21,8 @@ const RULES: Partial<Record<PricingAxis, { cache?: boolean; modality?: Modality;
 }
 
 const MODALITY_REASONS = {
-  input: { image: 'admin:modelMeta.noImageInput', audio: 'admin:modelMeta.noAudioInput' },
-  output: { image: 'admin:modelMeta.noImageOutput', audio: 'admin:modelMeta.noAudioOutput' },
+  input: { image: 'catalog:modelMeta.noImageInput', audio: 'catalog:modelMeta.noAudioInput' },
+  output: { image: 'catalog:modelMeta.noImageOutput', audio: 'catalog:modelMeta.noAudioOutput' },
 } as const
 
 /** Editor guard only: never infer support from an ID/vendor, or change saved billing rates.
@@ -32,7 +32,7 @@ const MODALITY_REASONS = {
 export function pricingDisabledReason(metadata: MetadataDraft, axis: PricingAxis) {
   const rule = RULES[axis]
   if (!rule) return undefined
-  if (rule.cache && metadata.capabilities.prompt_cache === false) return 'admin:modelMeta.noPromptCache' as const
+  if (rule.cache && metadata.capabilities.prompt_cache === false) return 'catalog:modelMeta.noPromptCache' as const
   if (!rule.modality || !rule.direction) return undefined
   const modalities = metadata[rule.direction === 'input' ? 'input_modalities' : 'output_modalities']
   const capability = rule.modality === 'audio' ? 'audio' : rule.direction === 'input' ? 'vision' : undefined

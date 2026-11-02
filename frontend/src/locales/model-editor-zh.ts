@@ -86,11 +86,6 @@ export const modelAdminZh = {
       markup: '售价为官方 ×{{ratio}}',
       hint: '按当前倍率实时换算，未单独设置的时长档按通用写入倍率；分组折扣与计费规则另行生效。',
     },
-    modelMeta: {
-      ...modelEditorZh,
-      capabilities: '常用能力标签',
-      capabilitiesHint: '用于目录展示和价格输入项联动，不会启用接口、强加请求参数或改变计费及渠道协议；实际支持以渠道为准。',
-    },
     modelSimple: {
       drawerHint: '先选模型预设，再配置价格；自定义模型可手动填写。价格保存为草稿，发布后生效。',
       ratioEditor: '调整倍率（高级）', modalCacheTitle: '多模态缓存价格（可选）',
@@ -102,13 +97,24 @@ export const modelAdminZh = {
       advancedConfigured: '已有配置，保存时保留。', modalTitle: '多模态计价',
     },
   },
+  // 模型规格的字段名公开价目页也要显示，放在 catalog 命名空间
+  catalog: {
+    modelMeta: {
+      ...modelEditorZh,
+      capabilities: '常用能力标签',
+      capabilitiesHint: '用于目录展示和价格输入项联动，不会启用接口、强加请求参数或改变计费及渠道协议；实际支持以渠道为准。',
+    },
+  },
 }
 
 /** Compose only model editor keys; do not replace other admin or locale resources. */
-export function withModelEditorZh<T extends { admin: { modelMeta: object; modelSimple: object } }>(base: T) {
-  return { ...base, admin: {
-    ...base.admin, ...modelAdminZh.admin,
-    modelMeta: { ...base.admin.modelMeta, ...modelAdminZh.admin.modelMeta },
-    modelSimple: { ...base.admin.modelSimple, ...modelAdminZh.admin.modelSimple },
-  } }
+export function withModelEditorZh<T extends { admin: { modelSimple: object }; catalog: { modelMeta: object } }>(base: T) {
+  return {
+    ...base,
+    admin: {
+      ...base.admin, ...modelAdminZh.admin,
+      modelSimple: { ...base.admin.modelSimple, ...modelAdminZh.admin.modelSimple },
+    },
+    catalog: { ...base.catalog, modelMeta: { ...base.catalog.modelMeta, ...modelAdminZh.catalog.modelMeta } },
+  }
 }

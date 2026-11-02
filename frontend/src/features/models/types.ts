@@ -46,14 +46,14 @@ export const MODAL_AXES = ['audio_ratio', 'audio_completion_ratio', 'image_ratio
 
 
 
-/// 轴 → 文案键的显式映射。不用 `t(`admin:${key}`)` 动态拼：拼错了运行时不报错，
+/// 轴 → 文案键的显式映射。不用 `t(`catalog:${key}`)` 动态拼：拼错了运行时不报错，
 /// 只是把原始键渲染到界面，而文案闸门也查不出来。
 export const AXIS_LABEL = {
-  model_ratio: 'admin:modelRatio',
-  completion_ratio: 'admin:completionRatio',
-  cache_ratio: 'admin:cacheRatio',
-  cache_write_ratio: 'admin:cacheWriteRatio',
-  audio_ratio: 'admin:audioRatio',
-  audio_completion_ratio: 'admin:audioCompletionRatio',
-  image_ratio: 'admin:imageRatio',
+  model_ratio: 'catalog:modelRatio',
+  completion_ratio: 'catalog:completionRatio',
+  cache_ratio: 'catalog:cacheRatio',
+  cache_write_ratio: 'catalog:cacheWriteRatio',
+  audio_ratio: 'catalog:audioRatio',
+  audio_completion_ratio: 'catalog:audioCompletionRatio',
+  image_ratio: 'catalog:imageRatio',
 } as const

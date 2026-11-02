@@ -43,7 +43,7 @@ export function LeaderboardCard({ days }: { days: number }) {
               <Tr>
                 <Th>#</Th>
                 <Th>{t('admin:userId')}</Th>
-                <Th>{t('admin:username')}</Th>
+                <Th>{t('common:username')}</Th>
                 <Th>{t('admin:requests')}</Th>
                 <Th>{t('admin:tokens')}</Th>
                 <Th>{t('admin:spend')}</Th>

@@ -130,7 +130,7 @@ export function UsersPage() {
           <THead>
             <Tr>
               <Th>ID</Th>
-              <Th>{t('admin:username')}</Th>
+              <Th>{t('common:username')}</Th>
               <Th>{t('admin:usersEmail')}</Th>
               <Th>{t('admin:usersRole')}</Th>
               <Th>{t('common:status')}</Th>

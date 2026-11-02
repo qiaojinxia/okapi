@@ -99,13 +99,13 @@ export function LogsPage() {
         value={draft.model} placeholder={t('portal:logsModelHint')} onChange={(model) => setDraft({ ...draft, model })}
         onChoose={(model) => commit({ ...draft, model })} onSubmit={() => commit(draft)} />
       {applied.scope === 'user' && <PortalKeyFilter className="w-full sm:w-56" value={draft.keyId} onChange={(keyId) => setDraft({ ...draft, keyId })} onChoose={(keyId) => commit({ ...draft, keyId })} onSubmit={() => commit(draft)} />}
-      <Switch checked={draft.errorsOnly} onChange={(errorsOnly) => commit({ ...draft, errorsOnly })} label={t('admin:logsErrorsOnly')} />
+      <Switch checked={draft.errorsOnly} onChange={(errorsOnly) => commit({ ...draft, errorsOnly })} label={t('logs:errorsOnly')} />
       <Button size="sm" className="ml-auto h-11 md:h-9" disabled={!valid} onClick={() => commit(draft)}><Search className="h-3.5 w-3.5" />{t('common:search')}</Button>
       </div>
       <section aria-label={t('charts:period')} className="flex min-w-0 flex-wrap items-center gap-2 border-t border-border/60 pt-2">
       <DateRangePicker className="h-11 md:h-9" today={todayInTimezone(applied.timezone)} value={applied.range} onApply={(range) => commit({ ...draft, range })} />
       {applied.range && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, range: null })}>{t('portal:logsClearDates')}</Button>}
-      <Input className="w-full font-mono sm:w-80" aria-label={t('admin:logsRequestId')} placeholder={t('logs:requestFilterHint')} value={draft.requestId}
+      <Input className="w-full font-mono sm:w-80" aria-label={t('logs:requestId')} placeholder={t('logs:requestFilterHint')} value={draft.requestId}
         maxLength={36} aria-invalid={!validRequest(draft.requestId)} onChange={(e) => setDraft({ ...draft, requestId: e.target.value })}
         onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) commit(draft) }} />
       {(applied.requestId || applied.keyId) && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, requestId: '', keyId: '' })}>{t('logs:clearLookup')}</Button>}

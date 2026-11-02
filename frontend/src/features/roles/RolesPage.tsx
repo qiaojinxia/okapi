@@ -66,7 +66,7 @@ export function RolesPage() {
       <PageHeader
         title={t('admin:rolesTitle')}
         description={t('admin:roleHint')}
-        meta={t('admin:keyTotal', { n: roles.data?.total ?? 0 })}
+        meta={t('common:totalCount', { n: roles.data?.total ?? 0 })}
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />

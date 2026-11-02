@@ -52,10 +52,10 @@ export function ErrorBreakdownCard({ days }: { days: number }) {
           <Table>
             <THead>
               <Tr>
-                <Th>{t('admin:logsErrorCode')}</Th>
+                <Th>{t('logs:errorCode')}</Th>
                 <Th>{t('common:count')}</Th>
                 <Th className="w-1/3">{t('admin:statErrorShare')}</Th>
-                <Th>{t('admin:logsUpstreamStatus')}</Th>
+                <Th>{t('logs:upstreamStatus')}</Th>
                 <Th>{t('admin:statErrorTopChannel')}</Th>
                 <Th>{t('admin:statErrorTopModel')}</Th>
               </Tr>

@@ -42,8 +42,8 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
           {field(t('logs:funding'), row.pool === 0 ? t('logs:wallet') : row.pool === 1 ? t('logs:subscription') : t('logs:notRecorded'))}
         </InfoGrid>
         <dl className="grid gap-2">
-          <IdRow label={t('admin:logsRequestId')} value={row.request_id} />
-          {row.upstream_request_id && <IdRow label={t('admin:logsUpstreamId')} value={row.upstream_request_id} />}
+          <IdRow label={t('logs:requestId')} value={row.request_id} />
+          {row.upstream_request_id && <IdRow label={t('logs:upstreamId')} value={row.upstream_request_id} />}
         </dl>
       </DetailSection>
       <LogRequestDetails row={row} />

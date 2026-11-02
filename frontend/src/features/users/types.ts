@@ -27,7 +27,7 @@ export interface Overview {
 
 
 export function roleLabel(role: number, t: (k: string) => string): string {
-  if (role >= 100) return t('admin:roleSuper')
-  if (role >= 10) return t('admin:roleAdmin')
-  return t('admin:roleUser')
+  if (role >= 100) return t('common:roleSuper')
+  if (role >= 10) return t('common:roleAdmin')
+  return t('common:roleUser')
 }

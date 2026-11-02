@@ -145,7 +145,7 @@ export function AdminKeysPage() {
       <PageHeader
         title={t('admin:keysNav')}
         description={t('admin:keysDesc')}
-        meta={keys.data && t('admin:keyTotal', { n: keys.data.total })}
+        meta={keys.data && t('common:totalCount', { n: keys.data.total })}
       />
       <Toolbar
         selection={keys.isFetching ? <span role="status" className="text-xs text-muted-foreground">{t('common:loading')}</span> : undefined}
@@ -198,7 +198,7 @@ export function AdminKeysPage() {
           <THead>
             <Tr>
               <Th>ID</Th>
-              <Th>{t('admin:username')}</Th>
+              <Th>{t('common:username')}</Th>
               <Th>{t('portal:keyName')}</Th>
               <Th>{t('portal:keyPrefix')}</Th>
               <Th>{t('common:status')}</Th>
@@ -276,7 +276,7 @@ export function AdminKeysPage() {
                     <IconButton
                       icon={k.status === 1 ? PowerOff : Power}
                       disabled={setStatus.isPending || remove.isPending || keys.isFetching}
-                      label={k.status === 1 ? t('admin:keyDisable') : t('admin:keyEnable')}
+                      label={k.status === 1 ? t('common:disable') : t('common:enable')}
                       onClick={() => setStatus.mutate({ id: k.id, status: k.status === 1 ? 2 : 1 })}
                     />
                     <IconButton

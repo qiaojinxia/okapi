@@ -106,7 +106,7 @@ export function ReconciliationCard() {
             <Table>
               <THead>
                 <Tr>
-                  <Th>{t('admin:username')}</Th>
+                  <Th>{t('common:username')}</Th>
                   <Th>{t('admin:reconLedger')}</Th>
                   <Th>{t('admin:reconLive')}</Th>
                   <Th>{t('admin:reconDelta')}</Th>

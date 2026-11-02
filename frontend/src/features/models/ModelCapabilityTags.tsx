@@ -17,24 +17,24 @@ export function ModelCapabilityTags({ value, onChange }: {
   const { t } = useTranslation()
   const declared = EDITABLE_CAPABILITIES.filter((key) => typeof value.capabilities[key] === 'boolean')
   const retained = Object.keys(value.capabilities).some((key) => !EDITABLE_CAPABILITIES.some((editable) => editable === key))
-  return <FieldGroup title={t('admin:modelMeta.capabilities')} hint={t('admin:modelMeta.capabilitiesHint')}>
+  return <FieldGroup title={t('catalog:modelMeta.capabilities')} hint={t('catalog:modelMeta.capabilitiesHint')}>
     <div data-testid="model-capability-summary" className="flex flex-wrap items-center gap-2">
       {declared.map((key) => <Badge key={key} variant={value.capabilities[key] ? 'info' : 'muted'}>
-        {t(`admin:modelCaps.${key}`)}{!value.capabilities[key] && ` · ${t('admin:modelMeta.unsupported')}`}
+        {t(`admin:modelCaps.${key}`)}{!value.capabilities[key] && ` · ${t('catalog:modelMeta.unsupported')}`}
       </Badge>)}
-      {declared.length === 0 && <p className="text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.capabilitiesEmpty')}</p>}
+      {declared.length === 0 && <p className="text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.capabilitiesEmpty')}</p>}
     </div>
     <details id="model-capability-editor" className="group/capabilities rounded-lg border border-border">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-3 py-2 text-xs font-medium outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-primary/40 [&::-webkit-details-marker]:hidden">
-        {t('admin:modelMeta.editCapabilities')}
+        {t('catalog:modelMeta.editCapabilities')}
         <ChevronDown aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/capabilities:rotate-180" />
       </summary>
       <div className="divide-y divide-border border-t border-border px-3">
         {EDITABLE_CAPABILITIES.map((key) => <div key={key} className="flex min-w-0 items-center justify-between gap-3 py-2">
           <Label htmlFor={`cap-${key}`} className="min-w-0 text-xs">{t(`admin:modelCaps.${key}`)}</Label>
           <Select id={`cap-${key}`} className="w-28 shrink-0" value={value.capabilities[key] === undefined ? '' : String(value.capabilities[key])}
-            placeholder={t('admin:modelMeta.unknown')}
-            options={[{ value: 'true', label: t('admin:modelMeta.supported') }, { value: 'false', label: t('admin:modelMeta.unsupported') }]}
+            placeholder={t('catalog:modelMeta.unknown')}
+            options={[{ value: 'true', label: t('catalog:modelMeta.supported') }, { value: 'false', label: t('catalog:modelMeta.unsupported') }]}
             onChange={(next) => onChange((previous) => {
               const caps = { ...previous.capabilities }
               if (next === '') delete caps[key]; else caps[key] = next === 'true'
@@ -43,6 +43,6 @@ export function ModelCapabilityTags({ value, onChange }: {
         </div>)}
       </div>
     </details>
-    {retained && <p className="text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.retainedCapabilities')}</p>}
+    {retained && <p className="text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.retainedCapabilities')}</p>}
   </FieldGroup>
 }

@@ -555,7 +555,7 @@ function FilterBar({
             <Switch
               checked={draft.errors_only}
               onChange={(v) => onChange({ ...draft, errors_only: v })}
-              label={t('admin:logsErrorsOnly')}
+              label={t('logs:errorsOnly')}
             />
             <Button type="button" size="sm" variant="ghost" aria-expanded={advancedOpen} aria-controls={advancedId} onClick={() => setAdvancedOpen(!advancedOpen)} className="min-h-11 text-muted-foreground md:min-h-9">
               <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />{t('admin:logsMoreFilters')}
@@ -598,9 +598,9 @@ function FilterBar({
               {entity('channel_id', 'channel', t('analytics:dimChannel'))}
             </div>
             <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,20rem)_minmax(0,32rem)]">
-              {text('error_code', t('admin:logsErrorCode'), 'upstream_error')}
-              {text('request_id', t('admin:logsRequestId'), 'uuid')}
-              {text('upstream_request_id', t('admin:logsUpstreamId'))}
+              {text('error_code', t('logs:errorCode'), 'upstream_error')}
+              {text('request_id', t('logs:requestId'), 'uuid')}
+              {text('upstream_request_id', t('logs:upstreamId'))}
               {text('group', t('logs:group'))}
               {text('client_type', t('admin:logsClientType'), 'codex / claude_code / curl')}
               <Field label={t('logs:filterType')} htmlFor="lf-log_type">
@@ -923,8 +923,8 @@ function RowDetail({ row }: { row: LogRow }) {
         Fingerprint,
         <>
           <div className="col-span-full grid gap-2">
-            <IdRow label={t('admin:logsRequestId')} value={row.request_id} />
-            {row.upstream_request_id && <IdRow label={t('admin:logsUpstreamId')} value={row.upstream_request_id} />}
+            <IdRow label={t('logs:requestId')} value={row.request_id} />
+            {row.upstream_request_id && <IdRow label={t('logs:upstreamId')} value={row.upstream_request_id} />}
           </div>
           {item(t('admin:logsNode'), row.node || '—')}
           {row.client_ip && item('IP', row.client_ip)}
@@ -940,8 +940,8 @@ function RowDetail({ row }: { row: LogRow }) {
           {item(t('logs:upstreamModel'), row.upstream_model || t('logs:notRecorded'))}
           {item(t('logs:endpoint'), row.endpoint || t('logs:notRecorded'))}
           {item(t('logs:upstreamEndpoint'), row.upstream_endpoint || t('logs:notRecorded'))}
-          {item(t('admin:logsChannelKey'), row.channel_key_id > 0 ? `ID ${row.channel_key_id}` : '—')}
-          {item(t('admin:logsUpstreamStatus'), String(row.upstream_status || '—'))}
+          {item(t('logs:channelKey'), row.channel_key_id > 0 ? `ID ${row.channel_key_id}` : '—')}
+          {item(t('logs:upstreamStatus'), String(row.upstream_status || '—'))}
           {item(t('admin:logsRetries'), String(row.retry_count))}
           {item(t('admin:statFailovers'), String(row.failover_count))}
           {item(t('admin:logsSticky'), row.sticky_layer > 0 ? `L${row.sticky_layer}` : '—')}

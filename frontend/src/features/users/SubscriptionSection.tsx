@@ -160,7 +160,7 @@ export function SubscriptionSection({ userId, onDone }: { userId: number; onDone
               <Tr>
                 <Th>{t('admin:planCode')}</Th>
                 <Th>{t('common:status')}</Th>
-                <Th numeric>{t('admin:planQuota')}</Th>
+                <Th numeric>{t('portal:planQuota')}</Th>
                 <Th>{t('admin:userSubValidity')}</Th>
               </Tr>
             </THead>

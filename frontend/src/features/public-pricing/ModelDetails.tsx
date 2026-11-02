@@ -33,7 +33,7 @@ export function ModelDetails({ model, groups, group, factor, unit, tab, onTab, o
   if (model.capabilities?.audio === true || distinct(model.audio_ratio) || distinct(model.audio_completion_ratio))
     rows.push(['audioIn', t('pricing:audioInPrice')], ['audioOut', t('pricing:audioOutPrice')])
   if (model.capabilities?.vision === true || distinct(model.image_ratio)) rows.push(['imageIn', t('pricing:imageInPrice')])
-  for (const key of INDEPENDENT_AXES) if (model.modality_ratios?.[key] != null) rows.push([key, t(`admin:modelIndependentPrice.${key}`)])
+  for (const key of INDEPENDENT_AXES) if (model.modality_ratios?.[key] != null) rows.push([key, t(`catalog:modelIndependentPrice.${key}`)])
   const groupName = (g: PricingGroup) => g.name || (g.code === 'default' ? t('flow:defaultGroup') : g.code)
   return <Drawer open onClose={onClose} title={model.display_name || model.model} description={t('catalog:detailHint')} size="lg">
     <div className="mb-6 flex items-center gap-4">
@@ -45,18 +45,18 @@ export function ModelDetails({ model, groups, group, factor, unit, tab, onTab, o
     <div role="tabpanel" id="model-details-panel" aria-labelledby="model-detail-tabs-details" hidden={tab !== 'details'}>
     <FieldGroup title={t('catalog:specifications')}>
       {model.catalog_config?.description && <p className="text-sm leading-6 text-muted-foreground">{model.catalog_config.description}</p>}
-      {model.catalog_config?.kind && <div><Badge variant="info">{t(`admin:modelKinds.${model.catalog_config.kind}`, { defaultValue: model.catalog_config.kind })}</Badge></div>}
+      {model.catalog_config?.kind && <div><Badge variant="info">{t(`catalog:modelKinds.${model.catalog_config.kind}`, { defaultValue: model.catalog_config.kind })}</Badge></div>}
       <dl className="grid grid-cols-2 gap-3 rounded-lg bg-muted/40 p-4 text-sm">
         {[[t('catalog:context'), model.context_window], [t('catalog:maxOutput'), model.max_output]].map(([label, value]) =>
           <div key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 font-medium">{typeof value === 'number' && value > 0 ? `${value.toLocaleString(i18n.language)} tokens` : t('catalog:notProvided')}</dd></div>)}
       </dl>
       <dl className="grid grid-cols-2 gap-3 text-sm">{(['input_modalities', 'output_modalities'] as const).map((key) => <div key={key}>
-        <dt className="text-xs text-muted-foreground">{t(`admin:modelMeta.${key}`)}</dt>
-        <dd className="mt-1">{model.catalog_config?.[key]?.length ? model.catalog_config[key]!.map((v) => t(`admin:modelModalities.${v}`, { defaultValue: v })).join(' / ') : t('catalog:notProvided')}</dd>
+        <dt className="text-xs text-muted-foreground">{t(`catalog:modelMeta.${key}`)}</dt>
+        <dd className="mt-1">{model.catalog_config?.[key]?.length ? model.catalog_config[key]!.map((v) => t(`catalog:modelModalities.${v}`, { defaultValue: v })).join(' / ') : t('catalog:notProvided')}</dd>
       </div>)}</dl>
       <div className="flex flex-wrap gap-2">
         {caps.map((cap) => <Badge key={cap} variant="outline">{t(`catalog:cap_${cap}`)}</Badge>)}
-        {unsupported.map((cap) => <Badge key={cap} variant="muted">{t(`catalog:cap_${cap}`)} · {t('admin:modelMeta.unsupported')}</Badge>)}
+        {unsupported.map((cap) => <Badge key={cap} variant="muted">{t(`catalog:cap_${cap}`)} · {t('catalog:modelMeta.unsupported')}</Badge>)}
         {caps.length === 0 && unsupported.length === 0 && <p className="text-xs text-muted-foreground">{t('catalog:noCapabilities')}</p>}
       </div>
     </FieldGroup>
@@ -68,7 +68,7 @@ export function ModelDetails({ model, groups, group, factor, unit, tab, onTab, o
       {model.mode === 'ratio' ? <dl className="divide-y divide-border">
         {rows.map(([field, label]) => <div key={field} className="flex items-center justify-between gap-3 py-2.5 text-sm"><dt className="text-muted-foreground">{label}</dt><dd className="text-right font-medium">{formatUnitPrice(modelPrice(model, field, factor, unit), i18n.language)}<span className="ml-2 text-xs font-normal text-muted-foreground">/ {unit} tokens</span></dd></div>)}
       </dl> : model.mode !== 'per_call' && <p className="text-sm leading-6 text-muted-foreground">{t('catalog:tieredHint')}</p>}
-      {(model.modality_ratios?.cache_write_5m != null || model.modality_ratios?.cache_write_1h != null) && <p className="text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.ttlHint')}</p>}
+      {(model.modality_ratios?.cache_write_5m != null || model.modality_ratios?.cache_write_1h != null) && <p className="text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.ttlHint')}</p>}
     </FieldGroup>
     <FieldGroup title={t('catalog:servingGroups')} hint={t('catalog:availabilityHint')}>
       <div><ModelAvailability model={model} group={group} /></div>

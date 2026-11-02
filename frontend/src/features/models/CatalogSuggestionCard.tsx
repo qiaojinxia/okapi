@@ -31,7 +31,7 @@ export function CatalogSuggestionCard({ suggestion, snapshot, canApplyPrice, onA
     s.max_output !== null && t('admin:modelCatalog.limitsOutput', { output: count(s.max_output) }),
   ].filter(Boolean).join(' · ')
   const badges = [
-    s.kind ? t(`admin:modelKinds.${s.kind}`) : '',
+    s.kind ? t(`catalog:modelKinds.${s.kind}`) : '',
     ...SHOWN_CAPABILITIES.filter((key) => CAPABILITY_KEYS.includes(key) && s.capabilities[key] === true)
       .map((key) => t(`admin:modelCaps.${key}`)),
   ].filter(Boolean)

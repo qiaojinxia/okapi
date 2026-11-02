@@ -119,7 +119,7 @@ function ListToolbar({ tabs, total, children }: { tabs: React.ReactNode; total: 
     <div className="flex flex-wrap items-center justify-between gap-2">
       <span className="flex items-center gap-3">
         {tabs}
-        <Badge variant="muted">{t('admin:keyTotal', { n: total })}</Badge>
+        <Badge variant="muted">{t('common:totalCount', { n: total })}</Badge>
       </span>
       <span className="flex items-center gap-2">{children}</span>
     </div>

@@ -39,7 +39,7 @@ export function Simulator({ model, groupFactor }: { model: PricingModel; groupFa
   return <section className="rounded-xl border border-border bg-muted/25 p-4">
     <h3 className="text-sm font-semibold">{t('pricing:simulator')}</h3>
     <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('catalog:simContext')}</p>
-    {ttl && <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.simTtlHint')}</p>}
+    {ttl && <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.simTtlHint')}</p>}
     <div className="mt-4 grid grid-cols-2 gap-3">
       {fields.map(([key, label]) => <div key={key} className="flex flex-col gap-1.5">
         <Label htmlFor={`sim-${key}`}>{label}</Label>

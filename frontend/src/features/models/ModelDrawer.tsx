@@ -108,7 +108,7 @@ export function ModelDrawer({
         },
       }),
     onSuccess: () => {
-      toast.success(t('admin:modelMeta.saved'))
+      toast.success(t('catalog:modelMeta.saved'))
       onDone()
       onClose()
     },
@@ -204,7 +204,7 @@ export function ModelDrawer({
   )
   const independentField = (key: typeof INDEPENDENT_AXES[number]) => (
     <ModelRateField key={key} id={`ind-${key}`} label={t(`admin:modelIndependent.${key}`)} value={independent[key] ?? ''}
-      placeholder={t('admin:modelMeta.inherit')} disabledReason={pricingDisabledReason(metadata, key)}
+      placeholder={t('catalog:modelMeta.inherit')} disabledReason={pricingDisabledReason(metadata, key)}
       onChange={(value) => setIndependent((previous) => ({ ...previous, [key]: value }))} />
   )
   const rateField = (key: PricingAxis) => key in AXIS_LABEL
@@ -278,14 +278,14 @@ export function ModelDrawer({
       </section>
       <FieldGroup title={t('admin:modelSimple.basicPricing')} hint={t('admin:modelSimple.priceHint')}>
         <div className="sm:w-1/2 sm:pr-1.5">
-        <div className="flex flex-col gap-1.5"><Label htmlFor="m-pricing-mode">{t('admin:modelMeta.billingMode')}</Label>
+        <div className="flex flex-col gap-1.5"><Label htmlFor="m-pricing-mode">{t('catalog:modelMeta.billingMode')}</Label>
         <Select id="m-pricing-mode" className="w-full" value={mode}
           onChange={(value) => {
             setMode(value)
             if (value === 'ratio') { setTierExpr(''); setPrices(pricesFromRatios(basePriceMicro, axes.model_ratio, axes.completion_ratio)) }
           }} options={['ratio', 'per_call', 'tiered'].map((value) => ({ value, label: t(`admin:modelSimple.mode_${value}`) }))} /></div>
         </div>
-        {mode === 'per_call' && <div className="flex flex-col gap-1.5"><Label htmlFor="m-call-price">{t('admin:modelMeta.callPrice')}</Label>
+        {mode === 'per_call' && <div className="flex flex-col gap-1.5"><Label htmlFor="m-call-price">{t('catalog:modelMeta.callPrice')}</Label>
           <Input id="m-call-price" value={callPrice} inputMode="decimal" onChange={(e) => setCallPrice(e.target.value)} placeholder="0.01" />
         </div>}
         {mode === 'ratio' && <>
@@ -348,7 +348,7 @@ export function ModelDrawer({
         {cacheAxes.length > 0 && <div className="grid grid-cols-2 gap-3">{cacheAxes.map(axisField)}</div>}
         {ttlAxes.length > 0 && <ModelOptionsSection id="model-cache-ttl-section" title={t('admin:modelSimple.ttlRates')}
           configured={ttlAxes.some((key) => Boolean(independent[key]?.trim()))}>
-          <p className="mb-3 text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.independentHint')}</p>
+          <p className="mb-3 text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.independentHint')}</p>
           <div className="grid grid-cols-2 gap-3">{ttlAxes.map(independentField)}</div>
         </ModelOptionsSection>}
       </div>
@@ -359,21 +359,21 @@ export function ModelDrawer({
         {modalAxes.length > 0 && <div className="grid grid-cols-2 gap-3">{modalAxes.map(rateField)}</div>}
         {modalCacheAxes.length > 0 && <ModelOptionsSection id="model-modal-cache-section" title={t('admin:modelSimple.modalCacheTitle')}
           configured={modalCacheAxes.some((key) => Boolean(independent[key]?.trim()))}>
-          <p className="mb-3 text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.independentHint')}</p>
+          <p className="mb-3 text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.independentHint')}</p>
           <div className="grid grid-cols-2 gap-3">{modalCacheAxes.map(independentField)}</div>
         </ModelOptionsSection>}
       </div>
       </ModelOptionsSection>}
       {unavailableAxes.length > 0 && <ModelOptionsSection id="model-unavailable-section"
         title={t('admin:modelSimple.unavailableTitle', { n: unavailableAxes.length })} configured={hasUnavailableValues}>
-        <p className="mb-3 text-xs leading-5 text-muted-foreground">{t('admin:modelMeta.rateAvailabilityHint')}</p>
+        <p className="mb-3 text-xs leading-5 text-muted-foreground">{t('catalog:modelMeta.rateAvailabilityHint')}</p>
         <div className="grid grid-cols-2 gap-3">{unavailableAxes.map(rateField)}</div>
       </ModelOptionsSection>}
       <ModelOptionsSection id="model-billing-notes" title={t('admin:modelSimple.billingNotes')}>
         <div className="space-y-2 text-xs leading-5 text-muted-foreground">
           <p>{t('admin:cachePricingHint', { read: axes.cache_ratio, write: axes.cache_write_ratio })}</p>
-          <p>{t('admin:modelMeta.independentHint')}</p>
-          <p>{t('admin:modelMeta.ttlHint')}</p>
+          <p>{t('catalog:modelMeta.independentHint')}</p>
+          <p>{t('catalog:modelMeta.ttlHint')}</p>
           <p>{t('admin:axesModalHint')}</p>
         </div>
       </ModelOptionsSection>
@@ -431,7 +431,7 @@ export function ModelDrawer({
       </ModelOptionsSection>
       </div>
       </ModelOptionsSection>
-      {!valid && name.trim() !== '' && <p role="status" className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{t('admin:modelMeta.validationHint')}</p>}
+      {!valid && name.trim() !== '' && <p role="status" className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{t('catalog:modelMeta.validationHint')}</p>}
       </div>
     </Drawer>
   )

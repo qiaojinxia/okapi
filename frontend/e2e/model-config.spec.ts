@@ -60,7 +60,7 @@ test('模型表单基础校验和精确价格，未声明不会伪装成不支�
   expect(zh.common).toBe(zhBase.common)
   expect(zh.logs).toBe(zhBase.logs)
   expect(zh.admin.pricingBase).toBe(zhBase.admin.pricingBase)
-  expect(zh.admin.modelMeta.kind).toBe(zhBase.admin.modelMeta.kind)
+  expect(zh.catalog.modelMeta.kind).toBe(zhBase.catalog.modelMeta.kind)
   expect(metadataPayload(metadataDraft()).capabilities).toEqual({})
   expect(metadataPayload(metadataDraft()).context_window).toBeNull()
   expect(usdMicro('0.012345')).toBe(12345)
@@ -84,27 +84,27 @@ test('价格可编辑性区分输入、输出和缓存：未知不禁用，名�
   for (const axis of ['image_ratio', 'image_cache_read', 'image_cache_write', 'cache_write_1h'] as const) {
     expect(pricingDisabledReason(vision, axis)).toBeUndefined()
   }
-  expect(pricingDisabledReason(vision, 'image_output')).toBe('admin:modelMeta.noImageOutput')
+  expect(pricingDisabledReason(vision, 'image_output')).toBe('catalog:modelMeta.noImageOutput')
   for (const axis of ['audio_ratio', 'audio_cache_read', 'audio_cache_write'] as const) {
-    expect(pricingDisabledReason(vision, axis)).toBe('admin:modelMeta.noAudioInput')
+    expect(pricingDisabledReason(vision, axis)).toBe('catalog:modelMeta.noAudioInput')
   }
-  expect(pricingDisabledReason(vision, 'audio_completion_ratio')).toBe('admin:modelMeta.noAudioOutput')
+  expect(pricingDisabledReason(vision, 'audio_completion_ratio')).toBe('catalog:modelMeta.noAudioOutput')
   const image = presetMetadata(findModelPreset('gemini-3.1-flash-image')!)
   expect(pricingDisabledReason(image, 'image_output')).toBeUndefined()
   expect(pricingDisabledReason(image, 'image_ratio')).toBeUndefined()
   for (const axis of ['cache_ratio', 'cache_write_ratio', 'cache_write_5m', 'cache_write_1h', 'image_cache_read', 'audio_cache_read', 'image_cache_write', 'audio_cache_write'] as const) {
-    expect(pricingDisabledReason(image, axis)).toBe('admin:modelMeta.noPromptCache')
+    expect(pricingDisabledReason(image, axis)).toBe('catalog:modelMeta.noPromptCache')
   }
   const textOnly = { ...unknown, input_modalities: ['text'], output_modalities: ['text'], capabilities: { vision: true, audio: true } }
-  expect(pricingDisabledReason(textOnly, 'image_ratio')).toBe('admin:modelMeta.noImageInput')
-  expect(pricingDisabledReason(textOnly, 'audio_completion_ratio')).toBe('admin:modelMeta.noAudioOutput')
+  expect(pricingDisabledReason(textOnly, 'image_ratio')).toBe('catalog:modelMeta.noImageInput')
+  expect(pricingDisabledReason(textOnly, 'audio_completion_ratio')).toBe('catalog:modelMeta.noAudioOutput')
   // Vision describes image understanding, not image generation; an explicit negative still guards input.
   const generation = { ...unknown, input_modalities: ['image'], output_modalities: ['image'], capabilities: { vision: false } }
-  expect(pricingDisabledReason(generation, 'image_ratio')).toBe('admin:modelMeta.noImageInput')
+  expect(pricingDisabledReason(generation, 'image_ratio')).toBe('catalog:modelMeta.noImageInput')
   expect(pricingDisabledReason(generation, 'image_output')).toBeUndefined()
-  expect(pricingDisabledReason({ ...unknown, capabilities: { audio: false } }, 'audio_completion_ratio')).toBe('admin:modelMeta.noAudioOutput')
+  expect(pricingDisabledReason({ ...unknown, capabilities: { audio: false } }, 'audio_completion_ratio')).toBe('catalog:modelMeta.noAudioOutput')
   for (const reason of ['noImageInput', 'noAudioInput', 'noImageOutput', 'noAudioOutput', 'noPromptCache', 'rateAvailabilityHint'] as const) {
-    for (const locale of [zh, en]) expect(locale.admin.modelMeta[reason]).toBeTruthy()
+    for (const locale of [zh, en]) expect(locale.catalog.modelMeta[reason]).toBeTruthy()
   }
 })
 
@@ -231,7 +231,7 @@ test('官方预设数据白名单、来源、独立副本和促销期限；不�
     expect(preset.checkedAt).toBe('2026-09-30')
     expect(MODEL_KINDS).toContain(preset.kind)
     for (const locale of [zh, en]) {
-      expect(locale.admin.modelKinds[preset.kind]).toBeTruthy()
+      expect(locale.catalog.modelKinds[preset.kind]).toBeTruthy()
       for (const notice of preset.notices ?? []) expect(locale.admin.modelPresetNotices[notice]).toBeTruthy()
     }
     const metadata = presetMetadata(preset)

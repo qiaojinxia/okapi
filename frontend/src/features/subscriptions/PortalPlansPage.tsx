@@ -220,8 +220,8 @@ function CurrentSubscription({
             <Table className="mt-2">
               <THead>
                 <Tr>
-                  <Th>{t('admin:planName')}</Th>
-                  <Th numeric>{t('admin:planQuota')}</Th>
+                  <Th>{t('portal:planName')}</Th>
+                  <Th numeric>{t('portal:planQuota')}</Th>
                   <Th>{t('common:status')}</Th>
                   <Th>{t('portal:subEnded')}</Th>
                 </Tr>

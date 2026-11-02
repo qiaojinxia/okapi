@@ -62,7 +62,7 @@ export function LogRequestDetails({ row }: { row: {
           </div>
           <p className="break-words [overflow-wrap:anywhere]">{attempt.upstream_model} · {attempt.upstream_endpoint}</p>
           <p className="text-xs text-muted-foreground">
-            {t('admin:logsChannelKey')} #{attempt.channel_key_id}
+            {t('logs:channelKey')} #{attempt.channel_key_id}
             {attempt.egress_proxy_id !== undefined && ` · ${t('logs:egressProxy')} ${proxyName(attempt.egress_proxy_id)}`}
           </p>
           {attempt.error_code && <p className="break-all text-destructive">{attempt.error_code}</p>}
@@ -75,7 +75,7 @@ export function LogRequestDetails({ row }: { row: {
       <summary className="cursor-pointer text-[13px] leading-5 font-medium">{t('logs:excludedCandidates')} · {d.excluded.length}</summary>
       <ul className="mt-3 space-y-2">
         {d.excluded.map((e, index) => <li key={index} className="min-w-0 rounded-lg bg-muted/30 p-3 text-[13px] leading-5">
-          <span className="font-medium">{t('analytics:dimChannel')} #{e.channel_id} · {t('admin:logsChannelKey')} #{e.channel_key_id}</span>
+          <span className="font-medium">{t('analytics:dimChannel')} #{e.channel_id} · {t('logs:channelKey')} #{e.channel_key_id}</span>
           <p className="break-words text-muted-foreground [overflow-wrap:anywhere]">{excludedReason(e)}</p>
         </li>)}
       </ul>

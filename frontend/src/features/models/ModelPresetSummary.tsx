@@ -13,7 +13,7 @@ export function ModelPresetSummary({ preset, metadata, applied, canApplyPrice, o
   const vendor = applied ? metadata.vendor : preset.vendor
   const kind = applied ? metadata.kind : preset.kind
   const capabilities = applied ? metadata.capabilities : preset.capabilities
-  const badges = [vendor, kind ? t(`admin:modelKinds.${kind}`) : '',
+  const badges = [vendor, kind ? t(`catalog:modelKinds.${kind}`) : '',
     ...(['vision', 'tools', 'reasoning', 'audio', 'video'] as const).filter((key) => capabilities[key] === true).map((key) => t(`admin:modelCaps.${key}`))].filter(Boolean)
   return <div className="space-y-2 rounded-lg border border-primary/15 bg-primary/5 px-3 py-2.5" data-testid="model-preset-summary">
     <div className="flex flex-wrap items-center justify-between gap-2 text-xs">

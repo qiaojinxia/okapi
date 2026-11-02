@@ -59,7 +59,7 @@ export function GroupsPage() {
         className="shrink-0"
         title={t('admin:groupsTitle')}
         description={t('admin:groupsDesc')}
-        meta={groups.data?.total === undefined ? undefined : t('admin:keyTotal', { n: groups.data.total })}
+        meta={groups.data?.total === undefined ? undefined : t('common:totalCount', { n: groups.data.total })}
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />

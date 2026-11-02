@@ -27,14 +27,14 @@ export function LogErrorDetails({ failed, code, upstreamStatus, diagnostics }: {
     {diagnostics?.error_phase && <p className="text-xs text-muted-foreground">{t('logs:errorPhase')} · {t(`logs:phase_${diagnostics.error_phase}`, { defaultValue: diagnostics.error_phase })}</p>}
     <dl className="grid gap-3 sm:grid-cols-2">
       <div className="min-w-0 space-y-1">
-        <dt className="text-xs leading-5 text-muted-foreground">{t('admin:logsErrorCode')}</dt>
+        <dt className="text-xs leading-5 text-muted-foreground">{t('logs:errorCode')}</dt>
         <dd className="flex min-w-0 items-start gap-2">
           <span className="min-w-0 flex-1 whitespace-pre-wrap break-all text-[13px] leading-5">{code || '—'}</span>
           {code && <CopyButton value={code} size="xs" />}
         </dd>
       </div>
       {upstreamStatus != null && upstreamStatus > 0 && <div className="space-y-1">
-        <dt className="text-xs leading-5 text-muted-foreground">{t('admin:logsUpstreamStatus')}</dt>
+        <dt className="text-xs leading-5 text-muted-foreground">{t('logs:upstreamStatus')}</dt>
         <dd className="text-[13px] leading-5 tabular-nums">{upstreamStatus}</dd>
       </div>}
     </dl>

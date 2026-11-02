@@ -38,11 +38,11 @@ export function LogBillingDetails({ row, status }: {
             <Badge variant="muted">{t('logs:mode')} {t(`logs:mode_${s.mode}`, { defaultValue: s.mode })}</Badge>
             {s.epoch != null && <Badge variant="muted">{t('logs:pricingVersion')} {s.epoch}</Badge>}
             {s.service_tier && <Badge variant="info">{t('logs:serviceTier')} {s.service_tier}{s.tier_ratio != null ? ` ×${formatRatio(s.tier_ratio)}` : ''}</Badge>}
-            {s.mode !== 'per_call' && <Badge variant="muted">{t('admin:pricingBasePreview', { price: s.base_price_per_1m_usd ?? 2 })}</Badge>}
+            {s.mode !== 'per_call' && <Badge variant="muted">{t('catalog:pricingBasePreview', { price: s.base_price_per_1m_usd ?? 2 })}</Badge>}
             <Badge variant="muted">{t('logs:group')} {s.group} ×{formatRatio(s.group_ratio)}</Badge>
             <Badge variant="muted">{t('logs:userMultiplier')} ×{formatRatio(s.user_multiplier)}</Badge>
-            {s.model_ratio != null && <Badge variant="muted">{t('admin:modelRatio')} ×{formatRatio(s.model_ratio)}</Badge>}
-            {s.completion_ratio != null && <Badge variant="muted">{t('admin:completionRatio')} ×{formatRatio(s.completion_ratio)}</Badge>}
+            {s.model_ratio != null && <Badge variant="muted">{t('catalog:modelRatio')} ×{formatRatio(s.model_ratio)}</Badge>}
+            {s.completion_ratio != null && <Badge variant="muted">{t('catalog:completionRatio')} ×{formatRatio(s.completion_ratio)}</Badge>}
             {s.cache_ratio != null && <Badge variant="muted">{t('logs:cacheRead')} ×{formatRatio(s.cache_ratio)}</Badge>}
             {s.cache_write_ratio != null && <Badge variant="muted">{t('logs:cacheWrite')} ×{formatRatio(s.cache_write_ratio)}</Badge>}
             {(s.rules ?? []).map((rule, i) => <Badge key={`${rule.code}-${i}`}>{rule.code} ×{formatRatio(rule.multiplier)}</Badge>)}
