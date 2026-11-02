@@ -4,8 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { IconButton } from '@/components/ui/icon-button'
 import { toast } from '@/components/ui/toast'
 import { ApiError, apiFetch } from '@/lib/api'
-
-export type KeyCopyStatus = 'available' | 'not_saved' | 'unavailable'
+import type { KeyCopyStatus } from './api'
 
 export function KeyCopyButton({ id, name, status, hasSession }: {
   id: number; name: string; status?: KeyCopyStatus; hasSession: boolean

@@ -19,16 +19,16 @@ import { fileURLToPath } from 'node:url'
 
 type Json = Record<string, unknown>
 const providerMetadata = { data: [
-  { id: 'openai', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'openai_compat', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'anthropic', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'openai_compat', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'anthropic', default_base: 'https://api.anthropic.com/v1', account: { quota: false, refresh: false, subscription: null } },
   { id: 'azure', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'gemini', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'gemini', default_base: 'https://generativelanguage.googleapis.com/v1beta', account: { quota: false, refresh: false, subscription: null } },
   { id: 'bedrock', account: { quota: false, refresh: false, subscription: null } },
   { id: 'vertex', account: { quota: false, refresh: false, subscription: null } },
   { id: 'custom_pass', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'anthropic_max', account: { authorization: { code_format: 'code_state', access_token_prefix: 'sk-ant-oat', account_id_required: false, import_profile: { name: 'claude-code', mode: 'mimic', revision: '2.1.290' } }, quota: true, refresh: true, subscription: { quota_scope: 'session', window_secs: 18000, quota_windows: [18000, 604800] } } },
-  { id: 'codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
+  { id: 'anthropic_max', default_base: 'https://api.anthropic.com/v1', account: { authorization: { code_format: 'code_state', access_token_prefix: 'sk-ant-oat', account_id_required: false, import_profile: { name: 'claude-code', mode: 'mimic', revision: '2.1.290' } }, quota: true, refresh: true, subscription: { quota_scope: 'session', window_secs: 18000, quota_windows: [18000, 604800] } } },
+  { id: 'codex', default_base: 'https://chatgpt.com/backend-api/codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
 ] }
 
 

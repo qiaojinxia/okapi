@@ -15,16 +15,16 @@ const channel = { id: 42, name: 'controlled-channel', provider: 'openai', api_ba
   } },
 }
 const providerMetadata = { data: [
-  { id: 'openai', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'openai_compat', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'anthropic', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'openai_compat', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'anthropic', default_base: 'https://api.anthropic.com/v1', account: { quota: false, refresh: false, subscription: null } },
   { id: 'azure', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'gemini', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'gemini', default_base: 'https://generativelanguage.googleapis.com/v1beta', account: { quota: false, refresh: false, subscription: null } },
   { id: 'bedrock', account: { quota: false, refresh: false, subscription: null } },
   { id: 'vertex', account: { quota: false, refresh: false, subscription: null } },
   { id: 'custom_pass', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'anthropic_max', account: { authorization: { code_format: 'code_state', access_token_prefix: 'sk-ant-oat', account_id_required: false, import_profile: { name: 'claude-code', mode: 'mimic', revision: '2.1.290' } }, quota: true, refresh: true, subscription: { quota_scope: 'session', window_secs: 18000, quota_windows: [18000, 604800] } } },
-  { id: 'codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
+  { id: 'anthropic_max', default_base: 'https://api.anthropic.com/v1', account: { authorization: { code_format: 'code_state', access_token_prefix: 'sk-ant-oat', account_id_required: false, import_profile: { name: 'claude-code', mode: 'mimic', revision: '2.1.290' } }, quota: true, refresh: true, subscription: { quota_scope: 'session', window_secs: 18000, quota_windows: [18000, 604800] } } },
+  { id: 'codex', default_base: 'https://chatgpt.com/backend-api/codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
 ] }
 async function prepare(page: Page, rows: Json[] = []) {
   await page.addInitScript(() => {
@@ -431,7 +431,7 @@ test('an access-token import queries quota without offering automatic renewal', 
 test('subscription controls use plugin metadata rather than provider name', async ({ page }) => {
   await prepare(page)
   await page.route('**/admin/channels/providers', (route) => route.fulfill({ json: { data: [
-    { id: 'openai', account: { quota: true, refresh: false, subscription: { quota_scope: 'session', window_secs: 7200, quota_windows: [7200] } } },
+    { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: true, refresh: false, subscription: { quota_scope: 'session', window_secs: 7200, quota_windows: [7200] } } },
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
   const drawer = page.getByRole('dialog')
@@ -538,7 +538,7 @@ test('account catalog failure blocks creation and retry preserves the configurat
 test('a non-subscription quota hook does not expose subscription configuration', async ({ page }) => {
   await prepare(page)
   await page.route('**/admin/channels/providers', (route) => route.fulfill({ json: { data: [
-    { id: 'openai', account: { quota: true, refresh: false, subscription: null } },
+    { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: true, refresh: false, subscription: null } },
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
   await expect(page.getByRole('dialog').locator('#channel-subscription-controls')).toHaveCount(0)

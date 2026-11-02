@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { RoleRow } from '@/features/users/types'
+import type { RoleRow } from '@/features/roles/api'
 import { BUILTIN_ROLES, roleLabel } from '@/features/users/types'
 import { Button } from '@/components/ui/button'
 import { FieldGroup } from '@/components/ui/drawer'

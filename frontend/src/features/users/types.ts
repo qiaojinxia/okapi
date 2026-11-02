@@ -2,14 +2,6 @@
 export const BUILTIN_ROLES = [1, 10, 100] as const
 
 
-export interface RoleRow {
-  id: number
-  role_code: string
-  display_name: string
-}
-
-
-
 export interface Overview {
   user: {
     id: number
@@ -23,7 +15,6 @@ export interface Overview {
   groups: { code: string; priority: number }[]
   keys: { id: number; name: string; key_prefix: string; status: number; used_micro: number }[]
 }
-
 
 
 export function roleLabel(role: number, t: (k: string) => string): string {

@@ -1,25 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import { isAvailable } from '@/features/public-pricing/catalog-data'
 import type { PricingModel } from '@/features/public-pricing/types'
-import { apiFetch } from '@/lib/api'
+import { fetchMyKeys } from '@/features/portal-keys/api'
+import type { MyKey } from '@/features/portal-keys/api'
 import { qk } from '@/lib/query-keys'
 
-/// `/api/me/keys` 一行里试用台用到的字段。
-interface KeyRow {
-  id: number
-  name: string
-  key_prefix: string
-  /// available = 服务端存有加密副本、能代用户以这把令牌调用；not_saved = 旧令牌没存；unavailable = 站点没配主密钥。
-  copy_status: string
-  /// 1 启用 / 2 停用 / 3 过期。
-  status: number
-  model_allowlist: unknown
-  group_override: string | null
-  expires_at: string | null
-  quota_mode: number
-  quota_micro: number | null
-  used_micro: number
-}
 
 /// 为什么某把密钥当下不能选（null = 可选）。
 export type KeyBlock = 'disabled' | 'expired' | 'not_saved' | 'unavailable'
@@ -38,7 +23,7 @@ export interface KeyChoice {
   blocked: KeyBlock | null
 }
 
-export function toChoice(row: KeyRow, now = Date.now()): KeyChoice {
+export function toChoice(row: MyKey, now = Date.now()): KeyChoice {
   const expired = row.status === 3 || (row.expires_at !== null && Date.parse(row.expires_at) <= now)
   const blocked: KeyBlock | null =
     row.status === 2 ? 'disabled'
@@ -51,7 +36,7 @@ export function toChoice(row: KeyRow, now = Date.now()): KeyChoice {
     name: row.name,
     prefix: row.key_prefix,
     group: row.group_override !== null && row.group_override !== '' ? row.group_override : null,
-    allowlist: Array.isArray(row.model_allowlist) ? row.model_allowlist.filter((m): m is string => typeof m === 'string') : null,
+    allowlist: row.model_allowlist ?? null,
     quotaLeftMicro: row.quota_mode === 1 && row.quota_micro !== null ? Math.max(row.quota_micro - row.used_micro, 0) : null,
     blocked,
   }
@@ -61,7 +46,7 @@ export function toChoice(row: KeyRow, now = Date.now()): KeyChoice {
 export function usePlaygroundKeys() {
   const query = useQuery({
     queryKey: qk.keysPlayground,
-    queryFn: () => apiFetch<{ data: KeyRow[] }>('/api/me/keys?limit=100&offset=0'),
+    queryFn: () => fetchMyKeys({ offset: 0, limit: 100 }),
     staleTime: 30_000,
   })
   return { ...query, choices: (query.data?.data ?? []).map((row) => toChoice(row)) }

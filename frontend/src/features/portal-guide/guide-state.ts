@@ -1,18 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { createContext, useContext, useSyncExternalStore } from 'react'
 import { useMe } from '@/hooks/use-auth'
-import { apiFetch } from '@/lib/api'
+import { fetchMyKeys } from '@/features/portal-keys/api'
 import { readLocal, rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 
 export const GUIDE_STEPS = ['key', 'model', 'connect', 'call'] as const
 export type GuideStep = (typeof GUIDE_STEPS)[number]
-
-interface KeyBrief {
-  used_micro: number
-  requests: number
-  last_used_at: string | null
-}
 
 /// 引导进度不靠"点过没点过"，而按账户真实状态推导：有密钥 → 第 1 步完成；
 /// 任何一把密钥调用过（`last_used_at` / 累计消费 / 请求数非零）→ 后三步一并完成——
@@ -26,7 +20,7 @@ export function useGuideProgress(): {
 } {
   const keys = useQuery({
     queryKey: qk.keysSummary,
-    queryFn: () => apiFetch<{ data: KeyBrief[]; total: number }>('/api/me/keys?limit=50&offset=0'),
+    queryFn: () => fetchMyKeys({ offset: 0, limit: 50 }),
     staleTime: 30_000,
   })
   const rows = keys.data?.data ?? []

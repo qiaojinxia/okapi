@@ -3,7 +3,8 @@ import { Link } from '@tanstack/react-router'
 import { ScrollText } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { Overview, RoleRow } from '@/features/users/types'
+import { fetchRoles } from '@/features/roles/api'
+import type { Overview } from '@/features/users/types'
 import { Badge } from '@/components/ui/badge'
 import { BalanceSection } from '@/features/users/BalanceSection'
 import { Button } from '@/components/ui/button'
@@ -47,7 +48,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
   })
   const roles = useQuery({
     queryKey: qk.adminRoles,
-    queryFn: () => apiFetch<{ data: RoleRow[] }>('/admin/roles'),
+    queryFn: () => fetchRoles(),
   })
 
   // 调完余额切回"用量"签，最近变动里就该看到刚那一笔

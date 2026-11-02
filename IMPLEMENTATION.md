@@ -3522,6 +3522,24 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
 
 `scripts/guard-query-keys.py`（CI 前端 job）拦截 `queryKey: ['…']` 与 `setQueryData([…])` 等字面量 key（允许跨行写法）。
 
+### 11.66 前端接口层：一个端点一个函数一个类型（2026-11-02）
+
+前端类型全部手写，后端 console 的响应多用 `json!` 拼、没有可生成类型的结构体，所以**暂不做代码生成**（那要先把约 770 处
+`json!` 改成类型化 DTO）。约定改为：每个 feature 一个 `api.ts`，一个端点对应一个取数函数和一个响应类型，别的 feature
+要读这个端点就 import 它，不再各写一份（样板：`channels/account-controls/api.ts`）。这次先收拢已经分叉的几处：
+
+- `GET /api/me/keys`：门户密钥页、试用台、日志页的密钥筛选、新手引导各写了一份行类型（试用台的 `model_allowlist` 是
+  `unknown`，密钥页是 `string[]`），现在都用 `portal-keys/api.ts` 的 `MyKey` / `fetchMyKeys`，字段照后端 `portal/keys.rs`。
+- `GET /admin/roles`：角色页与用户抽屉的 `RoleRow` 合成 `roles/api.ts` 一份。
+- 渠道协议的缺省地址不再在前端手抄：抽屉只认 `/admin/channels/providers` 的 `default_base`（后端注册表），注册表明说没有
+  缺省地址的协议才必填；目录还没到或不认识的协议前端不判必填，保存时后端照样校验。e2e 的协议目录桩补上了与后端一致的
+  `default_base`。`apiBasePlaceholder` 只剩输入框占位示例。
+- `apiFetch` 增加 `headers`（额外请求头，鉴权与 Content-Type 仍由它设置）：试用台参数接口原来自己拼鉴权头调 `fetch`，
+  登录 key 失效时不触发复核与登出，现在走 `apiFetch`；成功状态码配非 JSON 体仍按上游异常处理。
+
+其余内联的 `apiFetch` 调用（115 个文件里 224 处）按 feature 逐步迁，改到哪个 feature 顺手收进它的 `api.ts`；管理端日志页的
+行类型随 `AdminLogsPage.tsx` 的拆分收进 `admin-logs`。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

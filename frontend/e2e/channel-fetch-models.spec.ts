@@ -5,10 +5,10 @@ import { fileURLToPath } from 'node:url'
 type Json = Record<string, unknown>
 
 const providerMetadata = { data: [
-  { id: 'openai', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'anthropic', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'gemini', account: { quota: false, refresh: false, subscription: null } },
-  { id: 'codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
+  { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'anthropic', default_base: 'https://api.anthropic.com/v1', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'gemini', default_base: 'https://generativelanguage.googleapis.com/v1beta', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'codex', default_base: 'https://chatgpt.com/backend-api/codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
 ] }
 // 价簿里只有 gpt-5 建了模型；其余发现到的名字都是「还没建」
 const pricedModel = { model_name: 'gpt-5', display_name: null, vendor: 'OpenAI', pricing_mode: 'ratio' }

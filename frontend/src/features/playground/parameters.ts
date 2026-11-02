@@ -1,4 +1,4 @@
-import { ApiError, getKey } from '@/lib/api'
+import { ApiError, apiFetch } from '@/lib/api'
 
 export interface ParameterProfile {
   known: boolean
@@ -20,24 +20,25 @@ export const DEFAULT_PARAMETERS: ParameterProfile = {
 }
 
 export async function loadParameters(model: string, keyId: number | null, signal: AbortSignal): Promise<ParameterProfile> {
-  const key = getKey()
-  const response = await fetch(`/api/me/playground/parameters?model=${encodeURIComponent(model)}`, {
+  // 走 apiFetch：登录 key 失效时与其它接口一样触发复核与登出，不再自己拼鉴权头
+  const value = await apiFetch<Record<string, unknown> | undefined>(`/api/me/playground/parameters?model=${encodeURIComponent(model)}`, {
     signal,
-    headers: { ...(key ? { Authorization: `Bearer ${key}` } : {}), ...(keyId === null ? {} : { 'X-Okapi-Playground-Key': String(keyId) }) },
+    headers: keyId === null ? {} : { 'X-Okapi-Playground-Key': String(keyId) },
+  }).catch((err: unknown) => {
+    // 成功状态码配非 JSON 体（网关前面的代理回的 HTML 页）：当作上游异常，而不是抛 SyntaxError
+    throw err instanceof SyntaxError ? new ApiError(502, 'internal_error') : err
   })
-  // 与 apiFetch 同口径：空体 / 非 JSON（网关前面的代理回的 HTML 错误页）不能变成未捕获的 SyntaxError
-  const value = await response.json().catch(() => null)
-  if (!response.ok) throw new ApiError(response.status, value?.error?.code ?? 'internal_error', value?.error?.param)
-  if (value === null || typeof value !== 'object') throw new ApiError(502, 'internal_error')
+  if (value === undefined || value === null || typeof value !== 'object') throw new ApiError(502, 'internal_error')
+  const budget = (n: unknown) => n === null || (typeof n === 'number' && Number.isSafeInteger(n) && n > 0)
   if (typeof value.known !== 'boolean' || !Array.isArray(value.efforts)
     || !value.efforts.every((e: unknown) => typeof e === 'string')
     || !(value.temperature_max === null || (typeof value.temperature_max === 'number' && Number.isFinite(value.temperature_max)))
     || typeof value.top_p !== 'boolean' || typeof value.sampling_requires_none !== 'boolean'
     || typeof value.sampling_requires_no_budget !== 'boolean'
     || !(value.default_effort === null || typeof value.default_effort === 'string')
-    || ![value.budget_min, value.budget_max].every((n) => n === null || (Number.isSafeInteger(n) && n > 0))
+    || !budget(value.budget_min) || !budget(value.budget_max)
     || typeof value.preserve_reasoning !== 'boolean') throw new ApiError(502, 'internal_error')
-  return value as ParameterProfile
+  return value as unknown as ParameterProfile
 }
 
 export function samplingAllowed(profile: ParameterProfile, effort: string): boolean {

@@ -32,7 +32,8 @@ export function speaksOpenAi(provider: string): boolean {
   return provider === 'openai' || provider === 'openai_compat'
 }
 
-/// 各协议 api_base 的占位示例（azure 是资源端点，没有可猜的缺省，必填）。
+/// 各协议 api_base 输入框的占位示例。缺省地址与是否必填以后端注册表为准（/admin/channels/providers 的 default_base），
+/// 这里只是没有缺省地址的协议（azure / bedrock / vertex / custom_pass）给个写法示例，目录到之前也先占个位。
 export function apiBasePlaceholder(provider: string): string {
   switch (provider) {
     case 'azure':
@@ -54,12 +55,6 @@ export function apiBasePlaceholder(provider: string): string {
     default:
       return 'https://api.openai.com/v1'
   }
-}
-
-/// UI defaults mirror the provider registry; unknown/cloud endpoints must stay visible.
-export function defaultApiBase(provider: string): string | undefined {
-  return ['openai', 'openai_compat', 'anthropic', 'gemini', 'anthropic_max', 'codex'].includes(provider)
-    ? apiBasePlaceholder(provider) : undefined
 }
 
 /// 地址必须带版本段的协议：网关在 api_base 后面直接接 `/messages`、`/models`、`/models/{m}:generateContent`，

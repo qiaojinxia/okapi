@@ -27,7 +27,6 @@ import {
   apiBasePlaceholder,
   costMilliToRatio,
   channelSettingsForSave,
-  defaultApiBase,
   defaultResponsesNative,
   isCloudManaged,
   needsVersionSegment,
@@ -312,8 +311,10 @@ export function ChannelDrawer({
   // Login uses exchange; imported Claude tokens use the ordinary channel create endpoint.
   const oauth = Boolean(authorization)
   const importToken = Boolean(authorization?.access_token_prefix) && oauthInput === 'import'
-  const defaultBase = account.descriptor?.default_base ?? defaultApiBase(form.provider)
-  const endpointRequired = defaultBase === undefined
+  // 缺省地址以后端协议注册表为准（/admin/channels/providers 的 default_base）。注册表明说没有缺省地址的协议才必填；
+  // 目录还没到、或不认识这个协议时前端不判必填——新建本来就要等目录就绪，保存时后端照样校验
+  const defaultBase = account.descriptor?.default_base ?? undefined
+  const endpointRequired = account.descriptor !== undefined && !account.descriptor.default_base
   const endpointValid = !endpointRequired || form.api_base.trim() !== ''
   // 拉上游模型：已保存的渠道走渠道自己的凭证；新建时用表单里刚填的（订阅账号要先登录，没有草稿凭证可用）
   const canDiscover = isEdit || (accountReady && !oauth && endpointValid && credential.trim() !== '' && egressBinding !== null)

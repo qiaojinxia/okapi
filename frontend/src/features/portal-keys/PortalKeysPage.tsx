@@ -29,33 +29,13 @@ import { formatCount, formatMoney, formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { KeyUsageDrawer } from './KeyUsageDrawer'
 import { KeyUsageSparkline } from './KeyUsageSparkline'
-import type { KeyTokenTrend } from './KeyUsageSparkline'
 import { KeyCopyButton } from './KeyCopyButton'
-import type { KeyCopyStatus } from './KeyCopyButton'
+import { fetchMyKeys } from './api'
+import type { MyKey } from './api'
 import { emptyKeyLimits, KeyLimitsFields, keyLimitsError, keyQuotaMicro, keyQuotaText } from './KeyLimitsFields'
 import type { KeyLimitsDraft } from './KeyLimitsFields'
 
-interface KeyRow {
-  id: number
-  name: string
-  key_prefix: string
-  copy_status?: KeyCopyStatus
-  status: number
-  used_micro: number
-  quota_mode?: number
-  quota_micro?: number | null
-  expires_at?: string | null
-  model_allowlist?: string[] | null
-  rpm_limit: number | null
-  created_at: string
-  amount_micro: number
-  requests: number
-  usage_trend?: KeyTokenTrend | null
-  /// 这把 key 钉住的分组；null = 跟随用户分组。
-  group_override: string | null
-  /// 数据面来源 IP 白名单（地址 / CIDR）；null = 不限。
-  ip_allowlist: string[] | null
-}
+type KeyRow = MyKey
 
 interface SelectableGroup {
   code: string
@@ -98,10 +78,7 @@ export function PortalKeysPage() {
 
   const keys = useQuery({
     queryKey: qk.keysPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: KeyRow[]; total: number; key_limits_supported?: boolean }>(
-        `/api/me/keys?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
+    queryFn: () => fetchMyKeys(pager),
     placeholderData: keepPreviousData,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

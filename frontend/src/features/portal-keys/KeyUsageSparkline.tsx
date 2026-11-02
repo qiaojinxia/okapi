@@ -1,12 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import { Tooltip } from '@/components/ui/tooltip'
 import { formatCount } from '@/lib/money'
-
-export interface KeyTokenTrend {
-  days: string[]
-  tokens: number[]
-  timezone: string
-}
+import type { KeyTokenTrend } from './api'
 
 export function tokenTrendPoints(tokens: number[]): string {
   const max = Math.max(1, ...tokens)

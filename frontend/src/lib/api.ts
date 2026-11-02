@@ -74,11 +74,15 @@ interface ErrorEnvelope {
 
 export async function apiFetch<T>(
   path: string,
-  init?: { method?: string; body?: unknown; key?: string; fresh?: boolean; signal?: AbortSignal },
+  init?: {
+    method?: string; body?: unknown; key?: string; fresh?: boolean; signal?: AbortSignal
+    /// 额外的请求头（如试用台的 X-Okapi-Playground-Key）；鉴权与 Content-Type 仍由这里设置、不可覆盖。
+    headers?: Record<string, string>
+  },
 ): Promise<T> {
   const epoch = authEpoch
   const key = init?.key ?? getKey()
-  const headers: Record<string, string> = {}
+  const headers: Record<string, string> = { ...init?.headers }
   if (key) headers.Authorization = `Bearer ${key}`
   if (init?.body !== undefined) headers['Content-Type'] = 'application/json'
   if (init?.fresh) headers['Cache-Control'] = 'no-cache'

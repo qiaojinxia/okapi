@@ -10,6 +10,8 @@ import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
+import { fetchRoles } from '@/features/roles/api'
+import type { RoleRow } from '@/features/roles/api'
 import { RoleDrawer } from '@/features/roles/RoleDrawer'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { usePagination } from '@/hooks/use-pagination'
@@ -17,13 +19,6 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { useConfirm } from '@/components/ui/confirm'
-
-interface RoleRow {
-  id: number
-  role_code: string
-  display_name: string
-  permissions: unknown
-}
 
 
 /// 角色与权限页。
@@ -39,10 +34,7 @@ export function RolesPage() {
 
   const roles = useQuery({
     queryKey: qk.adminRolesPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: RoleRow[]; total: number }>(
-        `/admin/roles?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
+    queryFn: () => fetchRoles(pager),
     placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminRoles })
