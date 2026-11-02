@@ -6,9 +6,9 @@ export const defaults: AccountControl = {
   refresh_mode: 'managed', refresh_margin_secs: 120,
 }
 export const commonNumbers = [
-  ['rate_limit_cooldown_secs', 'channelRateCooldown', 1, 604800],
-  ['failure_threshold', 'channelFailureThreshold', 1, 20],
-  ['failure_cooldown_secs', 'channelFailureCooldown', 1, 7200],
+  ['rate_limit_cooldown_secs', 'admin:channelRateCooldown', 1, 604800],
+  ['failure_threshold', 'admin:channelFailureThreshold', 1, 20],
+  ['failure_cooldown_secs', 'admin:channelFailureCooldown', 1, 7200],
 ] as const
 
 /** Empty means unlimited; never round fractional or unsafe integer limits. */

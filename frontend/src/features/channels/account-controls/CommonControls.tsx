@@ -19,7 +19,7 @@ export function CommonControls({ draft, summaryPrefix, concurrencyValid, childre
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {children}
         {commonNumbers.map(([name, label, min, max]) => <div key={name} className="flex min-w-0 flex-col gap-1.5">
-          <Label htmlFor={`channel-${name}`}>{t(`admin:${label}`)}</Label>
+          <Label htmlFor={`channel-${name}`}>{t(label)}</Label>
           <Input id={`channel-${name}`} inputMode="numeric" value={numbers[name]} aria-invalid={!validNumber(name, min, max)}
             onChange={(e) => changeNumber(name, e.target.value, min, max)} />
           <p className="text-xs text-muted-foreground">{t('admin:channelControlNumberRange', { min, max })}</p>

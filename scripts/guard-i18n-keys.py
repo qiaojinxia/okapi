@@ -35,19 +35,73 @@ def defined_keys() -> dict[str, set[str]]:
 USED = re.compile(r"(?<![A-Za-z0-9_.$])t\('([A-Za-z0-9_]+:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)'")
 
 
+def source_files() -> list[str]:
+    files = glob.glob('frontend/src/**/*.tsx', recursive=True)
+    files += glob.glob('frontend/src/**/*.ts', recursive=True)
+    return [f for f in files if '/locales/' not in f]
+
+
 def used_keys() -> dict[str, set[str]]:
     """代码里出现的 t('ns:key') → 出现位置。"""
     out: dict[str, set[str]] = {}
-    files = glob.glob('frontend/src/**/*.tsx', recursive=True)
-    files += glob.glob('frontend/src/**/*.ts', recursive=True)
-    for f in files:
-        if '/locales/' in f:
-            continue
+    for f in source_files():
         src = open(f, encoding='utf-8').read()
         # 前置断言排除 `format('HH:mm')` 这类以 t 结尾的方法名——那不是翻译调用
         for m in USED.finditer(src):
             out.setdefault(m.group(1), set()).add(f)
     return out
+
+
+# 写死在代码里的键：不只 t() 的参数，映射表、props 里传的键字符串也算（AXIS_LABEL、setting-catalog 之类）。
+LITERAL = re.compile(r"""['"`]([A-Za-z0-9_]+:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)['"`]""")
+# 模板字符串拼出来的键：`logs:source_${x}` 记前缀 `logs:source_`。
+DYNAMIC = re.compile(r'`([A-Za-z0-9_]+:[A-Za-z0-9_.]*)\$\{')
+PLURAL = re.compile(r'_(?:zero|one|two|few|many|other)$')
+
+
+def ancestors(key: str) -> list[str]:
+    """`ns:a.b.c` → [`ns:a`, `ns:a.b`]。"""
+    ns, path = key.split(':', 1)
+    parts = path.split('.')
+    return [f'{ns}:{".".join(parts[:i])}' for i in range(1, len(parts))]
+
+
+def report_unused(keys: set[str]) -> None:
+    """死键报告，只报不拦：语言包里有、代码里哪儿都引用不到的叶子键。
+
+    注释里提到也算引用（宁可漏报）；复数形式 `x_one` / `x_other` 按 `x` 算；引用了上级对象
+    （`returnObjects`）的整棵子树都算用到。整个命名空间都可能被动态拼到的（`t(`logs:${key}`)`）
+    证不了死，只报个数。
+    """
+    literal: set[str] = set()
+    prefixes: set[str] = set()
+    for f in source_files():
+        src = open(f, encoding='utf-8').read()
+        literal.update(LITERAL.findall(src))
+        # 注释里举的反例（`t(`admin:${key}`)` 这种「别这么写」）不算动态拼键
+        code = '\n'.join(line for line in src.splitlines() if not line.lstrip().startswith(('//', '*', '/*')))
+        prefixes.update(DYNAMIC.findall(code))
+    parents = {a for k in keys for a in ancestors(k)}
+    dead: list[str] = []
+    maybe: dict[str, int] = {}
+    for key in sorted(keys - parents):
+        if key in literal or PLURAL.sub('', key) in literal or any(a in literal for a in ancestors(key)):
+            continue
+        ns = key.split(':', 1)[0]
+        covering = [p for p in prefixes if key.startswith(p)]
+        if any(p != f'{ns}:' for p in covering):
+            continue
+        if covering:
+            maybe[ns] = maybe.get(ns, 0) + 1
+        else:
+            dead.append(key)
+    if dead:
+        print(f'ℹ️  guard-i18n-keys：{len(dead)} 个键在代码里找不到任何引用（只报不拦；确认后从两份语言包删掉）:')
+        for key in dead:
+            print(f'   {key}')
+    if maybe:
+        counts = '、'.join(f'{ns} {n}' for ns, n in sorted(maybe.items()))
+        print(f'ℹ️  另有键只可能经整个命名空间的动态拼接用到，静态证不了死：{counts}')
 
 
 def main() -> int:
@@ -77,6 +131,7 @@ def main() -> int:
     if not failed:
         nested = sum(1 for k in used if '.' in k)
         print(f'✅ guard-i18n-keys：{len(used)} 个引用键（含 {nested} 个嵌套键）均已定义，中英对齐')
+    report_unused(defined['en'])
     return 1 if failed else 0
 
 
