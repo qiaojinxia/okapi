@@ -295,7 +295,7 @@ test('筛选里的日期输入只出现在弹出框的内容里，页面上不�
   // 新加日期输入请放进 Popover（见 components/ui/date-range.tsx），再把文件登记到这里
   expect(hits).toEqual([
     'components/ui/date-range.tsx',
-    'features/admin-logs/AdminLogsPage.tsx',
+    'features/admin-logs/RangePicker.tsx',
     // 表单里的单个到期时间 / 日期（点输入框本身弹原生选择器），不是筛选里的“自定义日期”
     'features/codes/GenerateDrawer.tsx',
     'features/portal-keys/KeyLimitsFields.tsx',

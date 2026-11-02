@@ -3579,6 +3579,20 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
 不做通用增删改框架：各页的行渲染、删除提示与抽屉差别很大，抽象只会多一层参数。统计卡片（`stats/*Card`）的接口回
 `total_items`、带时间窗，形状不同，没套进来；渠道列表 `ChannelsPage.tsx` 等手上的改动落地后再换。
 
+### 11.69 前端大文件按已有边界拆开（2026-11-02）
+
+只搬代码、不改行为（声明原样平移，import 按用到的名字裁剪），e2e 全量与拆之前同样通过：
+
+| 文件 | 拆法 |
+|---|---|
+| `admin-logs/AdminLogsPage.tsx`（976 行） | 内部本来就是独立函数：`search.ts`（检索草稿 ↔ 地址 ↔ 查询参数）、`types.ts`（行类型、统计类型）、`api.ts`（`useAdminLogs`）、`RangePicker` / `StatBar` / `FilterBar` / `LogTable` / `RefundInline` / `RowDetail` 各一个文件、`export-csv.ts`；页面本体剩 98 行 |
+| `channels/ChannelDrawer.tsx`（840 行） | 15 个表单状态与由它算出的校验进 `drawer/use-channel-form.ts`；四个页签各成一个分区组件（`ConnectionSection` / `ModelsSection` / `ScheduleSection` / `BehaviorSection`，开头从表单状态里解构要用的名字，JSX 原样平移）；请求头 / 注入字段编辑器进 `drawer/request-editors.tsx`，每把 key 的调度与凭证状态进 `drawer/key-panels.tsx`。抽屉本体剩提交用的 4 个 mutation、页签与分区编排（194 行）。仍是一个抽屉：新建与编辑共用表单状态，分区只按页签显示 |
+| `proxies/ProxiesPage.tsx`（488 行） | 两张互不相干的表各成一个文件（`ProxyList` / `GroupList`），共用的工具栏进 `ListToolbar.tsx` |
+| `auth/LoginForm.tsx` | 密码登录、注册即登录、OAuth 回调三处「兑换会话 key → 存起来 → 进门户」合成 `enterPortal` |
+| `routes/portal.security.tsx` | 唯一把业务 mutation 写在路由文件里的页面：组件挪到 `features/security/SecurityPage.tsx`，路由文件只剩挂载 |
+
+`ChannelsPage.tsx` 手上有未提交的改动，没动；等它落地再把 8 个 mutation 收成 `useChannelActions`。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

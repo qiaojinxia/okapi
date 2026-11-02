@@ -16,6 +16,14 @@ import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
+/// 网页会话已建（密码登录、注册即登录、OAuth 回调）：兑换绑定该会话的登录 key 存起来，进门户。
+/// 登录 key 随会话失效（退出 / 被踢 / 改密码），所以每次建会话都要重新兑换；`replace` 让这一跳不留历史。
+async function enterPortal(navigate: ReturnType<typeof useNavigate>, name: 'web' | 'oauth', replace = false): Promise<void> {
+  const { api_key } = await apiFetch<{ api_key: string }>('/auth/session-key', { method: 'POST', body: { name } })
+  setKey(api_key, 'account')
+  await navigate({ to: '/portal', replace })
+}
+
 /// OAuth 回调着陆（?oauth=done）：会话已建，兑 key 进门户。
 export function useOauthLanding(onError: (msg: string) => void) {
   const navigate = useNavigate()
@@ -34,13 +42,8 @@ export function useOauthLanding(onError: (msg: string) => void) {
     queryKey: qk.oauthExchange,
     queryFn: async () => {
       started.current = true
-      const resp = await apiFetch<{ api_key: string }>('/auth/session-key', {
-        method: 'POST',
-        body: { name: 'oauth' },
-      })
-      setKey(resp.api_key, 'account')
       // replace：着陆这一条历史被换成门户，后退不会再回到 ?oauth=done
-      await navigate({ to: '/portal', replace: true })
+      await enterPortal(navigate, 'oauth', true)
       return true
     },
     enabled: landed && !started.current,
@@ -186,12 +189,7 @@ export function LoginForm() {
         method: 'POST',
         body: { email: regForm.email.trim(), password: regForm.password },
       })
-      const keyResp = await apiFetch<{ api_key: string }>('/auth/session-key', {
-        method: 'POST',
-        body: { name: 'web' },
-      })
-      setKey(keyResp.api_key, 'account')
-      await navigate({ to: '/portal' })
+      await enterPortal(navigate, 'web')
     } catch (err) {
       setError(describeAuthError(err))
     } finally {
@@ -211,13 +209,7 @@ export function LoginForm() {
           totp_code: totpNeeded && form.totp ? form.totp : undefined,
         },
       })
-      // 会话已建：兑换绑定该会话的登录 key（退出 / 被踢 / 改密码后随会话失效）
-      const keyResp = await apiFetch<{ api_key: string }>('/auth/session-key', {
-        method: 'POST',
-        body: { name: 'web' },
-      })
-      setKey(keyResp.api_key, 'account')
-      await navigate({ to: '/portal' })
+      await enterPortal(navigate, 'web')
     } catch (err) {
       if (err instanceof ApiError && err.code === 'totp_required') {
         setTotpNeeded(true)

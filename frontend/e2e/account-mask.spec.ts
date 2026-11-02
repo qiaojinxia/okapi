@@ -125,7 +125,8 @@ test('显示渠道名 / 订阅账号的源码都经过遮罩：引用 channel_na
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
-      else if (/\.tsx?$/.test(entry.name) && entry.name !== 'types.ts' && entry.name !== 'mask.ts') files.push(path)
+      // CSV 导出按 lib/mask.ts 的约定保持原样（遮罩只用于展示），不在此列
+      else if (/\.tsx?$/.test(entry.name) && entry.name !== 'types.ts' && entry.name !== 'mask.ts' && entry.name !== 'export-csv.ts') files.push(path)
     }
   }
   walk(root)
