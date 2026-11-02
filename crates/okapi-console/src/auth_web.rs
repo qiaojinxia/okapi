@@ -151,10 +151,7 @@ async fn site_name(state: &AppState) -> String {
 
 /// Authentication links must use a configured canonical URL, never request headers.
 pub(crate) async fn site_base_url(state: &AppState) -> Result<String, AppError> {
-    let setting = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, "site_url")
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
+    let setting = state.setting_fresh("site_url").await?;
     let base = setting
         .as_ref()
         .and_then(Value::as_str)

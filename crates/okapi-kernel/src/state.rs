@@ -66,6 +66,16 @@ impl CoreState {
             != Some(false)
     }
 
+    /// 直接读库、不经缓存。认证链接用的站点地址、OAuth 与支付凭据这类设置，管理员改了要在每个
+    /// 副本上立刻生效，不能吃缓存的 60 秒 TTL；[`Self::try_setting_cached`] 未命中时也走这里。
+    pub async fn setting_fresh(&self, key: &str) -> Result<Option<serde_json::Value>, AppError> {
+        let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, key)
+            .fetch_optional(&self.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?;
+        Ok(value)
+    }
+
     /// Typed settings read: absence is cacheable; database failure is not absence.
     pub async fn try_setting_cached(
         &self,
@@ -74,11 +84,7 @@ impl CoreState {
         if let Some(hit) = self.settings_cache.get(key).await {
             return Ok(hit);
         }
-        let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, key)
-            .fetch_optional(&self.pg)
-            .await
-            .map_err(okapi_store::StoreError::from)?;
-        let value = Arc::new(value);
+        let value = Arc::new(self.setting_fresh(key).await?);
         self.settings_cache
             .insert(key.to_owned(), Arc::clone(&value))
             .await;

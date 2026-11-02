@@ -3455,6 +3455,26 @@ playground、测活、OAuth 刷新、诊断这些确实要调数据面的，继�
 - **效果**（实测：`touch` 一个 crate 的 `lib.rs` 后 `cargo test --workspace --no-run`，数重编的集成测试目标）：改 okapi-console 重编 66 个（console 40 + 端到端 26），
   改 okapi-worker 重编 34 个（worker 8 + 端到端 26），改 okapi-gateway 重编 119 个（它下游的全部）；拆之前这三种情况都是 122 个。
 
+### 11.62 控制面读设置收进 `CoreState`（2026-11-02）
+
+console 里六处各自手写 `SELECT value FROM settings WHERE key = …` 的地方，改调 `CoreState::setting_fresh`
+（`try_setting_cached` 缓存未命中时也走它），这条 SQL 只剩一处：
+
+| 位置 | 设置键 | 读不到库时 |
+|---|---|---|
+| `auth_web::site_base_url`（邮件链接、OAuth 回调、支付回跳用的站点地址） | `site_url` | 报错，同原来 |
+| `oauth::load_provider`、`oauth::list_providers` | `oauth_providers` | 报错，同原来 |
+| `pay::load_cfg`（易支付 / Stripe 配置） | 调用方给的键 | 报错，同原来 |
+| `pay::aff_reward`（充值返利） | `aff_percent_bp` | 按 0 处理、不挡充值，同原来 |
+| `admin::get_setting`（`GET /admin/settings/{key}` 回显） | 路径里的键 | 报错，同原来 |
+
+- 这几处**故意不走**设置缓存（moka，60 秒 TTL，跨副本靠 TTL 收敛）：站点地址拿来拼认证链接，OAuth 与支付配置里是凭据，
+  回显要读最新值，管理员改了都得在每个副本上立刻生效；`console_smtp` 的找回密码用例就钉着 `site_url` 这一条。
+  缓存只给展示、遥测这类读到旧值也无妨的设置用。
+- `aff_percent_bp` 设置页存的是 JSON 数字，写成数字字符串的也认——和原先 SQL `(value #>> '{}')::bigint` 收的范围一样。
+- 其余直读没动：`mcp_write_enabled`（MCP 写工具总闸）在 SQL 里做布尔转换与缺省；kernel 的 SSRF 策略、SMTP、草稿底价，
+  store 的出口缺省与保留月数，worker 的毛利熔断与通知都只拿到 `PgPool`，读法也各有转换。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

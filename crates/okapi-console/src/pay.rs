@@ -69,10 +69,9 @@ async fn load_cfg<T: serde::de::DeserializeOwned>(
     state: &AppState,
     key: &str,
 ) -> Result<T, AppError> {
-    let raw = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, key)
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?
+    let raw = state
+        .setting_fresh(key)
+        .await?
         .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "payment_not_configured"))?;
     serde_json::from_value(raw).map_err(|_| AppError::internal())
 }
@@ -517,14 +516,14 @@ pub async fn stripe_webhook(
 /// 邀请返利（M4 aff）：充值核销成功后给邀请人按 settings.aff_percent_bp（基点）返利。
 /// 缺省 0 = 关闭；仅充值触发（兑换码核销不返利，防套利）；失败不阻断充值主流程。
 async fn aff_reward(state: &AppState, invitee: i64, amount_micro: i64, order_no: &str) {
-    let bp = sqlx::query_scalar!(
-        r#"SELECT (value #>> '{}')::bigint AS "v!" FROM settings WHERE key = 'aff_percent_bp'"#
-    )
-    .fetch_optional(&state.pg)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(0);
+    // 设置页存的是 JSON 数字；写成数字字符串的也认
+    let bp = state
+        .setting_fresh("aff_percent_bp")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .unwrap_or(0);
     if bp <= 0 {
         return;
     }

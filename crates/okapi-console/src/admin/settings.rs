@@ -84,10 +84,7 @@ pub async fn get_setting(
     Path(key): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let _ = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
-    let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, key)
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
+    let value = state.setting_fresh(&key).await?;
     Ok(Json(json!({ "key": key, "value": value })))
 }
 

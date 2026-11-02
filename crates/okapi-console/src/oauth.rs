@@ -92,10 +92,9 @@ struct ResolvedProvider {
 }
 
 async fn load_provider(state: &AppState, code: &str) -> Result<ResolvedProvider, AppError> {
-    let raw = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = 'oauth_providers'"#)
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?
+    let raw = state
+        .setting_fresh("oauth_providers")
+        .await?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "oauth_provider_not_configured"))?;
     let list: Vec<ProviderCfg> = serde_json::from_value(raw).map_err(|_| AppError::internal())?;
     let cfg = list
@@ -320,10 +319,7 @@ async fn fetch_json(state: &AppState, req: PassRequest) -> Result<Value, AppErro
 
 /// GET /auth/oauth-providers：可用登录方式（仅 code 列表，公开）。
 pub async fn list_providers(State(state): State<AppState>) -> Result<axum::Json<Value>, AppError> {
-    let raw = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = 'oauth_providers'"#)
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
+    let raw = state.setting_fresh("oauth_providers").await?;
     let codes: Vec<String> = raw
         .and_then(|v| serde_json::from_value::<Vec<ProviderCfg>>(v).ok())
         .map(|list| list.into_iter().map(|p| p.code).collect())
