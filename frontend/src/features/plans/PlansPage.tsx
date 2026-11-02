@@ -51,7 +51,7 @@ export function PlansPage() {
   const pager = usePagination()
 
   const plans = useQuery({
-    queryKey: [...qk.adminPlans, pager.offset, pager.limit],
+    queryKey: qk.adminPlansPage(pager),
     queryFn: () =>
       apiFetch<{ data: PlanRow[]; total: number }>(
         `/admin/plans?limit=${pager.limit}&offset=${pager.offset}`,

@@ -77,7 +77,7 @@ export function AdminKeysPage() {
 
   const pager = usePagination()
   const keys = useQuery({
-    queryKey: [...qk.adminKeys(uid, query), pager.offset, pager.limit],
+    queryKey: qk.adminKeysPage(uid, query, pager),
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(pager.limit),

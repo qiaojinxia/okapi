@@ -38,7 +38,7 @@ export function RolesPage() {
   const pager = usePagination()
 
   const roles = useQuery({
-    queryKey: [...qk.adminRoles, pager.offset, pager.limit],
+    queryKey: qk.adminRolesPage(pager),
     queryFn: () =>
       apiFetch<{ data: RoleRow[]; total: number }>(
         `/admin/roles?limit=${pager.limit}&offset=${pager.offset}`,

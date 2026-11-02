@@ -18,6 +18,7 @@ import { usePagination } from '@/hooks/use-pagination'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateEgress } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { AssignmentsDrawer } from './AssignmentsDrawer'
 import { GroupDrawer } from './GroupDrawer'
@@ -135,7 +136,7 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
   const [importing, setImporting] = useState(false)
   const report = useReportToast()
   const list = useQuery({
-    queryKey: [...qk.adminProxies, pager.offset, pager.limit],
+    queryKey: qk.adminProxiesPage(pager),
     queryFn: () =>
       apiFetch<{ data: ProxyRow[]; total: number }>(
         `/admin/proxies?limit=${pager.limit}&offset=${pager.offset}`,
@@ -145,10 +146,7 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
   // 近 24 小时流量是附加列：没有 ClickHouse（501）或查不到时只显示「—」，不挡列表
   const traffic = useQuery({ ...proxyTrafficOptions('24h'), retry: false })
   const trafficOf = (id: number) => traffic.data?.proxies.find((r) => r.proxy_id === id)
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: qk.adminProxies })
-    void queryClient.invalidateQueries({ queryKey: qk.adminProxyGroups })
-  }
+  const invalidate = () => void invalidateEgress(queryClient)
   const test = useMutation({
     mutationFn: (id: number) => apiFetch<ProbeResult>(`/admin/proxies/${id}/test`, { method: 'POST' }),
     onSuccess: (r) => {
@@ -355,17 +353,14 @@ function GroupList({ tabs }: { tabs: React.ReactNode }) {
   const [assignments, setAssignments] = useState<ProxyGroupRow | null>(null)
   const report = useReportToast()
   const list = useQuery({
-    queryKey: [...qk.adminProxyGroups, pager.offset, pager.limit],
+    queryKey: qk.adminProxyGroupsPage(pager),
     queryFn: () =>
       apiFetch<{ data: ProxyGroupRow[]; total: number }>(
         `/admin/proxy-groups?limit=${pager.limit}&offset=${pager.offset}`,
       ),
     placeholderData: keepPreviousData,
   })
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: qk.adminProxyGroups })
-    void queryClient.invalidateQueries({ queryKey: qk.adminProxies })
-  }
+  const invalidate = () => void invalidateEgress(queryClient)
   const remove = useMutation({
     mutationFn: (code: string) =>
       apiFetch(`/admin/proxy-groups/${encodeURIComponent(code)}`, { method: 'DELETE' }),

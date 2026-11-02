@@ -33,7 +33,7 @@ export function PoolsPage() {
   const pager = usePagination()
 
   const pools = useQuery({
-    queryKey: [...qk.adminPools, pager.offset, pager.limit],
+    queryKey: qk.adminPoolsPage(pager),
     queryFn: () =>
       apiFetch<{ data: PoolRow[]; total: number }>(
         `/admin/pools?limit=${pager.limit}&offset=${pager.offset}`,

@@ -180,6 +180,7 @@ cargo test --workspace                                   # 全量用例（依赖
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/guard-no-float.sh                           # 计费红线：禁浮点/禁 panic
 bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py   # 前端文案守卫
+python3 scripts/guard-query-keys.py                      # 前端 query key 只从 qk 工厂取
 cd frontend && pnpm build && npx playwright test smoke   # 前端构建 + e2e 冒烟
 ```
 

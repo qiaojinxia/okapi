@@ -62,7 +62,7 @@ export function RedemptionsPage() {
   const pager = usePagination()
 
   const codes = useQuery({
-    queryKey: [...qk.adminRedemptions(status), pager.offset, pager.limit],
+    queryKey: qk.adminRedemptionsPage(status, pager),
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(pager.limit),

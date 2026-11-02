@@ -10,6 +10,7 @@ import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateEgress } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import type { AssignmentRow, ProxyGroupRow } from './types'
 import { maskEmails } from '@/lib/mask'
@@ -34,9 +35,7 @@ export function AssignmentsDrawer({ group, onClose }: { group: ProxyGroupRow; on
       }),
     onSuccess: () => {
       toast.success(t('common:success'))
-      void queryClient.invalidateQueries({ queryKey: qk.adminProxyGroups })
-      void queryClient.invalidateQueries({ queryKey: qk.adminProxies })
-      void queryClient.invalidateQueries({ queryKey: qk.adminChannels })
+      void invalidateEgress(queryClient)
     },
     onError: (err) => toast.error(describeError(err)),
   })

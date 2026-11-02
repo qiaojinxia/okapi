@@ -16,6 +16,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { TagInput } from '@/components/ui/tag-input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 export interface NotifyChannel {
@@ -103,7 +104,7 @@ export function NotifyCard() {
       queryClient.setQueryData(qk.setting('notify_channels'), { value })
       cancel()
       toast.success(t('admin:saved'))
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void invalidateSettingViews(queryClient, 'notify_channels')
     },
     onError: (error) => toast.error(describeError(error)),
   })

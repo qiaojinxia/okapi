@@ -35,7 +35,7 @@ export function GroupsSection({
   const [search, setSearch] = useState('')
   const codes = draft ?? current
   const catalog = useQuery({
-    queryKey: [...qk.adminGroups, 'assignment-options'],
+    queryKey: qk.adminGroupOptions,
     // Configuration lists return all groups when limit is omitted, not just page one.
     queryFn: () => apiFetch<{ data: GroupListRow[] }>('/admin/groups'),
     retry: false,
@@ -66,7 +66,7 @@ export function GroupsSection({
     },
     onError: (err) => {
       toast.error(describeError(err))
-      void queryClient.invalidateQueries({ queryKey: [...qk.adminGroups, 'assignment-options'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminGroupOptions })
     },
   })
 

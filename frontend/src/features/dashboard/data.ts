@@ -65,7 +65,7 @@ export function useDashboardOverview(days: number, range?: DateRange | null) {
 export function useDashboardPreviousOverview(days: number, current?: OverviewResp['calendar']) {
   const range = current && days > 1 ? previousRange(current.start_date, days) : null
   return useQuery({
-    queryKey: range ? dashboardOverviewKey(days, range) : [...qk.statsOverview(days), 'previous'],
+    queryKey: range ? dashboardOverviewKey(days, range) : qk.statsOverviewPrevious(days),
     queryFn: () => dashboardFetch<OverviewResp>(`/admin/stats/overview?${cubeParams(dashboardSearch(days, range), { cached: 'true' })}`),
     enabled: range !== null,
     staleTime: 5 * 60_000,

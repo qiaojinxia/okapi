@@ -12,6 +12,7 @@ import { toast } from '@/components/ui/toast'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSetting } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { Link } from '@tanstack/react-router'
@@ -36,13 +37,10 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
   const save = useMutation({
     mutationFn: (arg: { key: string; value: unknown }) => apiFetch('/admin/settings', { method: 'POST', body: arg }),
     onSuccess: (_r, arg) => {
-      if (arg.key === 'pricing_base_per_1m_micro') {
-        toast.warning(t('admin:requiresPublish'))
-        void queryClient.invalidateQueries({ queryKey: qk.adminModels })
-      } else toast.success(t('common:saved'))
+      if (arg.key === 'pricing_base_per_1m_micro') toast.warning(t('admin:requiresPublish'))
+      else toast.success(t('common:saved'))
       setEditing(null)
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
-      void queryClient.invalidateQueries({ queryKey: qk.setting(arg.key) })
+      void invalidateSetting(queryClient, arg.key)
     },
     onError: (err) => toast.error(describeError(err)),
   })

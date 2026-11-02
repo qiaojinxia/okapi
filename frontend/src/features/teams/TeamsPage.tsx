@@ -36,7 +36,7 @@ export function TeamsPage() {
   const pager = usePagination()
 
   const teams = useQuery({
-    queryKey: [...qk.myTeams, pager.offset, pager.limit],
+    queryKey: qk.myTeamsPage(pager),
     queryFn: () =>
       apiFetch<{ data: TeamRow[]; total: number }>(
         `/api/teams?limit=${pager.limit}&offset=${pager.offset}`,

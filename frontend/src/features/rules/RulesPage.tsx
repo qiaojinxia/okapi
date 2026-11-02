@@ -33,7 +33,7 @@ export function RulesPage() {
   const pager = usePagination()
 
   const rules = useQuery({
-    queryKey: [...qk.adminPricingRules, pager.offset, pager.limit],
+    queryKey: qk.adminPricingRulesPage(pager),
     queryFn: () =>
       apiFetch<{ data: RuleRow[]; total: number }>(
         `/admin/pricing/rules?limit=${pager.limit}&offset=${pager.offset}`,

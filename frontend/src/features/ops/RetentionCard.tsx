@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input, Label } from '@/components/ui/input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSetting } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { useConfirm } from '@/components/ui/confirm'
 import { parseNonNegativeInt } from '@/lib/int32'
@@ -16,6 +17,7 @@ export function RetentionCard() {
   const { t } = useTranslation()
   const [months, setMonths] = useState('')
   const { confirm, dialog } = useConfirm()
+  const queryClient = useQueryClient()
 
   const current = useQuery({
     queryKey: qk.setting('retention_months'),
@@ -32,7 +34,7 @@ export function RetentionCard() {
       }),
     onSuccess: () => {
       toast.success(t('admin:saved'))
-      void current.refetch()
+      void invalidateSetting(queryClient, 'retention_months')
     },
     onError: (err) => toast.error(describeError(err)),
   })

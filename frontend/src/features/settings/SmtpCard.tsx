@@ -13,6 +13,7 @@ import { ErrorState, LoadingState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 const SECURITY = ['starttls', 'tls', 'none'] as const
@@ -96,7 +97,7 @@ export function SmtpCard() {
       queryClient.setQueryData(qk.setting('smtp'), { value })
       setDraft(null)
       toast.success(t('admin:smtpSaved'))
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void invalidateSettingViews(queryClient, 'smtp')
     },
     onError: (error) => toast.error(describeError(error)),
   })

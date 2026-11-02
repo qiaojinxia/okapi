@@ -5,6 +5,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSetting } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 /// 隐私与留痕（settings.record_ip_log）。
@@ -29,8 +30,7 @@ export function PrivacyCard() {
       }),
     onSuccess: () => {
       toast.success(t('common:success'))
-      void current.refetch()
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void invalidateSetting(queryClient, 'record_ip_log')
     },
     onError: (err) => toast.error(describeError(err)),
   })

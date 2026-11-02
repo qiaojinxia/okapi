@@ -16,6 +16,9 @@ export type EntitySearchInputProps = Omit<AutocompleteInputProps, 'options' | 'd
   knownOptions?: EntityOption[]
 }
 
+// 与管理列表第一页同 key、同请求（qk.adminUsersPage 等），两边共用缓存
+const FIRST_PAGE = { offset: 0, limit: 20 } as const
+
 // 缓存保留接口的原始响应，与管理列表共用首个分页。
 interface DirectoryRow {
   id: number
@@ -64,11 +67,11 @@ function EntitySearchField({ kind, value, onChange, onChoose, knownOptions = [],
   const ready = lookup && term === debounced
   const query = debounced ?? ''
   const directory = useQuery({
-    queryKey: kind === 'user' ? [...qk.adminUsers(query), 0, 20]
-      : kind === 'api_key' ? [...qk.adminKeys(null, query), 0, 20]
-        : [...qk.adminChannels, query, '', 0, 20],
+    queryKey: kind === 'user' ? qk.adminUsersPage(query, FIRST_PAGE)
+      : kind === 'api_key' ? qk.adminKeysPage(null, query, FIRST_PAGE)
+        : qk.adminChannelsPage(query, '', '', FIRST_PAGE),
     queryFn: () => {
-      const params = new URLSearchParams({ limit: '20', offset: '0' })
+      const params = new URLSearchParams({ limit: String(FIRST_PAGE.limit), offset: String(FIRST_PAGE.offset) })
       if (query) params.set('q', query)
       const endpoint = kind === 'user' ? 'users' : kind === 'api_key' ? 'keys' : 'channels'
       return apiFetch<{ data: DirectoryRow[]; total: number }>(`/admin/${endpoint}?${params}`)

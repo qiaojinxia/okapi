@@ -11,6 +11,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { scaledInteger } from './setting-catalog'
 
@@ -106,7 +107,7 @@ export function RegistrationCard() {
       queryClient.setQueryData(qk.setting('registration_policy'), { value })
       toast.success(t('admin:regSaved'))
       setDraft(null)
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void invalidateSettingViews(queryClient, 'registration_policy')
     },
     onError: (err) => toast.error(describeError(err)),
   })

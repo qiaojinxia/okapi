@@ -13,7 +13,7 @@ export function dashboardPeriodLabel(days: number, range: DateRange | null | und
 }
 
 export function dashboardOverviewKey(days: number, range?: DateRange | null) {
-  return range ? [...qk.statsOverview(days), range.start, range.end] as const : qk.statsOverview(days)
+  return range ? qk.statsOverviewRange(days, range.start, range.end) : qk.statsOverview(days)
 }
 
 function date(value: unknown): string | undefined {

@@ -3503,6 +3503,25 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
     整个命名空间都被动态拼键的（`logs:${key}` 之类）证不了死，只报个数。本次按报告删掉 159 个键（admin 137 个）。
 - 渠道控制项的三个标签原来在渲染时拼 `admin:` 前缀，是 admin 唯一的整命名空间动态拼键，改成在配置里写全键。
 
+### 11.65 前端 query key 全部出自工厂，跨实体失效集中写（2026-11-02）
+
+写操作后按前缀失效依赖「key 都从 `lib/query-keys.ts` 的 `qk` 来」，此前有三类例外：
+
+- **字面量 key 8 处**（系统监控 3、试用台 2、门户日志汇总、日志页的密钥筛选、发布价格后的失效）。实例：发布价格只失效
+  `['public-pricing']`，试用台的模型目录挂在 `['playground-catalog', userId]` 下，最多旧 60 秒。现在它们都在工厂里声明，
+  试用台目录挂到 `qk.publicPricing` 前缀下；日志页的密钥筛选挂到 `qk.keys` 下，建 / 删密钥后一起失效。
+- **调用点自己拼的分页 / 筛选变体 18 处**（`[...qk.adminPlans, pager.offset, pager.limit]` 之类）：工厂里补了
+  `xxxPage(…, page)`、`adminGroupOptions`、`adminModelTemplates`、目录分页与详情、首页区间等，调用点直接传 pager。
+  实体搜索框与管理列表第一页本来就共用缓存，现在两边同一个工厂函数；渠道那一路原来少了状态筛选那一位、其实没共用上。
+  `ChannelsPage.tsx` 那一处等手上未提交的改动落地后再换成 `qk.adminChannelsPage`（key 形状已一致）。
+- **跨实体失效各处手写**：`lib/invalidate.ts` 按实体登记连带关系——出口（代理、代理组、缺省出口、渠道行上的生效出口）、
+  站点设置（总表、单键与派生视图：门户公告、注册策略、OAuth 登录方式、试用台预设、模型价格的基准价）、价格发布、
+  用户详情、登录会话。保存后已用 `setQueryData` 回填单键的四张卡片（注册、公告、通知、SMTP）走 `invalidateSettingViews`，
+  只刷总表与派生视图、不重读单键——它们的用例数着请求次数，防的是更早发出的读取把刚保存的快照盖回去。
+  顺带补上了数据保留月数改完不刷新设置总表的漏洞。只刷一个前缀的照旧直接调 `invalidateQueries`（剩 21 处）。
+
+`scripts/guard-query-keys.py`（CI 前端 job）拦截 `queryKey: ['…']` 与 `setQueryData([…])` 等字面量 key（允许跨行写法）。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

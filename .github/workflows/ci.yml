@@ -189,6 +189,8 @@ jobs:
         run: bash scripts/guard-i18n.sh
       - name: i18n 键完备性（缺键会把原始键渲染到界面）
         run: python3 scripts/guard-i18n-keys.py
+      - name: query key 只从 qk 工厂取（字面量 key 会让按前缀失效静默落空）
+        run: python3 scripts/guard-query-keys.py
       - name: 前端权限点存在性（写错会对自定义角色永久隐藏入口）
         run: python3 scripts/guard-frontend-permissions.py
       - name: 后端 error_code 全集反向核对（缺文案用户只看到"未知错误 (code)"）

@@ -40,6 +40,7 @@ import { useMe } from '@/hooks/use-auth'
 import { ApiError, getKey } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatCount, formatMoney } from '@/lib/money'
+import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 /// 试用台（IMPLEMENTATION §11.39）：左栏模型 + 系统提示词 + 采样参数，右栏流式对话。
@@ -84,7 +85,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
 
   // 模型候选：本分组可用（模型广场与接入指南同口径），允许手输——目录缓存可能落后于站长刚加的模型
   const pricing = useQuery({
-    queryKey: ['playground-catalog', userId],
+    queryKey: qk.playgroundCatalog(userId),
     queryFn: () => loadCatalog(getKey() ?? ''),
     enabled: userId !== undefined,
     staleTime: 60_000,
@@ -107,7 +108,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   const modelDenied = modelEntry !== undefined && !available.includes(modelEntry.model)
 
   const parameters = useQuery({
-    queryKey: ['playground-parameters', userId, selectedKey?.id ?? null, modelValue.trim()],
+    queryKey: qk.playgroundParameters(userId, selectedKey?.id ?? null, modelValue.trim()),
     queryFn: ({ signal }) => loadParameters(modelValue.trim(), selectedKey?.id ?? null, signal),
     enabled: userId !== undefined && !keyPending && modelValue.trim() !== '',
     staleTime: 30_000, retry: false,

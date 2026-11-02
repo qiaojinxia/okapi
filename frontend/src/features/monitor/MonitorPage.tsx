@@ -16,6 +16,7 @@ import { TimeChart } from '@/components/ui/time-chart'
 import { apiFetch } from '@/lib/api'
 import { chartColor } from '@/lib/chart'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { byteScale, formatBytes, formatCount, formatPercent, formatRate, formatUptime, ratio, usageTone } from './format'
 import type { LogsResp, Overview, Probe, Sample, TableSize } from './types'
@@ -65,7 +66,7 @@ function OverviewTab({ interval }: { interval: number | false }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   const q = useQuery({
-    queryKey: ['admin', 'monitor', 'overview'],
+    queryKey: qk.monitorOverview,
     queryFn: () => apiFetch<Overview>('/admin/monitor/overview'),
     refetchInterval: interval,
   })
@@ -255,7 +256,7 @@ function TrendsTab({ interval }: { interval: number | false }) {
   const locale = i18n.language
   const [hours, setHours] = useState<(typeof HOURS)[number]>(6)
   const q = useQuery({
-    queryKey: ['admin', 'monitor', 'history', hours],
+    queryKey: qk.monitorHistory(hours),
     queryFn: () => apiFetch<{ data: Sample[] }>(`/admin/monitor/history?hours=${hours}`),
     // 一分钟一个点：刷新再快也没有新数据
     refetchInterval: interval === false ? false : 60_000,
@@ -337,7 +338,7 @@ function LogsTab({ interval }: { interval: number | false }) {
     return () => clearTimeout(timer)
   }, [search])
   const q = useQuery({
-    queryKey: ['admin', 'monitor', 'logs', level, term],
+    queryKey: qk.monitorLogs(level, term),
     queryFn: () => apiFetch<LogsResp>(`/admin/monitor/logs?limit=500${level === 'error' ? '&level=error' : ''}${term ? `&q=${encodeURIComponent(term)}` : ''}`),
     refetchInterval: interval,
   })

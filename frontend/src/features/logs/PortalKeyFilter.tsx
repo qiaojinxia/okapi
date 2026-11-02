@@ -3,12 +3,13 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { AutocompleteInput } from '@/components/ui/autocomplete-input'
 import { apiFetch } from '@/lib/api'
+import { qk } from '@/lib/query-keys'
 
 export function PortalKeyFilter({ value, onChange, onChoose, onSubmit, className = 'w-full sm:w-80' }: { value: string; onChange: (value: string) => void; onChoose: (value: string) => void; onSubmit: () => void; className?: string }) {
   const { t } = useTranslation()
   const [focused, setFocused] = useState(false)
   const keys = useQuery({
-    queryKey: ['portal-log-keys'],
+    queryKey: qk.keysLogFilter,
     queryFn: () => apiFetch<{ data: { id: number; name: string; key_prefix: string }[] }>('/api/me/keys'),
     enabled: focused, staleTime: 60_000, retry: false,
   })

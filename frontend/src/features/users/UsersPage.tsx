@@ -56,7 +56,7 @@ export function UsersPage() {
     void navigate({ search: (prev) => ({ ...prev, q: text(value), page: undefined }) })
 
   const users = useQuery({
-    queryKey: [...qk.adminUsers(query), pager.offset, pager.limit],
+    queryKey: qk.adminUsersPage(query, pager),
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(pager.limit),

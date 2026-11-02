@@ -121,7 +121,7 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
   const [page, setPage] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
   const detailId = useId(), filterKey = params(filter)
-  const queryKey = [...qk.logs(params(filter, null, limit)), 'paged']
+  const queryKey = qk.logsPaged(params(filter, null, limit))
   const q = useInfiniteQuery({
     queryKey,
     queryFn: ({ pageParam }) => apiFetch<LogsResp>(`/api/me/logs?${params(filter, pageParam, limit)}`),
@@ -130,7 +130,7 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
     enabled: ready, retry: false,
   })
   const stats = useQuery({
-    queryKey: ['portal-logs-stat', filterKey],
+    queryKey: qk.logsStat(filterKey),
     queryFn: () => apiFetch<LogStats>(`/api/me/logs/stat?${filterKey}`),
     enabled: ready, retry: false, staleTime: 30_000,
   })

@@ -18,6 +18,7 @@ import { Tabs } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateUser } from '@/lib/invalidate'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { roleLabel } from '@/features/users/types'
@@ -49,12 +50,8 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
     queryFn: () => apiFetch<{ data: RoleRow[] }>('/admin/roles'),
   })
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: qk.userOverview(userId) })
-    // 调完余额切回"用量"签，最近变动里就该看到刚那一笔
-    void queryClient.invalidateQueries({ queryKey: qk.userUsage(userId) })
-    void queryClient.invalidateQueries({ queryKey: qk.adminUsersAll })
-  }
+  // 调完余额切回"用量"签，最近变动里就该看到刚那一笔
+  const invalidate = () => void invalidateUser(queryClient, userId)
 
   const ov = overview.data
   const banned = ov?.user.status === 2

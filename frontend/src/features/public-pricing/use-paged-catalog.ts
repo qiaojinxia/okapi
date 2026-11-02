@@ -10,20 +10,19 @@ let nextScope = 0
 export function usePagedCatalog(search: CatalogSearch) {
   const key = getKey() ?? ''
   const scope = useMemo(() => `page-${++nextScope}`, [key])
-  const base = qk.catalog(scope)
-  const mine = useQuery({ queryKey: [...base, 'groups'], retry: false, gcTime: 0,
+  const mine = useQuery({ queryKey: qk.catalogGroups(scope), retry: false, gcTime: 0,
     queryFn: ({ signal }) => key ? apiFetch<{ data: Array<{ code: string }> }>('/api/me/groups', { key, signal }) : Promise.resolve(null) })
   const allowed = mine.data ? new Set(mine.data.data.map((g) => g.code)) : undefined
   const params = catalogParams(search)
-  const page = useQuery({ queryKey: [...base, 'page', params], retry: false, gcTime: 0, enabled: mine.isSuccess,
+  const page = useQuery({ queryKey: qk.catalogPage(scope, params), retry: false, gcTime: 0, enabled: mine.isSuccess,
     queryFn: async ({ signal }) => {
       const result = await loadModelPage(params, key, signal)
       return { ...result, ...visibleCatalog(result, allowed) }
     } })
-  const stats = useQuery({ queryKey: [...base, 'statistics'], retry: false, gcTime: 0, enabled: mine.isSuccess,
+  const stats = useQuery({ queryKey: qk.catalogStatistics(scope), retry: false, gcTime: 0, enabled: mine.isSuccess,
     queryFn: ({ signal }) => loadCatalogStatistics(key, signal) })
   const ids = [...new Set([...(search.compare?.split(',') ?? []), ...(search.model ? [search.model] : [])])]
-  const details = useQueries({ queries: ids.map((id) => ({ queryKey: [...base, 'model', id], retry: false, gcTime: 0, staleTime: 30_000, enabled: mine.isSuccess,
+  const details = useQueries({ queries: ids.map((id) => ({ queryKey: qk.catalogModel(scope, id), retry: false, gcTime: 0, staleTime: 30_000, enabled: mine.isSuccess,
     queryFn: async ({ signal }) => {
       const result = await loadCatalogModel(id, key, signal)
       return visibleCatalog(result, allowed).models[0] ?? null

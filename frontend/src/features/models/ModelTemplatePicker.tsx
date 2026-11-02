@@ -15,7 +15,7 @@ export function ModelTemplatePicker({ onApply }: { onApply: (model: ModelListRow
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<ModelListRow | null>(null)
   const templates = useQuery({
-    queryKey: [...qk.adminModels, 'templates', query],
+    queryKey: qk.adminModelTemplates(query),
     queryFn: () => apiFetch<{ data: ModelListRow[]; total: number }>(`/admin/models?limit=20&q=${encodeURIComponent(query)}`),
     staleTime: 60_000,
   })

@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 interface NoticeDraft {
@@ -78,8 +79,7 @@ export function NoticeCard() {
       setDraft(null)
       setDismissedPreview(null)
       toast.success(t(value.enabled ? 'admin:noticeSaved' : 'admin:noticeSavedHidden'))
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
-      void queryClient.invalidateQueries({ queryKey: qk.notice })
+      void invalidateSettingViews(queryClient, 'site_notice')
     },
     onError: (err) => toast.error(describeError(err)),
   })

@@ -97,7 +97,7 @@ export function PortalKeysPage() {
   const pager = usePagination()
 
   const keys = useQuery({
-    queryKey: [...qk.keys, pager.offset, pager.limit],
+    queryKey: qk.keysPage(pager),
     queryFn: () =>
       apiFetch<{ data: KeyRow[]; total: number; key_limits_supported?: boolean }>(
         `/api/me/keys?limit=${pager.limit}&offset=${pager.offset}`,

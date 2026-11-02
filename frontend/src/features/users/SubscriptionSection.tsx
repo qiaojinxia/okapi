@@ -41,7 +41,7 @@ export function SubscriptionSection({ userId, onDone }: { userId: number; onDone
     queryFn: () => apiFetch<MySubscription>(`/admin/users/${userId}/subscription`),
   })
   const plans = useQuery({
-    queryKey: [...qk.adminPlans, 'options'],
+    queryKey: qk.adminPlanOptions,
     queryFn: () => apiFetch<{ data: PlanOption[] }>('/admin/plans?limit=200'),
   })
   const options = (plans.data?.data ?? []).filter((p) => p.kind === 1 && p.status === 1)

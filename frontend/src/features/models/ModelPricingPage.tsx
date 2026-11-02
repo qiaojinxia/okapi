@@ -23,6 +23,7 @@ import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
 import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidatePublishedPricing } from '@/lib/invalidate'
 import { formatRatio, formatUnitPrice } from '@/lib/money'
 import { usePermission } from '@/hooks/use-auth'
 import { qk } from '@/lib/query-keys'
@@ -72,7 +73,7 @@ export function ModelPricingPage() {
     })
 
   const models = useQuery({
-    queryKey: [...qk.adminModels, query, onlyUnpriced, pager.offset, pager.limit],
+    queryKey: qk.adminModelsPage(query, onlyUnpriced, pager),
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(pager.limit),
@@ -120,9 +121,7 @@ export function ModelPricingPage() {
       apiFetch<{ epoch: number }>(`/admin/pricing/publish?expected_base_per_1m_micro=${basePrice}`, { method: 'POST', body: {} }),
     onSuccess: (data) => {
       toast.success(t('admin:publishedEpoch', { epoch: data.epoch }))
-      invalidate()
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
-      void queryClient.invalidateQueries({ queryKey: ['public-pricing'] })
+      void invalidatePublishedPricing(queryClient)
     },
     onError: (err) => {
       toast.error(err instanceof ApiError && err.param === 'pricing_base_changed' ? t('admin:pricingBaseChanged') : describeError(err))

@@ -13,6 +13,7 @@ import { toast } from '@/components/ui/toast'
 import { clampOffset } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSessions } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
@@ -90,11 +91,7 @@ export function ActiveSessionsCard({ preview = false, active = true }: { preview
   const start = clampOffset(offset, pageSize, devices.length)
   const shown = preview ? devices.slice(0, 3) : devices.slice(start, start + pageSize)
 
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: qk.mySessions })
-    void queryClient.invalidateQueries({ queryKey: qk.me, exact: true })
-    void queryClient.invalidateQueries({ queryKey: qk.myProfile })
-  }
+  const invalidate = () => void invalidateSessions(queryClient)
 
   const revokeDevice = useMutation({
     mutationFn: async (group: DeviceGroup) => {

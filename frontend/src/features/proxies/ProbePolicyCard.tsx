@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSetting } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { DEFAULT_PROBE_POLICY } from './types'
 import type { ProbePolicy } from './types'
@@ -38,8 +39,7 @@ export function ProbePolicyCard() {
     onSuccess: () => {
       toast.success(t('common:success'))
       setDraft(null)
-      void current.refetch()
-      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void invalidateSetting(queryClient, KEY)
     },
     onError: (err) => toast.error(describeError(err)),
   })

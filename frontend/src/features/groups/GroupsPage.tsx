@@ -32,7 +32,7 @@ export function GroupsPage() {
   const pager = usePagination()
 
   const groups = useQuery({
-    queryKey: [...qk.adminGroups, pager.offset, pager.limit],
+    queryKey: qk.adminGroupsPage(pager),
     queryFn: () =>
       apiFetch<{ data: GroupListRow[]; total: number }>(
         `/admin/groups?limit=${pager.limit}&offset=${pager.offset}`,

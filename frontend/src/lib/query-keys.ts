@@ -1,18 +1,41 @@
-// 集中式 query key 工厂（禁字符串散写）。
+// 集中式 query key 工厂（禁字符串散写，scripts/guard-query-keys.py 会查）。
 //
 // 带参数的 key 同时暴露一个 `xxxAll` 前缀：写操作后 `invalidateQueries({ queryKey: qk.xxxAll })`
 // 按前缀失效所有分页 / 过滤变体，而不是在调用点手抄 `['admin', 'keys']`——
-// 手抄的字面量与工厂一旦拼写不一致，失效就静默落空。
+// 手抄的字面量与工厂一旦拼写不一致，失效就静默落空。分页、筛选变体也在这里声明，调用点不再
+// 自己往前缀后面拼东西：哪些 key 挂在哪个前缀下，只看这一个文件就清楚。
+// 跨实体的失效（改了 A 要连带刷新 B）写在 lib/invalidate.ts。
+
+/// 分页列表的一页：直接传 usePagination 的返回值，或 `{ offset, limit }`。
+export type Page = { readonly offset: number; readonly limit: number }
+const paged = <K extends readonly unknown[]>(base: K, page: Page) => [...base, page.offset, page.limit] as const
 
 const adminUsers = ['admin', 'users'] as const
 const adminKeys = ['admin', 'keys'] as const
 const adminRedemptions = ['admin', 'redemptions'] as const
+const adminChannels = ['admin', 'channels'] as const
+const adminGroups = ['admin', 'groups'] as const
+const adminModels = ['admin', 'models'] as const
+const adminPlans = ['admin', 'plans'] as const
+const adminPools = ['admin', 'pools'] as const
+const adminPricingRules = ['admin', 'pricing-rules'] as const
+const adminProxies = ['admin', 'proxies'] as const
+const adminProxyGroups = ['admin', 'proxy-groups'] as const
+const adminRoles = ['admin', 'roles'] as const
+const keys = ['keys'] as const
+const logs = ['logs'] as const
+const myTeams = ['me', 'teams'] as const
+const publicPricing = ['public-pricing'] as const
+const statsOverview = (days: number) => ['admin', 'stats', 'overview', days] as const
 
 export const qk = {
   me: ['me'] as const,
   myProfile: ['me', 'profile'] as const,
   meAff: ['me', 'aff'] as const,
-  keys: ['keys'] as const,
+  keys,
+  keysPage: (page: Page) => paged(keys, page),
+  /// 日志页的密钥筛选下拉（全量）；挂在 `keys` 前缀下，建 / 删 key 后一起失效。
+  keysLogFilter: [...keys, 'log-filter'] as const,
   /// 新手引导用的密钥概览（有几把、是否调过）；与 `keys` 同前缀，建 / 删 key 后一起失效。
   keysSummary: ['keys', 'summary'] as const,
   /// 试用台选择密钥用的完整列表（含分组 / 白名单 / 状态）；同样挂在 `keys` 前缀下，建 / 删 / 改 key 后一起失效。
@@ -26,20 +49,27 @@ export const qk = {
   adminLeaderboard: (days: number) => ['admin', 'leaderboard', days] as const,
   channelProviders: ['channel-provider-capabilities'] as const,
   channelControlUsage: (id: number | undefined, period: string) => ['channel-control-usage', id, period] as const,
-  adminChannels: ['admin', 'channels'] as const,
-  adminPricingRules: ['admin', 'pricing-rules'] as const,
+  adminChannels,
+  adminChannelsPage: (q: string, provider: string, status: string, page: Page) => paged([...adminChannels, q, provider, status] as const, page),
+  adminPricingRules,
+  adminPricingRulesPage: (page: Page) => paged(adminPricingRules, page),
   adminUsersAll: adminUsers,
   adminUsers: (q: string) => [...adminUsers, q] as const,
-  adminRoles: ['admin', 'roles'] as const,
+  adminUsersPage: (q: string, page: Page) => paged([...adminUsers, q] as const, page),
+  adminRoles,
+  adminRolesPage: (page: Page) => paged(adminRoles, page),
   adminPermissions: ['admin', 'permissions'] as const,
-  adminPools: ['admin', 'pools'] as const,
-  adminPoolOptions: ['admin', 'pools', 'options'] as const,
+  adminPools,
+  adminPoolsPage: (page: Page) => paged(adminPools, page),
+  adminPoolOptions: [...adminPools, 'options'] as const,
   /// 出口代理（§11.41）：列表分页变体与选择器全量目录同挂前缀，写操作按前缀一起失效。
-  adminProxies: ['admin', 'proxies'] as const,
-  adminProxyOptions: ['admin', 'proxies', 'options'] as const,
+  adminProxies,
+  adminProxiesPage: (page: Page) => paged(adminProxies, page),
+  adminProxyOptions: [...adminProxies, 'options'] as const,
   adminProxyTraffic: (range: string) => ['admin', 'proxies', 'traffic', range] as const,
-  adminProxyGroups: ['admin', 'proxy-groups'] as const,
-  adminProxyGroupOptions: ['admin', 'proxy-groups', 'options'] as const,
+  adminProxyGroups,
+  adminProxyGroupsPage: (page: Page) => paged(adminProxyGroups, page),
+  adminProxyGroupOptions: [...adminProxyGroups, 'options'] as const,
   proxyGroupAssignments: (code: string) => ['admin', 'proxy-groups', 'assignments', code] as const,
   egressDefault: ['admin', 'egress', 'default'] as const,
   poolDetail: (code: string) => ['admin', 'pools', 'detail', code] as const,
@@ -48,9 +78,16 @@ export const qk = {
   myLogins: ['me', 'logins'] as const,
   mySessions: ['me', 'sessions'] as const,
   myGroups: ['me', 'groups'] as const,
-  adminGroups: ['admin', 'groups'] as const,
-  adminPlans: ['admin', 'plans'] as const,
-  adminModels: ['admin', 'models'] as const,
+  adminGroups,
+  adminGroupsPage: (page: Page) => paged(adminGroups, page),
+  /// 用户抽屉里分配分组用的全量目录（不带 limit 时接口回全部）。
+  adminGroupOptions: [...adminGroups, 'assignment-options'] as const,
+  adminPlans,
+  adminPlansPage: (page: Page) => paged(adminPlans, page),
+  adminPlanOptions: [...adminPlans, 'options'] as const,
+  adminModels,
+  adminModelsPage: (q: string, onlyUnpriced: boolean, page: Page) => paged([...adminModels, q, onlyUnpriced] as const, page),
+  adminModelTemplates: (q: string) => [...adminModels, 'templates', q] as const,
   // Complete selector catalog; never reuse a single page from a list/dashboard.
   adminModelOptions: ['admin', 'models', 'options'] as const,
   // Built-in price catalog (suggestions only); keyed by the exact text asked about.
@@ -58,13 +95,20 @@ export const qk = {
   catalogSearch: (text: string) => ['admin', 'pricing', 'catalog', 'search', text] as const,
   adminKeysAll: adminKeys,
   adminKeys: (userId: number | null, q: string) => [...adminKeys, userId, q] as const,
+  adminKeysPage: (userId: number | null, q: string, page: Page) => paged([...adminKeys, userId, q] as const, page),
   adminRedemptionsAll: adminRedemptions,
   adminRedemptions: (status: string) => [...adminRedemptions, status] as const,
+  adminRedemptionsPage: (status: string, page: Page) => paged([...adminRedemptions, status] as const, page),
   channelModels: (id: number) => ['admin', 'channel-models', id] as const,
-  statsOverview: (days: number) => ['admin', 'stats', 'overview', days] as const,
+  statsOverview,
+  /// 首页自定义区间；上一周期（只算环比）也是一个区间。
+  statsOverviewRange: (days: number, start: string, end: string) => [...statsOverview(days), start, end] as const,
+  /// 上一周期还算不出来时（今天视角）的占位 key，查询本身是禁用的。
+  statsOverviewPrevious: (days: number) => [...statsOverview(days), 'previous'] as const,
   myBreakdown: (scope: string, days: number, range = '') => ['me', 'stats', 'breakdown', scope, days, range] as const,
   myActivity: (scope: string, year?: number) => ['me', 'stats', 'activity', scope, year] as const,
-  myTeams: ['me', 'teams'] as const,
+  myTeams,
+  myTeamsPage: (page: Page) => paged(myTeams, page),
   teamUsage: (id: number) => ['team', 'usage', id] as const,
   // 首页摘要、质量分页和渠道列表必须区分页宽与偏移，避免复用另一页的数据。
   statsChannels: (days: number, limit = 20, offset = 0) => ['admin', 'stats', 'channels', days, limit, offset] as const,
@@ -86,6 +130,9 @@ export const qk = {
   channelTimeline: (id: number, hours: number) =>
     ['admin', 'stats', 'channel-timeline', id, hours] as const,
   diagnose: ['admin', 'diagnose'] as const,
+  monitorOverview: ['admin', 'monitor', 'overview'] as const,
+  monitorHistory: (hours: number) => ['admin', 'monitor', 'history', hours] as const,
+  monitorLogs: (level: string, term: string) => ['admin', 'monitor', 'logs', level, term] as const,
   dlq: (all: boolean) => ['admin', 'dlq', all] as const,
   adminLogs: (params: string) => ['admin', 'logs', params] as const,
   adminLogStat: (params: string) => ['admin', 'logs', 'stat', params] as const,
@@ -94,12 +141,23 @@ export const qk = {
   marginBreaker: ['admin', 'margin-breaker'] as const,
   userOverview: (id: number) => ['admin', 'user-overview', id] as const,
   userUsage: (id: number) => ['admin', 'user-usage', id] as const,
-  publicPricing: ['public-pricing'] as const,
-  catalog: (scope: string) => ['public-pricing', 'viewer', scope] as const,
+  /// 发布价格后按这个前缀失效：公开价目、目录分页与详情、试用台的模型列表都挂在下面。
+  publicPricing,
+  catalog: (scope: string) => [...publicPricing, 'viewer', scope] as const,
+  catalogGroups: (scope: string) => [...publicPricing, 'viewer', scope, 'groups'] as const,
+  catalogPage: (scope: string, params: string) => [...publicPricing, 'viewer', scope, 'page', params] as const,
+  catalogStatistics: (scope: string) => [...publicPricing, 'viewer', scope, 'statistics'] as const,
+  catalogModel: (scope: string, id: string) => [...publicPricing, 'viewer', scope, 'model', id] as const,
+  playgroundCatalog: (userId: number | undefined) => [...publicPricing, 'playground', userId] as const,
+  playgroundParameters: (userId: number | undefined, keyId: number | null, model: string) =>
+    ['playground-parameters', userId, keyId, model] as const,
   notice: ['public-notice'] as const,
   /// 站点聊天预设（公开，§11.39）。
   playgroundPresets: ['playground-presets'] as const,
-  logs: (params: string) => ['logs', params] as const,
+  logs: (params: string) => [...logs, params] as const,
+  /// 门户日志的无限滚动列表与汇总条。
+  logsPaged: (params: string) => [...logs, params, 'paged'] as const,
+  logsStat: (filter: string) => [...logs, 'stat', filter] as const,
   myLedger: ['me', 'ledger'] as const,
   myOrders: ['me', 'orders'] as const,
   /// 门户在售订阅套餐 + 我的订阅（§11.28）。

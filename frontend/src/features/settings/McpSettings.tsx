@@ -18,6 +18,7 @@ import { toast } from '@/components/ui/toast'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { invalidateSetting } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { McpConnectionError, mcpConfig, testMcpConnection } from './mcp-connection'
 import { isRecord } from './setting-catalog'
@@ -56,10 +57,7 @@ export function McpSettings() {
     onSuccess: async () => {
       connection.reset()
       toast.success(t('common:saved'))
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: qk.setting('mcp_write_enabled') }),
-        queryClient.invalidateQueries({ queryKey: qk.adminSettings }),
-      ])
+      await invalidateSetting(queryClient, 'mcp_write_enabled')
     },
     onError: (error) => toast.error(describeError(error)),
   })

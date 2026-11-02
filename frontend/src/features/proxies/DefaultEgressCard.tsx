@@ -10,7 +10,7 @@ import { toast } from '@/components/ui/toast'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { qk } from '@/lib/query-keys'
+import { invalidateEgress } from '@/lib/invalidate'
 import { EgressPicker, draftOf, sameBinding, toBinding } from './EgressPicker'
 import type { EgressDraft } from './EgressPicker'
 import { egressDefaultOptions } from './options'
@@ -38,9 +38,7 @@ export function DefaultEgressCard() {
     onSuccess: (r) => {
       report(r.assignment)
       setDraft(null)
-      void queryClient.invalidateQueries({ queryKey: qk.egressDefault })
-      void queryClient.invalidateQueries({ queryKey: qk.adminProxies })
-      void queryClient.invalidateQueries({ queryKey: qk.adminProxyGroups })
+      void invalidateEgress(queryClient)
     },
     onError: (err) => toast.error(describeError(err)),
   })
