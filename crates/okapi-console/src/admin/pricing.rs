@@ -211,19 +211,17 @@ pub struct PublishPricingQuery {
     pub expected_base_per_1m_micro: Option<i64>,
 }
 
-pub async fn publish_pricing(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<PublishPricingQuery>,
-) -> Result<Json<Value>, AppError> {
-    let actor = guard(&state, &headers, permissions::PRICING_PUBLISH).await?;
-
+/// 发布定价的共用路径（REST [`publish_pricing`] 与 MCP `apply_pricing`），返回新的 epoch。
+/// 鉴权与审计归调用方。给了 `expected_base` 就和这里读到的底价比：校验与快照用同一次读取，
+/// 管理员确认过的底价不会在两次读之间被换掉。
+pub(crate) async fn publish_pricing_inner(
+    state: &AppState,
+    publisher_user_id: i64,
+    expected_base: Option<i64>,
+) -> Result<i64, AppError> {
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
     let base = okapi_kernel::pricing_loader::draft_base_price(&state.pg).await?;
-    if query
-        .expected_base_per_1m_micro
-        .is_some_and(|expected| expected != base)
-    {
+    if expected_base.is_some_and(|expected| expected != base) {
         return Err(AppError::bad_request().with_param("pricing_base_changed"));
     }
     if let Err(err) = okapi_kernel::pricing_loader::compile_rows(&rows, base) {
@@ -233,14 +231,28 @@ pub async fn publish_pricing(
     let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
     snapshot["base_price_per_1m_micro"] = json!(base);
 
-    let epoch =
-        okapi_store::admin::publish_epoch(&state.pg, actor.actor_user_id(), &snapshot).await?;
+    let epoch = okapi_store::admin::publish_epoch(&state.pg, publisher_user_id, &snapshot).await?;
     // 广播（best-effort；丢失由 gateway 30s 轮询兜底）
     if let Some(nats) = &state.nats {
         let _ = nats
             .publish("pricing.epoch", epoch.to_string().into())
             .await;
     }
+    Ok(epoch)
+}
+
+pub async fn publish_pricing(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PublishPricingQuery>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::PRICING_PUBLISH).await?;
+    let epoch = publish_pricing_inner(
+        &state,
+        actor.actor_user_id(),
+        query.expected_base_per_1m_micro,
+    )
+    .await?;
     audit(
         &state,
         &actor,

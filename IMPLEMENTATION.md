@@ -3475,6 +3475,16 @@ console 里六处各自手写 `SELECT value FROM settings WHERE key = …` 的�
 - 其余直读没动：`mcp_write_enabled`（MCP 写工具总闸）在 SQL 里做布尔转换与缺省；kernel 的 SSRF 策略、SMTP、草稿底价，
   store 的出口缺省与保留月数，worker 的毛利熔断与通知都只拿到 `PgPool`，读法也各有转换。
 
+### 11.63 定价发布只有一条路径（2026-11-02）
+
+REST `POST /admin/pricing/publish` 与 MCP 写工具 `apply_pricing` 原来各写一遍「读规则 → 读草稿底价 → 全量编译 → 存快照发 epoch →
+NATS 广播」，现在都调 `admin::publish_pricing_inner`。
+
+- REST 的 `expected_base_per_1m_micro` 传进这个函数，和编译、快照用的是同一次读到的底价；不符仍回 400 `pricing_base_changed`。
+  MCP 不带它：它的 dry-run 只回模型数和分组数，没有底价可比对。
+- 编译失败的 warn 日志随之对两条路径都打（原来只有 REST 打）。
+- 鉴权、审计与发布人仍各归各的调用方：REST 记 `admin:{actor_user_id}` 审计，MCP 记 MCP 审计、发布人取密钥的 `user_id`。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

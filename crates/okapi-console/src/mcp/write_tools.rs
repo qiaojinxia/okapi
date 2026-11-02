@@ -261,18 +261,7 @@ pub(super) async fn apply_pricing(
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Ok(json!({"dry_run": true, "validation": sim}));
     }
-    let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
-    let base = okapi_kernel::pricing_loader::draft_base_price(&state.pg).await?;
-    okapi_kernel::pricing_loader::compile_rows(&rows, base)
-        .map_err(|err| AppError::bad_request().with_param(format!("compile: {err}")))?;
-    let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
-    snapshot["base_price_per_1m_micro"] = json!(base);
-    let epoch = okapi_store::admin::publish_epoch(&state.pg, key.user_id, &snapshot).await?;
-    if let Some(nats) = &state.nats {
-        let _ = nats
-            .publish("pricing.epoch", epoch.to_string().into())
-            .await;
-    }
+    let epoch = crate::admin::publish_pricing_inner(state, key.user_id, None).await?;
     mcp_audit(state, key, "pricing.publish", &epoch.to_string(), json!({})).await;
     Ok(json!({"dry_run": false, "epoch": epoch}))
 }

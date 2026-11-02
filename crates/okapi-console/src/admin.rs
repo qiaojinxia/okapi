@@ -67,6 +67,7 @@ pub use self::ops::{
     FlushReq, ReconQuery, RepairReq, cache_flush, reconciliation, repair_reconciliation,
 };
 pub use self::plans::{CreateRedemptionsReq, UpsertPlanReq, create_redemptions, upsert_plan};
+pub(super) use self::pricing::publish_pricing_inner;
 pub use self::pricing::{
     ImportNewApiReq, PublishPricingQuery, UpsertRuleReq, delete_pricing_rule,
     import_newapi_pricing, list_pricing_rules, publish_pricing, upsert_pricing_rule,
