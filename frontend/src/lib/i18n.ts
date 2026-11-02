@@ -1,32 +1,56 @@
 import i18n from 'i18next'
 import { initReactI18next } from 'react-i18next'
-import zhCN from '@/locales/zh-CN'
-import en from '@/locales/en'
-import { withModelEditorZh } from '@/locales/model-editor-zh'
 import { ApiError } from '@/lib/api'
 import { readLocal, rememberLocal } from '@/lib/storage'
 
+export type Lang = 'zh-CN' | 'en'
+
 const LANG_STORAGE = 'okapi.lang'
 
-export function initI18n(): typeof i18n {
+// 两种语言各自单独成块：首屏只下载当前语言，切换时再拉另一种。
+// 组合方式要与 scripts/locale-keys.mjs 保持一致（那道闸按它核对键集）。
+const packs: Record<Lang, () => Promise<Record<string, object>>> = {
+  'zh-CN': async () => {
+    const [{ default: zhCN }, { withModelEditorZh }] = await Promise.all([
+      import('@/locales/zh-CN'),
+      import('@/locales/model-editor-zh'),
+    ])
+    return withModelEditorZh(zhCN)
+  },
+  en: async () => (await import('@/locales/en')).default,
+}
+
+async function ensurePack(lang: Lang): Promise<void> {
+  if (i18n.hasResourceBundle(lang, 'common')) return
+  for (const [ns, resources] of Object.entries(await packs[lang]())) {
+    i18n.addResourceBundle(lang, ns, resources)
+  }
+}
+
+function initialLanguage(): Lang {
   const saved = readLocal(LANG_STORAGE)
-  const fallback = navigator.language.startsWith('zh') ? 'zh-CN' : 'en'
-  void i18n.use(initReactI18next).init({
-    resources: {
-      'zh-CN': withModelEditorZh(zhCN),
-      en,
-    },
-    lng: saved ?? fallback,
+  if (saved === 'zh-CN' || saved === 'en') return saved
+  return navigator.language.startsWith('zh') ? 'zh-CN' : 'en'
+}
+
+/// 当前语言的语言包下载完才 resolve：调用方等它再挂 React，第一帧就不会露出原始键。
+export async function initI18n(): Promise<typeof i18n> {
+  const lng = initialLanguage()
+  await i18n.use(initReactI18next).init({
+    resources: {},
+    lng,
     fallbackLng: 'en',
     defaultNS: 'common',
     interpolation: { escapeValue: false },
   })
+  await ensurePack(lng)
   return i18n
 }
 
-export function switchLanguage(lang: 'zh-CN' | 'en'): void {
+export async function switchLanguage(lang: Lang): Promise<void> {
   rememberLocal(LANG_STORAGE, lang)
-  void i18n.changeLanguage(lang)
+  await ensurePack(lang)
+  await i18n.changeLanguage(lang)
 }
 
 /// 后端 error_code → 本地化文案（errors 命名空间，i18n 红线唯一出口）。

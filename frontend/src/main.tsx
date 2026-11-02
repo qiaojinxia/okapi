@@ -7,8 +7,6 @@ import { initI18n } from '@/lib/i18n'
 import { routeTree } from './routeTree.gen'
 import './index.css'
 
-initI18n()
-
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { retry: 1, refetchOnWindowFocus: false },
@@ -30,8 +28,9 @@ declare module '@tanstack/react-router' {
   }
 }
 
-const rootEl = document.getElementById('root')
-if (rootEl) {
+function mount(): void {
+  const rootEl = document.getElementById('root')
+  if (!rootEl) return
   createRoot(rootEl).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
@@ -40,3 +39,7 @@ if (rootEl) {
     </StrictMode>,
   )
 }
+
+// 语言包是单独的块：下载完再挂 React，第一帧就是译好的文案。下载失败也照样挂（文案退成原始键），
+// 页面至少能用、能刷新重试，失败原因留在控制台。
+void initI18n().finally(mount)

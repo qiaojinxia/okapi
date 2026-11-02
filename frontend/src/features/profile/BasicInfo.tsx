@@ -58,7 +58,7 @@ function ProfileForm({ profile }: { profile: AccountProfile }) {
       setUsername(saved.username)
       setLanguage(saved.language)
       setError(null)
-      switchLanguage(saved.language === 'auto' ? navigator.language.startsWith('zh') ? 'zh-CN' : 'en' : saved.language)
+      void switchLanguage(saved.language === 'auto' ? navigator.language.startsWith('zh') ? 'zh-CN' : 'en' : saved.language)
       toast.success(t('profile:saved'))
     },
     onError: (err) => setError(describeError(err)),

@@ -344,10 +344,10 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
         }
       >
         <MenuLabel>{t('common:language')}</MenuLabel>
-        <MenuItem onSelect={() => switchLanguage('zh-CN')} trailing={check(i18n.language === 'zh-CN')}>
+        <MenuItem onSelect={() => void switchLanguage('zh-CN')} trailing={check(i18n.language === 'zh-CN')}>
           {t('common:langZh')}
         </MenuItem>
-        <MenuItem onSelect={() => switchLanguage('en')} trailing={check(i18n.language === 'en')}>
+        <MenuItem onSelect={() => void switchLanguage('en')} trailing={check(i18n.language === 'en')}>
           {t('common:langEn')}
         </MenuItem>
       </Menu>
