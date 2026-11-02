@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Activity, ListTree, Pencil, Plus, Settings, Trash2, Upload } from 'lucide-react'
 import { useState } from 'react'
@@ -7,14 +7,15 @@ import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { IconButton } from '@/components/ui/icon-button'
-import { PageHeader } from '@/components/ui/page'
+import { ListState } from '@/components/ui/list-state'
+import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { EmptyState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { Tabs } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -113,35 +114,27 @@ function TrafficCell({ row }: { row: { up_bytes: number; down_bytes: number } | 
   )
 }
 
-/// 页签、条数与操作按钮同一行，表格紧跟其后（页头下不再单独占两行）。
+/// 页签、条数与操作按钮同一行，表格紧跟其后（页头下不再单独占两行）。计数照页头的约定写成朴素文字。
 function ListToolbar({ tabs, total, children }: { tabs: React.ReactNode; total: number; children: React.ReactNode }) {
   const { t } = useTranslation()
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <span className="flex items-center gap-3">
-        {tabs}
-        <Badge variant="muted">{t('common:totalCount', { n: total })}</Badge>
-      </span>
-      <span className="flex items-center gap-2">{children}</span>
-    </div>
+    <Toolbar
+      filters={<>{tabs}<span className="text-sm text-muted-foreground tabular-nums">{t('common:totalCount', { n: total })}</span></>}
+      selection={children}
+    />
   )
 }
 
 function ProxyList({ tabs }: { tabs: React.ReactNode }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const pager = usePagination()
   const { confirm, dialog } = useConfirm()
   const [drawer, setDrawer] = useState<{ proxy?: ProxyRow } | null>(null)
   const [importing, setImporting] = useState(false)
   const report = useReportToast()
-  const list = useQuery({
-    queryKey: qk.adminProxiesPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: ProxyRow[]; total: number }>(
-        `/admin/proxies?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: list, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminProxiesPage(page),
+    queryFn: (page) => apiFetch<Paged<ProxyRow>>(pagedPath('/admin/proxies', page)),
   })
   // 近 24 小时流量是附加列：没有 ClickHouse（501）或查不到时只显示「—」，不挡列表
   const traffic = useQuery({ ...proxyTrafficOptions('24h'), retry: false })
@@ -177,7 +170,6 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
     },
     onError: (err) => toast.error(describeError(err)),
   })
-  const rows = list.data?.data ?? []
   const create = (
     <Button onClick={() => setDrawer({})}>
       <Plus className="h-4 w-4" />
@@ -195,13 +187,7 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
         </Button>
         {create}
       </ListToolbar>
-      {list.isError ? (
-        <ErrorState message={describeError(list.error)} onRetry={() => void list.refetch()} />
-      ) : list.isPending ? (
-        <TableSkeleton rows={6} cols={7} />
-      ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:proxiesEmptyHint')} action={create} />
-      ) : (
+      <ListState query={list} skeleton={{ rows: 6, cols: 7 }} empty={<EmptyState hint={t('admin:proxiesEmptyHint')} action={create} />}>
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -327,7 +313,7 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
             })}
           </TBody>
         </Table>
-      )}
+      </ListState>
       <Pagination {...pager} total={list.data?.total} />
       {drawer !== null && (
         <ProxyDrawer
@@ -347,18 +333,13 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
 function GroupList({ tabs }: { tabs: React.ReactNode }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const pager = usePagination()
   const { confirm, dialog } = useConfirm()
   const [drawer, setDrawer] = useState<{ group?: ProxyGroupRow } | null>(null)
   const [assignments, setAssignments] = useState<ProxyGroupRow | null>(null)
   const report = useReportToast()
-  const list = useQuery({
-    queryKey: qk.adminProxyGroupsPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: ProxyGroupRow[]; total: number }>(
-        `/admin/proxy-groups?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: list, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminProxyGroupsPage(page),
+    queryFn: (page) => apiFetch<Paged<ProxyGroupRow>>(pagedPath('/admin/proxy-groups', page)),
   })
   const invalidate = () => void invalidateEgress(queryClient)
   const remove = useMutation({
@@ -370,7 +351,6 @@ function GroupList({ tabs }: { tabs: React.ReactNode }) {
     },
     onError: (err) => toast.error(describeError(err)),
   })
-  const rows = list.data?.data ?? []
   const create = (
     <Button onClick={() => setDrawer({})}>
       <Plus className="h-4 w-4" />
@@ -384,13 +364,7 @@ function GroupList({ tabs }: { tabs: React.ReactNode }) {
       <ListToolbar tabs={tabs} total={list.data?.total ?? 0}>
         {create}
       </ListToolbar>
-      {list.isError ? (
-        <ErrorState message={describeError(list.error)} onRetry={() => void list.refetch()} />
-      ) : list.isPending ? (
-        <TableSkeleton rows={4} cols={5} />
-      ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:proxyGroupsEmptyHint')} action={create} />
-      ) : (
+      <ListState query={list} skeleton={{ rows: 4, cols: 5 }} empty={<EmptyState hint={t('admin:proxyGroupsEmptyHint')} action={create} />}>
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -465,7 +439,7 @@ function GroupList({ tabs }: { tabs: React.ReactNode }) {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
       <Pagination {...pager} total={list.data?.total} />
       {drawer !== null && (
         <GroupDrawer

@@ -1,13 +1,13 @@
 import { Ban, Plus } from 'lucide-react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { GenerateDrawer } from '@/features/codes/GenerateDrawer'
 import { CODE_STATUS, CODE_STATUS_FILTERS } from '@/features/codes/types'
@@ -18,7 +18,8 @@ import { Pagination } from '@/components/ui/pagination'
 import { Select } from '@/components/ui/select'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { usePermission } from '@/hooks/use-auth'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery, withFilters } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -56,23 +57,12 @@ export function RedemptionsPage() {
   const navigate = routeApi.useNavigate()
   const status = search.status ?? ''
   const setStatus = (value: string) =>
-    void navigate({ search: (prev) => ({ ...prev, status: oneOf(value, CODE_STATUS_FILTERS), page: undefined }) })
+    void navigate({ search: withFilters({ status: oneOf(value, CODE_STATUS_FILTERS) }) })
   const [drawer, setDrawer] = useState(false)
   const { confirm, dialog } = useConfirm()
-  const pager = usePagination()
-
-  const codes = useQuery({
-    queryKey: qk.adminRedemptionsPage(status, pager),
-    queryFn: () => {
-      const params = new URLSearchParams({
-        limit: String(pager.limit),
-        offset: String(pager.offset),
-      })
-      if (status !== '') params.set('status', status)
-      return apiFetch<{ total: number; data: CodeRow[] }>(`/admin/redemptions?${params}`)
-    },
-    // 翻页时保留上一页数据：表格不闪成骨架屏
-    placeholderData: keepPreviousData,
+  const { query: codes, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminRedemptionsPage(status, page),
+    queryFn: (page) => apiFetch<Paged<CodeRow>>(pagedPath('/admin/redemptions', page, { status })),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminRedemptionsAll })
 
@@ -92,7 +82,6 @@ export function RedemptionsPage() {
     return t('admin:codeUnused')
   }
 
-  const rows = codes.data?.data ?? []
 
   return (
     <div className="list-page">
@@ -137,23 +126,23 @@ export function RedemptionsPage() {
       />
       {dialog}
 
-      {codes.isError ? (
-        <ErrorState message={describeError(codes.error)} onRetry={() => void codes.refetch()} />
-      ) : codes.isPending ? (
-        <TableSkeleton rows={6} cols={8} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          hint={t('admin:codesEmptyHint')}
-          action={
-            canCreate && (
-              <Button onClick={() => setDrawer(true)}>
-                <Plus className="h-4 w-4" />
-                {t('admin:redeemGenerate')}
-              </Button>
-            )
-          }
-        />
-      ) : (
+      <ListState
+        query={codes}
+        skeleton={{ rows: 6, cols: 8 }}
+        empty={
+          <EmptyState
+            hint={t('admin:codesEmptyHint')}
+            action={
+              canCreate && (
+                <Button onClick={() => setDrawer(true)}>
+                  <Plus className="h-4 w-4" />
+                  {t('admin:redeemGenerate')}
+                </Button>
+              )
+            }
+          />
+        }
+      >
         <Table
           stickyHeader
           className="min-w-[68rem] table-fixed"
@@ -225,7 +214,7 @@ export function RedemptionsPage() {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={codes.data?.total} className="shrink-0" />
 

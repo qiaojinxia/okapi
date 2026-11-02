@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -13,7 +13,8 @@ import { PageHeader } from '@/components/ui/page'
 import { toast } from '@/components/ui/toast'
 import { TeamDetailCard } from '@/features/teams/TeamDetailCard'
 import { TeamListCard } from '@/features/teams/TeamListCard'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 
@@ -33,15 +34,9 @@ export function TeamsPage() {
   const [active, setActive] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
-  const pager = usePagination()
-
-  const teams = useQuery({
-    queryKey: qk.myTeamsPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: TeamRow[]; total: number }>(
-        `/api/teams?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: teams, pager } = usePagedQuery({
+    queryKey: (page) => qk.myTeamsPage(page),
+    queryFn: (page) => apiFetch<Paged<TeamRow>>(pagedPath('/api/teams', page)),
     retry: false,
   })
 

@@ -1,12 +1,12 @@
 import { AlertTriangle, Info, Pencil, Plus, Rocket, Trash2, Upload } from 'lucide-react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ModelListRow } from '@/features/models/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { ImportDrawer } from '@/features/models/ImportDrawer'
@@ -20,7 +20,7 @@ import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { Link, getRouteApi } from '@tanstack/react-router'
 import type { ChannelRow } from '@/features/channels/types'
 import { useDraft } from '@/hooks/use-draft'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery, withFilters } from '@/hooks/use-paged-query'
 import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { invalidatePublishedPricing } from '@/lib/invalidate'
@@ -60,30 +60,18 @@ export function ModelPricingPage() {
   const [importing, setImporting] = useState(false)
   const { confirm, dialog } = useConfirm()
   // 模型表动辄几百行：过滤与切片都在服务端
-  const pager = usePagination()
   // 过滤器与页码同一次导航更新：只按"新条件 + 第一页"请求一次
   const setFilters = (next: { q?: string; unpriced?: boolean }) =>
     void navigate({
-      search: (prev) => ({
-        ...prev,
+      search: withFilters({
         ...('q' in next ? { q: text(next.q) } : {}),
         ...('unpriced' in next ? { unpriced: next.unpriced ? true : undefined } : {}),
-        page: undefined,
       }),
     })
 
-  const models = useQuery({
-    queryKey: qk.adminModelsPage(query, onlyUnpriced, pager),
-    queryFn: () => {
-      const params = new URLSearchParams({
-        limit: String(pager.limit),
-        offset: String(pager.offset),
-      })
-      if (query !== '') params.set('q', query)
-      if (onlyUnpriced) params.set('unpriced', 'true')
-      return apiFetch<ModelPage>(`/admin/models?${params}`)
-    },
-    placeholderData: keepPreviousData,
+  const { query: models, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminModelsPage(query, onlyUnpriced, page),
+    queryFn: (page) => apiFetch<ModelPage>(pagedPath('/admin/models', page, { q: query, unpriced: onlyUnpriced ? 'true' : undefined })),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminModels })
   // 每个模型有几条启用渠道在服务：定了价却没渠道，请求同样会被拒——
@@ -129,7 +117,6 @@ export function ModelPricingPage() {
     },
   })
 
-  const rows = models.data?.data ?? []
   const total = models.data?.total ?? 0
   const unpricedCount = models.data?.unpriced ?? 0
   const filtered = query !== '' || onlyUnpriced
@@ -214,25 +201,25 @@ export function ModelPricingPage() {
         }
       />
 
-      {models.isError ? (
-        <ErrorState message={describeError(models.error)} onRetry={() => void models.refetch()} />
-      ) : models.isPending ? (
-        <TableSkeleton rows={6} cols={12} />
-      ) : rows.length === 0 ? (
-        filtered ? (
-          <EmptyState
-            title={t('common:noResults')}
-            hint={t('common:noResultsHint')}
-            action={
-              <Button variant="outline" onClick={clearFilters}>
-                {t('common:clearFilters')}
-              </Button>
-            }
-          />
-        ) : (
-          <EmptyState hint={t('admin:modelsEmptyHint')} />
-        )
-      ) : (
+      <ListState
+        query={models}
+        skeleton={{ rows: 6, cols: 12 }}
+        empty={
+          filtered ? (
+            <EmptyState
+              title={t('common:noResults')}
+              hint={t('common:noResultsHint')}
+              action={
+                <Button variant="outline" onClick={clearFilters}>
+                  {t('common:clearFilters')}
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState hint={t('admin:modelsEmptyHint')} />
+          )
+        }
+      >
         <Table stickyHeader aria-label={t('admin:modelListTitle')}>
           <THead>
             <Tr>
@@ -332,7 +319,7 @@ export function ModelPricingPage() {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={models.data?.total} />
 

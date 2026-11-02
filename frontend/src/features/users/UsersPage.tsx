@@ -1,23 +1,22 @@
 import { Settings2 } from 'lucide-react'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { EmptyState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
-import { TableSkeleton } from '@/components/ui/skeleton'
+import { ListState } from '@/components/ui/list-state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { UsageCell, useEntityUsage } from '@/components/usage-cell'
 import { UserDrawer } from '@/features/users/UserDrawer'
 import { useDraft } from '@/hooks/use-draft'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery, withFilters } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
-import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { text } from '@/lib/search-params'
@@ -50,26 +49,15 @@ export function UsersPage() {
   const query = search.q ?? ''
   const [draft, setDraft] = useDraft(query)
   const [selected, setSelected] = useState<number | null>(null)
-  const pager = usePagination()
   // 搜索词与页码同一次导航更新：只按"新词 + 第一页"请求一次，不会先按旧页码空跑一趟
   const applySearch = (value: string) =>
-    void navigate({ search: (prev) => ({ ...prev, q: text(value), page: undefined }) })
+    void navigate({ search: withFilters({ q: text(value) }) })
 
-  const users = useQuery({
-    queryKey: qk.adminUsersPage(query, pager),
-    queryFn: () => {
-      const params = new URLSearchParams({
-        limit: String(pager.limit),
-        offset: String(pager.offset),
-      })
-      if (query !== '') params.set('q', query)
-      return apiFetch<{ total: number; data: UserRow[] }>(`/admin/users?${params}`)
-    },
-    // 翻页时保留上一页数据：表格不闪成骨架屏
-    placeholderData: keepPreviousData,
+  const { query: users, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminUsersPage(query, page),
+    queryFn: (page) => apiFetch<Paged<UserRow>>(pagedPath('/admin/users', page, { q: query })),
   })
 
-  const rows = users.data?.data ?? []
   // 行内用量（Sub2API 用户列表同有）：找人时"他花不花钱、最近活跃吗"与余额同样重要
   const usage = useEntityUsage(
     'user',
@@ -116,16 +104,16 @@ export function UsersPage() {
         }
       />
 
-      {users.isError ? (
-        <ErrorState message={describeError(users.error)} onRetry={() => void users.refetch()} />
-      ) : users.isPending ? (
-        <TableSkeleton rows={10} cols={8} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          title={query !== '' ? t('common:noResults') : undefined}
-          hint={query !== '' ? t('common:noResultsHint') : undefined}
-        />
-      ) : (
+      <ListState
+        query={users}
+        skeleton={{ rows: 10, cols: 8 }}
+        empty={
+          <EmptyState
+            title={query !== '' ? t('common:noResults') : undefined}
+            hint={query !== '' ? t('common:noResultsHint') : undefined}
+          />
+        }
+      >
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -182,7 +170,7 @@ export function UsersPage() {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={users.data?.total} />
 

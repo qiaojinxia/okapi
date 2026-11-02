@@ -1,5 +1,6 @@
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
+import { withFilters } from '@/hooks/use-paged-query'
 import { PageHeader } from '@/components/ui/page'
 import { Tabs } from '@/components/ui/tabs'
 import { ChannelHealthCard } from '@/features/stats/ChannelHealthCard'
@@ -40,14 +41,14 @@ export function QualityPage() {
       <PageHeader
         title={t('analytics:qualityTitle')}
         description={t('analytics:qualityDesc')}
-        action={<DaysPicker days={tab === 'trend' && customRange ? 0 : days} onPick={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined, page: undefined }) })} />}
+        action={<DaysPicker days={tab === 'trend' && customRange ? 0 : days} onPick={(value) => void navigate({ search: withFilters({ days: value, start_date: undefined, end_date: undefined }) })} />}
       />
       <Tabs
         id="quality-tabs"
         ariaLabel={t('analytics:qualityTitle')}
         items={QUALITY_TABS.map((id) => ({ id, label: labels[id], panelId: 'quality-panel' }))}
         active={tab}
-        onChange={(id) => void navigate({ search: (prev) => ({ ...prev, tab: id as QualityTab, page: undefined }) })}
+        onChange={(id) => void navigate({ search: withFilters({ tab: id as QualityTab }) })}
       />
       {tab !== 'trend' && savedFilters && <div role="note" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
         <p className="min-w-0 flex-1">{t('analytics:qualitySavedFilters', { days })}</p>

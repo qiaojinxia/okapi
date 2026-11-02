@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { Power, PowerOff, ScrollText, Trash2 } from 'lucide-react'
@@ -12,15 +12,16 @@ import { IconButton } from '@/components/ui/icon-button'
 import { Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
-import { TableSkeleton } from '@/components/ui/skeleton'
+import { ListState } from '@/components/ui/list-state'
 import { Pagination } from '@/components/ui/pagination'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { EmptyState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { UsageCell, useEntityUsage } from '@/components/usage-cell'
 import { UserSearchInput, validUserFilter } from '@/features/users/UserSearchInput'
 import { useDraft } from '@/hooks/use-draft'
 import { usePermission } from '@/hooks/use-auth'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery, withFilters } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -75,20 +76,9 @@ export function AdminKeysPage() {
   const invalidUser = filterError && !validUserFilter(userIdDraft)
   const { confirm, dialog } = useConfirm()
 
-  const pager = usePagination()
-  const keys = useQuery({
-    queryKey: qk.adminKeysPage(uid, query, pager),
-    queryFn: () => {
-      const params = new URLSearchParams({
-        limit: String(pager.limit),
-        offset: String(pager.offset),
-      })
-      if (query !== '') params.set('q', query)
-      if (uid !== null) params.set('user_id', String(uid))
-      return apiFetch<{ total: number; data: AdminKeyRow[] }>(`/admin/keys?${params}`)
-    },
-    // 翻页时保留上一页数据：表格不闪成骨架屏
-    placeholderData: keepPreviousData,
+  const { query: keys, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminKeysPage(uid, query, page),
+    queryFn: (page) => apiFetch<Paged<AdminKeyRow>>(pagedPath('/admin/keys', page, { q: query, user_id: uid })),
   })
 
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminKeysAll })
@@ -97,14 +87,14 @@ export function AdminKeysPage() {
     if (!validUserFilter(userIdDraft)) { setFilterError(true); return }
     setFilterError(false)
     void navigate({
-      search: (prev) => ({ ...prev, q: text(draft), user_id: posInt(userIdDraft), page: undefined }),
+      search: withFilters({ q: text(draft), user_id: posInt(userIdDraft) }),
     })
   }
   const clearFilters = () => {
     setDraft('')
     setUserIdDraft('')
     setFilterError(false)
-    void navigate({ search: (prev) => ({ ...prev, q: undefined, user_id: undefined, page: undefined }) })
+    void navigate({ search: withFilters({ q: undefined, user_id: undefined }) })
   }
 
   const setStatus = useMutation({
@@ -126,7 +116,6 @@ export function AdminKeysPage() {
     onError: (err) => toast.error(describeError(err)),
   })
 
-  const rows = keys.data?.data ?? []
   // 行内近期用量：`used_micro` 是这把 key 一生的累计，答不了"最近还在用吗"
   const usage = useEntityUsage(
     'api_key',
@@ -185,15 +174,15 @@ export function AdminKeysPage() {
       />
 
       {dialog}
-      {keys.isError ? (
-        <ErrorState message={describeError(keys.error)} onRetry={() => void keys.refetch()} />
-      ) : keys.isPending ? (
-        <TableSkeleton rows={8} cols={9} />
-      ) : rows.length === 0 ? (
-        <EmptyState title={query !== '' || uid !== null ? t('common:noResults') : undefined}
-          hint={query !== '' || uid !== null ? t('common:noResultsHint') : undefined}
-          action={query !== '' || uid !== null ? <Button variant="outline" onClick={clearFilters}>{t('common:clearFilters')}</Button> : undefined} />
-      ) : (
+      <ListState
+        query={keys}
+        skeleton={{ rows: 8, cols: 9 }}
+        empty={
+          <EmptyState title={query !== '' || uid !== null ? t('common:noResults') : undefined}
+            hint={query !== '' || uid !== null ? t('common:noResultsHint') : undefined}
+            action={query !== '' || uid !== null ? <Button variant="outline" onClick={clearFilters}>{t('common:clearFilters')}</Button> : undefined} />
+        }
+      >
         <Table stickyHeader aria-label={t('admin:keysNav')} aria-busy={keys.isFetching} scrollResetKey={`${query}:${uid}:${pager.offset}:${pager.limit}`}>
           <THead>
             <Tr>
@@ -299,7 +288,7 @@ export function AdminKeysPage() {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
       <Pagination {...pager} total={keys.data?.total} />
     </div>
   )

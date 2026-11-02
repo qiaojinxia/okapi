@@ -1,11 +1,11 @@
 import { Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
@@ -13,7 +13,8 @@ import { Pagination } from '@/components/ui/pagination'
 import { RuleDrawer } from '@/features/rules/RuleDrawer'
 import { STACKING_LABEL, TYPE_LABEL, WEEKDAY_LABEL } from '@/features/rules/types'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -30,15 +31,9 @@ export function RulesPage() {
   // null = 关闭；'create' = 新建；RuleRow = 编辑该条
   const [drawer, setDrawer] = useState<'create' | RuleRow | null>(null)
   const { confirm, dialog } = useConfirm()
-  const pager = usePagination()
-
-  const rules = useQuery({
-    queryKey: qk.adminPricingRulesPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: RuleRow[]; total: number }>(
-        `/admin/pricing/rules?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: rules, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminPricingRulesPage(page),
+    queryFn: (page) => apiFetch<Paged<RuleRow>>(pagedPath('/admin/pricing/rules', page)),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminPricingRules })
 
@@ -65,8 +60,6 @@ export function RulesPage() {
     },
     onError: (err) => toast.error(describeError(err)),
   })
-
-  const rows = rules.data?.data ?? []
 
   /// 参数列人话化。此前直接 JSON.stringify(params)，运营看到的是
   /// {"min_monthly_tokens":100,"multiplier":"0.9"}——要读懂得先知道字段名。
@@ -142,21 +135,21 @@ export function RulesPage() {
       />
       {dialog}
 
-      {rules.isError ? (
-        <ErrorState message={describeError(rules.error)} onRetry={() => void rules.refetch()} />
-      ) : rules.isPending ? (
-        <TableSkeleton rows={6} cols={7} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          hint={t('admin:rulesEmptyHint')}
-          action={
-            <Button onClick={() => setDrawer('create')}>
-              <Plus className="h-4 w-4" />
-              {t('admin:ruleCreate')}
-            </Button>
-          }
-        />
-      ) : (
+      <ListState
+        query={rules}
+        skeleton={{ rows: 6, cols: 7 }}
+        empty={
+          <EmptyState
+            hint={t('admin:rulesEmptyHint')}
+            action={
+              <Button onClick={() => setDrawer('create')}>
+                <Plus className="h-4 w-4" />
+                {t('admin:ruleCreate')}
+              </Button>
+            }
+          />
+        }
+      >
         <Table
           stickyHeader
           className="min-w-[68rem] table-fixed"
@@ -240,7 +233,7 @@ export function RulesPage() {
             })}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={rules.data?.total} />
 

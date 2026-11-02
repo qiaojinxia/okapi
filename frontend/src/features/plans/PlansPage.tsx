@@ -1,18 +1,19 @@
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { PlanDrawer } from '@/features/plans/PlanDrawer'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -48,15 +49,9 @@ export function PlansPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<'create' | PlanRow | null>(null)
   const { confirm, dialog } = useConfirm()
-  const pager = usePagination()
-
-  const plans = useQuery({
-    queryKey: qk.adminPlansPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: PlanRow[]; total: number }>(
-        `/admin/plans?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: plans, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminPlansPage(page),
+    queryFn: (page) => apiFetch<Paged<PlanRow>>(pagedPath('/admin/plans', page)),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminPlans })
 
@@ -69,8 +64,6 @@ export function PlansPage() {
     },
     onError: (err) => toast.error(describeError(err)),
   })
-
-  const rows = plans.data?.data ?? []
 
   return (
     <div className="list-page">
@@ -86,21 +79,21 @@ export function PlansPage() {
       />
       {dialog}
 
-      {plans.isError ? (
-        <ErrorState message={describeError(plans.error)} onRetry={() => void plans.refetch()} />
-      ) : plans.isPending ? (
-        <TableSkeleton rows={6} cols={9} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          hint={t('admin:plansEmptyHint')}
-          action={
-            <Button onClick={() => setDrawer('create')}>
-              <Plus className="h-4 w-4" />
-              {t('admin:planCreate')}
-            </Button>
-          }
-        />
-      ) : (
+      <ListState
+        query={plans}
+        skeleton={{ rows: 6, cols: 9 }}
+        empty={
+          <EmptyState
+            hint={t('admin:plansEmptyHint')}
+            action={
+              <Button onClick={() => setDrawer('create')}>
+                <Plus className="h-4 w-4" />
+                {t('admin:planCreate')}
+              </Button>
+            }
+          />
+        }
+      >
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -171,7 +164,7 @@ export function PlansPage() {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={plans.data?.total} />
 

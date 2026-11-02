@@ -3561,6 +3561,24 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
 - 有业务归属、被别的 feature 复用的组件留在原处，作为那个 feature 对外的入口：`models/model-input`（候选来自已配置的模型目录）、
   `entity-search/EntitySearchInput`（本来就是单独的目录）、`logs/LogSummary`（日志汇总；管理端日志与密钥用量抽屉复用是正当的）。
 
+### 11.68 列表页骨架收成三件共用件（2026-11-02）
+
+套餐、角色、分组、渠道池、计价规则、代理与代理组、门户密钥、团队、用户、管理端密钥、兑换码、模型定价这些分页列表，
+各自逐字重复「分页查询 + 四态三元」。现在：
+
+- `hooks/use-paged-query.ts`：`usePagedQuery({ queryKey: (page) => …, queryFn: (page) => … })` 把 `usePagination`、按页取数、
+  翻页保留上一页数据（`keepPreviousData`）合成一处，返回 `{ query, pager, rows }`；`pagedPath(path, page, filters)` 拼
+  `?limit=&offset=` 再接筛选（空值不带，顺序与原来一致，e2e 里按查询串断言的用例不受影响）；`withFilters(patch)` 是
+  「改筛选写进地址并清掉页码」的 search 更新（用户、密钥、兑换码、模型定价、质量页）。
+- `components/ui/list-state.tsx`：`<ListState query skeleton empty>` 出错（带重试）→ 首次加载骨架 → 空态 → 表格。
+- `lib/load-all.ts`：选择器要的全量目录（代理、渠道池、已配置模型三份几乎相同的翻页循环）合成 `loadAll(base, id)`：
+  首个请求取接口缺省页（不带 total 的老接口一次回全部），不够再按 200 一页翻；后端忽略 offset、total 不合法、未到 total
+  就回空页时报错。渠道池与模型原来就这么取（e2e 钉着这个请求序列）；代理的首个请求原来带 `limit=200&offset=0`，现在一样不带。
+- 代理页的工具栏改用共享 `Toolbar`，计数按页头约定写成朴素文字，不再套 `Badge`。
+
+不做通用增删改框架：各页的行渲染、删除提示与抽屉差别很大，抽象只会多一层参数。统计卡片（`stats/*Card`）的接口回
+`total_items`、带时间窗，形状不同，没套进来；渠道列表 `ChannelsPage.tsx` 等手上的改动落地后再换。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

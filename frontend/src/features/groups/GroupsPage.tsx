@@ -1,19 +1,20 @@
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { GroupListRow } from '@/features/groups/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { GroupDrawer } from '@/features/groups/GroupDrawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
@@ -29,15 +30,9 @@ export function GroupsPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<{ group?: GroupListRow } | null>(null)
   const { confirm, dialog } = useConfirm()
-  const pager = usePagination()
-
-  const groups = useQuery({
-    queryKey: qk.adminGroupsPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: GroupListRow[]; total: number }>(
-        `/admin/groups?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: groups, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminGroupsPage(page),
+    queryFn: (page) => apiFetch<Paged<GroupListRow>>(pagedPath('/admin/groups', page)),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminGroups })
 
@@ -50,8 +45,6 @@ export function GroupsPage() {
     },
     onError: (err) => toast.error(describeError(err)),
   })
-
-  const rows = groups.data?.data ?? []
 
   return (
     <div className="list-page">
@@ -69,21 +62,21 @@ export function GroupsPage() {
       />
       {dialog}
 
-      {groups.isError ? (
-        <ErrorState message={describeError(groups.error)} onRetry={() => void groups.refetch()} />
-      ) : groups.isPending ? (
-        <TableSkeleton rows={6} cols={6} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          hint={t('admin:groupsDesc')}
-          action={
-            <Button onClick={() => setDrawer({})}>
-              <Plus className="h-4 w-4" />
-              {t('admin:groupCreate')}
-            </Button>
-          }
-        />
-      ) : (
+      <ListState
+        query={groups}
+        skeleton={{ rows: 6, cols: 6 }}
+        empty={
+          <EmptyState
+            hint={t('admin:groupsDesc')}
+            action={
+              <Button onClick={() => setDrawer({})}>
+                <Plus className="h-4 w-4" />
+                {t('admin:groupCreate')}
+              </Button>
+            }
+          />
+        }
+      >
         <Table
           stickyHeader
           className="min-w-[66rem] table-fixed"
@@ -190,7 +183,7 @@ export function GroupsPage() {
             })}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={groups.data?.total} className="shrink-0" />
 

@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -8,14 +8,15 @@ import { useConfirm } from '@/components/ui/confirm'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { PoolDrawer } from '@/features/pools/PoolDrawer'
 import { STRATEGY_LABEL, strategyOf } from '@/features/pools/types'
 import type { PoolRow } from '@/features/pools/types'
-import { usePagination } from '@/hooks/use-pagination'
+import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
+import type { Paged } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -30,15 +31,9 @@ export function PoolsPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<{ pool?: PoolRow } | null>(null)
   const { confirm, dialog } = useConfirm()
-  const pager = usePagination()
-
-  const pools = useQuery({
-    queryKey: qk.adminPoolsPage(pager),
-    queryFn: () =>
-      apiFetch<{ data: PoolRow[]; total: number }>(
-        `/admin/pools?limit=${pager.limit}&offset=${pager.offset}`,
-      ),
-    placeholderData: keepPreviousData,
+  const { query: pools, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminPoolsPage(page),
+    queryFn: (page) => apiFetch<Paged<PoolRow>>(pagedPath('/admin/pools', page)),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminPools })
 
@@ -51,8 +46,6 @@ export function PoolsPage() {
     },
     onError: (err) => toast.error(describeError(err)),
   })
-
-  const rows = pools.data?.data ?? []
 
   return (
     <div className="list-page">
@@ -69,21 +62,21 @@ export function PoolsPage() {
       />
       {dialog}
 
-      {pools.isError ? (
-        <ErrorState message={describeError(pools.error)} onRetry={() => void pools.refetch()} />
-      ) : pools.isPending ? (
-        <TableSkeleton rows={6} cols={6} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          hint={t('admin:poolsEmptyHint')}
-          action={
-            <Button onClick={() => setDrawer({})}>
-              <Plus className="h-4 w-4" />
-              {t('admin:poolCreate')}
-            </Button>
-          }
-        />
-      ) : (
+      <ListState
+        query={pools}
+        skeleton={{ rows: 6, cols: 6 }}
+        empty={
+          <EmptyState
+            hint={t('admin:poolsEmptyHint')}
+            action={
+              <Button onClick={() => setDrawer({})}>
+                <Plus className="h-4 w-4" />
+                {t('admin:poolCreate')}
+              </Button>
+            }
+          />
+        }
+      >
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -164,7 +157,7 @@ export function PoolsPage() {
             })}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={pools.data?.total} />
 

@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { BookOpen, KeyRound, Pencil, Plus, Power, PowerOff, RotateCw, Trash2 } from 'lucide-react'
 import { useState } from 'react'
@@ -14,12 +14,12 @@ import { IconButton } from '@/components/ui/icon-button'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
 import { useGuide } from '@/features/portal-guide/guide-state'
-import { usePagination } from '@/hooks/use-pagination'
+import { usePagedQuery } from '@/hooks/use-paged-query'
 import { useMe } from '@/hooks/use-auth'
 import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -74,12 +74,9 @@ export function PortalKeysPage() {
   const [sessionMsg, setSessionMsg] = useState<string | null>(null)
   const { confirm, dialog } = useConfirm()
   const guide = useGuide()
-  const pager = usePagination()
-
-  const keys = useQuery({
-    queryKey: qk.keysPage(pager),
-    queryFn: () => fetchMyKeys(pager),
-    placeholderData: keepPreviousData,
+  const { query: keys, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.keysPage(page),
+    queryFn: (page) => fetchMyKeys(page),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   })
@@ -178,7 +175,6 @@ export function PortalKeysPage() {
   const groupLabel = (g: SelectableGroup) =>
     `${g.code} · ×${formatRatio(g.ratio)}${g.description ? ` · ${g.description}` : ''}`
 
-  const rows = keys.data?.data ?? []
   const usageKey = rows.find((key) => key.id === usageKeyId)
   return (
     <div className="list-page">
@@ -243,22 +239,22 @@ export function PortalKeysPage() {
         </Alert>
       )}
 
-      {keys.isError ? (
-        <ErrorState message={describeError(keys.error)} onRetry={() => void keys.refetch()} />
-      ) : keys.isPending ? (
-        <TableSkeleton rows={3} cols={10} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon={KeyRound}
-          hint={t('portal:keysEmptyHint')}
-          action={
-            <Button onClick={() => openEditor({ mode: 'create' })}>
-              <Plus className="h-4 w-4" />
-              {t('portal:keyCreate')}
-            </Button>
-          }
-        />
-      ) : (
+      <ListState
+        query={keys}
+        skeleton={{ rows: 3, cols: 10 }}
+        empty={
+          <EmptyState
+            icon={KeyRound}
+            hint={t('portal:keysEmptyHint')}
+            action={
+              <Button onClick={() => openEditor({ mode: 'create' })}>
+                <Plus className="h-4 w-4" />
+                {t('portal:keyCreate')}
+              </Button>
+            }
+          />
+        }
+      >
         <Table stickyHeader stickyFirstColumn
           className="min-w-[1100px] table-fixed [&_th]:px-2 [&_td]:px-2 [&_tbody_tr:hover>td:first-child:not([colspan])]:bg-[color-mix(in_srgb,var(--card)_60%,var(--accent))]"
           scrollResetKey={`${pager.offset}:${pager.limit}`} aria-label={t('portal:keys')}>
@@ -395,7 +391,7 @@ export function PortalKeysPage() {
             })}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={keys.data?.total} />
 

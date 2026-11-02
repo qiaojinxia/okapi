@@ -1,11 +1,11 @@
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { ListState } from '@/components/ui/list-state'
+import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
@@ -14,7 +14,7 @@ import { fetchRoles } from '@/features/roles/api'
 import type { RoleRow } from '@/features/roles/api'
 import { RoleDrawer } from '@/features/roles/RoleDrawer'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { usePagination } from '@/hooks/use-pagination'
+import { usePagedQuery } from '@/hooks/use-paged-query'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -30,12 +30,9 @@ export function RolesPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<'create' | RoleRow | null>(null)
   const { confirm, dialog } = useConfirm()
-  const pager = usePagination()
-
-  const roles = useQuery({
-    queryKey: qk.adminRolesPage(pager),
-    queryFn: () => fetchRoles(pager),
-    placeholderData: keepPreviousData,
+  const { query: roles, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.adminRolesPage(page),
+    queryFn: (page) => fetchRoles(page),
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminRoles })
 
@@ -50,7 +47,6 @@ export function RolesPage() {
     onError: (err) => toast.error(describeError(err)),
   })
 
-  const rows = roles.data?.data ?? []
   const permCount = (p: unknown) => (Array.isArray(p) ? p.length : 0)
 
   return (
@@ -68,21 +64,21 @@ export function RolesPage() {
       />
       {dialog}
 
-      {roles.isError ? (
-        <ErrorState message={describeError(roles.error)} onRetry={() => void roles.refetch()} />
-      ) : roles.isPending ? (
-        <TableSkeleton rows={6} cols={5} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          hint={t('admin:rolesEmptyHint')}
-          action={
-            <Button onClick={() => setDrawer('create')}>
-              <Plus className="h-4 w-4" />
-              {t('admin:roleCreate')}
-            </Button>
-          }
-        />
-      ) : (
+      <ListState
+        query={roles}
+        skeleton={{ rows: 6, cols: 5 }}
+        empty={
+          <EmptyState
+            hint={t('admin:rolesEmptyHint')}
+            action={
+              <Button onClick={() => setDrawer('create')}>
+                <Plus className="h-4 w-4" />
+                {t('admin:roleCreate')}
+              </Button>
+            }
+          />
+        }
+      >
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -139,7 +135,7 @@ export function RolesPage() {
             ))}
           </TBody>
         </Table>
-      )}
+      </ListState>
 
       <Pagination {...pager} total={roles.data?.total} />
 
