@@ -44,6 +44,14 @@ class CoreSummaryTest(unittest.TestCase):
         report = summary.summarize(GREEN.replace('1 passed; 0 failed; 0 ignored', '0 passed; 0 failed; 1 ignored').replace('... ok', '... ignored'), 0)
         self.assertEqual(report['execution_status'], 'passed_with_skips_or_skip_signals')
 
+    def test_ignore_reason_is_kept_for_the_opt_in_check(self):
+        ignored = GREEN.replace('1 passed; 0 failed; 0 ignored', '0 passed; 0 failed; 1 ignored')
+        reason = 'real subscription smoke; requires an explicitly supplied access token'
+        report = summary.summarize(ignored.replace('... ok', f'... ignored, {reason}'), 0)
+        self.assertEqual(report['suites'][0]['tests'], [{'name': 'example', 'outcome': 'ignored', 'reason': reason}])
+        report = summary.summarize(ignored.replace('... ok', '... ignored'), 0)
+        self.assertEqual(report['suites'][0]['tests'], [{'name': 'example', 'outcome': 'ignored'}])
+
     def test_failed_and_doc_suites_are_separate(self):
         failed = GREEN.replace('example', 'failing').replace('... ok', '... FAILED').replace('ok. 1 passed; 0 failed', 'FAILED. 0 passed; 1 failed')
         doc = GREEN.replace('Running tests/example.rs (target/debug/deps/example-123)', 'Doc-tests okapi')

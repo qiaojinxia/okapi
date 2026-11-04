@@ -92,9 +92,12 @@ def summarize(raw, exit_code=None):
         else:
             ending = line
         if pending is not None:
-            outcome = re.fullmatch(r'(ok|FAILED|ignored)(?:, .*)?', ending)
+            outcome = re.fullmatch(r'(ok|FAILED|ignored)(?:, (.*))?', ending)
             if outcome:
                 pending['outcome'] = outcome[1]
+                if outcome[1] == 'ignored' and outcome[2]:
+                    # `#[ignore = "..."]` prints its reason here; CI admits opt-in tests by it
+                    pending['reason'] = outcome[2]
                 pending = None
 
     totals = Counter()

@@ -133,13 +133,14 @@ jobs:
           report = json.load(open("core-tests.json"))
           assert report["execution_status"] in {"passed", "passed_with_skips_or_skip_signals"}, report["execution_status"]
           assert not report["skip_signals"], report["skip_signals"]
-          allowed_opt_in = {
-              "cli_286_real_tool_result_round_trip_preserves_upstream_thinking_blocks",
-              "sdk_286_real_text_stream_completes",
-              "programming_clients::installed_claude_code_and_codex_complete_through_subscription_adapters",
-          }
-          ignored = {test["name"] for suite in report["suites"] for test in suite["tests"] if test["outcome"] == "ignored"}
-          assert ignored <= allowed_opt_in, ignored - allowed_opt_in
+          # 只放行写明原因的手动用例（#[ignore = "..."]）：真实订阅冒烟要手动给 access token，
+          # programming_clients 要本机装好 Claude Code / Codex。按原因前缀而不是按名字放行——
+          # 名单曾写死旧用例名，改名、新增手动用例后这一步测试全过也照样红；没写原因或原因不对的 ignore 照旧拦下。
+          opt_in = ("real subscription smoke;", "requires OKAPI_TEST_")
+          ignored = [(test["name"], test.get("reason", "")) for suite in report["suites"] for test in suite["tests"] if test["outcome"] == "ignored"]
+          print(f"opt-in tests ignored: {len(ignored)}")
+          unexpected = [item for item in ignored if not item[1].startswith(opt_in)]
+          assert not unexpected, unexpected
           PY
       - name: 保存完整测试输出与验证报告
         if: always()
