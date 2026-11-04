@@ -1,6 +1,6 @@
 //! The same gateway bill must reach retained tool statistics without synthetic receipts.
 use super::{
-    Env, Protocol, anthropic_usage, record, report, request_with_tools, server_tool_fees,
+    Env, Protocol, anthropic_fixture, record, report, request_with_tools, server_tool_prices,
     setup_with_ch_database,
 };
 use futures::FutureExt as _;
@@ -47,7 +47,7 @@ const NORMAL: Amounts = Amounts {
 };
 
 fn usage(fetch: bool) -> Value {
-    let mut value = anthropic_usage::fixture();
+    let mut value = anthropic_fixture();
     value["server_tool_use"] = json!({"web_search_requests":2,"code_execution_requests":1});
     if fetch {
         value["server_tool_use"]["web_fetch_requests"] = json!(3);
@@ -201,10 +201,10 @@ async fn deliver(env: &Env, id: &str, kind: i16) -> Value {
 }
 
 async fn exercise(env: &Env, ingress: Protocol, stream: bool, fetch: bool, amounts: Amounts) {
-    let price = server_tool_fees::prices(&json!({
+    let price = server_tool_prices::prices(&json!({
         "billing":"additional","price_per_request_micro":10000
     }));
-    let epoch = server_tool_fees::activate(env, &price).await;
+    let epoch = server_tool_prices::activate(env, &price).await;
     let response = request_with_tools(
         env,
         ingress,
@@ -300,7 +300,7 @@ async fn publish_changed_price(env: &Env, epoch: i64) {
     let draft = post(env, "/admin/models", &json!({
         "model_name":env.model,"model_ratio":"1","completion_ratio":"2",
         "cache_ratio":"0.5","cache_write_ratio":"2",
-        "server_tool_prices":server_tool_fees::prices(&json!({"billing":"additional","price_per_request_micro":99999}))
+        "server_tool_prices":server_tool_prices::prices(&json!({"billing":"additional","price_per_request_micro":99999}))
     })).await;
     assert_eq!(draft["requires_publish"], true);
     let published = post(env, "/admin/pricing/publish", &json!({})).await;

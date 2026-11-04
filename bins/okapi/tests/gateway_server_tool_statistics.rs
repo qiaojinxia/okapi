@@ -1,0 +1,17 @@
+//! Retained server-tool statistics: the gateway bill of every ingress, JSON and SSE, must reach the portal and admin
+//! tool reports across raw-log loss, price changes and refunds. Split out of `gateway_usage_modalities`: every case
+//! builds a fresh ClickHouse database and the tool report query takes seconds to plan, so together they pushed that
+//! suite past the per-suite deadline of `scripts/test-isolated.py` on CI runners.
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
+mod published_pricing;
+
+#[allow(dead_code)] // shared harness: each suite uses a different subset
+#[path = "support/usage_modalities.rs"]
+mod usage_modalities;
+use usage_modalities::*;
+
+#[path = "support/server_tool_prices.rs"]
+mod server_tool_prices;
+
+#[path = "support/server_tool_gateway_statistics.rs"]
+mod server_tool_gateway_statistics;

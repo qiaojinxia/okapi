@@ -1,58 +1,7 @@
+pub(super) use super::anthropic_fixture as fixture;
 use super::{Env, Protocol, record, report, request, setup};
 use serde_json::{Value, json};
-use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
-
-pub(super) fn fixture() -> Value {
-    json!({"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":800,
-        "cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":0},
-        "output_tokens_details":{"thinking_tokens":20}})
-}
-
-pub(super) fn response(raw: &Value) -> (Value, String) {
-    let usage = raw.get("final").unwrap_or(raw);
-    let model = raw
-        .get("response_model")
-        .and_then(Value::as_str)
-        .unwrap_or("fixture");
-    let mut body = json!({"id":"msg_usage","type":"message","role":"assistant","model":model,
-        "content":[{"type":"text","text":"Hello"}],"stop_reason":"end_turn","usage":usage});
-    if let Some(content) = raw.get("content") {
-        body["content"] = content.clone();
-    }
-    let start = raw.get("start").unwrap_or(usage);
-    let updates = raw
-        .get("updates")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_else(|| vec![usage.clone()]);
-    let mut events = format!(
-        "event: message_start\ndata: {}\n\nevent: content_block_delta\ndata: {}\n\n",
-        json!({"type":"message_start","message":{"id":"msg_usage","type":"message","role":"assistant","model":model,"content":[],"usage":start}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}})
-    );
-    if let Some(content) = raw.get("content").and_then(Value::as_array) {
-        for (index, block) in content.iter().enumerate() {
-            write!(
-                events,
-                "event: content_block_start\ndata: {}\n\nevent: content_block_stop\ndata: {}\n\n",
-                json!({"type":"content_block_start","index":index,"content_block":block}),
-                json!({"type":"content_block_stop","index":index})
-            )
-            .unwrap();
-        }
-    }
-    for usage in updates {
-        write!(
-            events,
-            "event: message_delta\ndata: {}\n\n",
-            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":usage})
-        )
-        .unwrap();
-    }
-    events.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
-    (body, events)
-}
 
 async fn verify_totals(env: &Env) {
     let row = record(env).await;
