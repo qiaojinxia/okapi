@@ -22,7 +22,11 @@ use crate::profiles::identity::BETA_TOKEN_COUNTING;
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Claude Code 公开客户端 id（Anthropic 私有，可能变更）。
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -358,17 +362,36 @@ pub async fn messages(
     } else {
         merge_beta(Some(client_beta.as_str()))
     };
-    let mut headers: Vec<(String, String)> = vec![
-        ("authorization".to_owned(), bearer),
-        ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
-        ("anthropic-beta".to_owned(), beta),
-    ];
-    headers.extend(prepared.headers);
-    let header_refs: Vec<(&str, &str)> = headers
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    send_messages_at(http, url, &header_refs, body, stream, &outbound).await
+    let extra = prepared.headers;
+    let scope = refusal_scope(account_id, access_token);
+    let mut beta = drop_refused(&scope, &beta);
+    let mut retried = false;
+    loop {
+        let mut headers: Vec<(String, String)> = vec![
+            ("authorization".to_owned(), bearer.clone()),
+            ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
+            ("anthropic-beta".to_owned(), beta.clone()),
+        ];
+        headers.extend(extra.iter().cloned());
+        let header_refs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let result = send_messages_at(
+            http,
+            url.clone(),
+            &header_refs,
+            body.clone(),
+            stream,
+            &outbound,
+        )
+        .await;
+        if let Some(next) = refusal_retry(&scope, &beta, &result, &mut retried) {
+            beta = next;
+            continue;
+        }
+        return result;
+    }
 }
 
 /// `count_tokens`（同样要 Bearer + beta 头；系统提示不影响计数语义，照样前置以通过校验）。
@@ -399,23 +422,146 @@ pub async fn count_tokens(
     } else {
         merge_beta(Some(client_beta.as_str()))
     };
-    let mut req = http
-        .post(&outbound, url)?
-        .header("authorization", format!("Bearer {access_token}"))
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("anthropic-beta", beta)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .timeout(Duration::from_mins(2))
-        .body(body);
-    for (k, v) in prepared.headers {
-        req = req.header(k.as_str(), v.as_str());
+    let extra = prepared.headers;
+    let scope = refusal_scope(account_id, access_token);
+    let mut beta = drop_refused(&scope, &beta);
+    let mut retried = false;
+    loop {
+        let mut req = http
+            .post(&outbound, url.clone())?
+            .header("authorization", format!("Bearer {access_token}"))
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("anthropic-beta", beta.as_str())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .timeout(Duration::from_mins(2))
+            .body(body.clone());
+        for (k, v) in &extra {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = http.send(req, &outbound).await?;
+        let status = resp.status().as_u16();
+        let result = if (200..300).contains(&status) {
+            crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
+        } else {
+            Err(crate::openai::status_error(resp).await)
+        };
+        if let Some(next) = refusal_retry(&scope, &beta, &result, &mut retried) {
+            beta = next;
+            continue;
+        }
+        return result;
     }
-    let resp = http.send(req, &outbound).await?;
-    let status = resp.status().as_u16();
-    if !(200..300).contains(&status) {
-        return Err(crate::openai::status_error(resp).await);
+}
+
+/// 上游拒收的 beta（按账号，一小时）。真机碰到 400「Unexpected value(s) `x` for the `anthropic-beta` header」时把点名的
+/// beta 拉黑、之后的请求不再带（二进制里的 `requestLatches.refusedBetaHeaders`）；同一个 beta 是否被接受取决于端点与组织，
+/// 抓包里看不出来，所以这里也按真机的办法自愈：去掉点名的 beta 重发一次，并记住，之后一小时这个账号一开始就不带。
+static REFUSED_BETAS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const REFUSED_BETA_TTL: Duration = Duration::from_mins(60);
+
+/// 拉黑记录的归属：账号 UUID；没有（只导入了 token）就用 token 的哈希，不存 token 本身。
+fn refusal_scope(account_id: Option<&str>, access_token: &str) -> String {
+    account_id.map_or_else(
+        || {
+            let mut hasher = DefaultHasher::new();
+            access_token.hash(&mut hasher);
+            format!("token:{:016x}", hasher.finish())
+        },
+        str::to_owned,
+    )
+}
+
+/// 400 体里被点名的 beta（`Unexpected value(s) `a`, `b` for the `anthropic-beta` header`）。
+fn refused_betas(body: &[u8]) -> Vec<String> {
+    const TAIL: &str = " for the `anthropic-beta` header";
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(message) = value["error"]["message"].as_str() else {
+        return Vec::new();
+    };
+    let Some((_, rest)) = message.split_once("Unexpected value(s) ") else {
+        return Vec::new();
+    };
+    let Some((list, _)) = rest.split_once(TAIL) else {
+        return Vec::new();
+    };
+    list.split(',')
+        .map(|name| name.trim().trim_matches('`').to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn beta_parts(beta: &str) -> impl Iterator<Item = &str> {
+    beta.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+}
+
+/// 这个账号当前被拉黑的 beta 先去掉（必备的三个不动：缺了订阅路径本身就过不了）。
+fn drop_refused(scope: &str, beta: &str) -> String {
+    let refused = REFUSED_BETAS.lock().unwrap_or_else(PoisonError::into_inner);
+    beta_parts(beta)
+        .filter(|part| {
+            REQUIRED_BETAS.contains(part)
+                || refused
+                    .get(&(scope.to_owned(), (*part).to_owned()))
+                    .is_none_or(|since| since.elapsed() >= REFUSED_BETA_TTL)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 400 点名了本次请求里非必备的 beta：记下并返回去掉它们的 beta 串；点名的都不在请求里（或是必备的）就是别的 400，不重发。
+fn resend_without_refused(scope: &str, beta: &str, body: &[u8]) -> Option<String> {
+    let named = refused_betas(body);
+    let sent: Vec<&str> = beta_parts(beta).collect();
+    let dropped: Vec<&String> = named
+        .iter()
+        .filter(|name| sent.contains(&name.as_str()) && !REQUIRED_BETAS.contains(&name.as_str()))
+        .collect();
+    if dropped.is_empty() {
+        return None;
     }
-    crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
+    {
+        let mut refused = REFUSED_BETAS.lock().unwrap_or_else(PoisonError::into_inner);
+        refused.retain(|_, since| since.elapsed() < REFUSED_BETA_TTL);
+        for name in &dropped {
+            refused.insert((scope.to_owned(), (*name).clone()), Instant::now());
+        }
+    }
+    tracing::warn!(
+        refused = ?dropped,
+        "upstream refused anthropic-beta values; resending without them and leaving them out for an hour"
+    );
+    Some(
+        sent.into_iter()
+            .filter(|part| !dropped.iter().any(|name| name.as_str() == *part))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// 被点名拒收 beta 的 400：返回去掉它们的 beta 串，让调用方重发；只重发一次（还是 400 就是别的问题，交回上层）。
+fn refusal_retry<T>(
+    scope: &str,
+    beta: &str,
+    result: &Result<T, UpstreamError>,
+    retried: &mut bool,
+) -> Option<String> {
+    if *retried {
+        return None;
+    }
+    let Err(UpstreamError::Status {
+        status: 400, body, ..
+    }) = result
+    else {
+        return None;
+    };
+    let next = resend_without_refused(scope, beta, body)?;
+    *retried = true;
+    Some(next)
 }
 
 #[cfg(test)]
