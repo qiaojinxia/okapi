@@ -143,12 +143,14 @@ pub(super) fn sql(q: &StatisticsQuery) -> Result<(String, Bindings), StoreError>
         Granularity::Day => "toString(toDate(minute,{tool_zone:String}))",
         Granularity::Hour => "toString(toUnixTimestamp(toStartOfHour(minute)))",
     };
-    // `view()` isolates reused aggregate-state column hashes in ClickHouse 24.8.
+    // `view()` isolates reused subtrees in ClickHouse 24.8, whose analyzer rehashes a plain
+    // subquery's whole tree for every outer column reference: the aggregate-state sources and
+    // the raw JSON projection (inlined, the raw recovery alone cost ~2 s of planning per read).
     let sql = format!(
         "WITH e AS (SELECT * FROM view(SELECT {keys},toInt128(countMerge(requests)) AS expected_calls,toInt128(countMerge(financial_records)) AS expected_records FROM mv_analysis_hour WHERE {coarse} GROUP BY {keys})), \
          a AS (SELECT * FROM view(SELECT toStartOfHour(minute) AS hour,{DIMENSIONS},toInt128(countMerge(calls)) AS source_calls,toInt128(countMerge(financial_records)) AS source_records,{source_counts} FROM server_tool_minute_v1 WHERE toStartOfHour(minute)>=toStartOfHour(toTimeZone({start},'UTC')) AND toStartOfHour(minute)<toStartOfHour(toTimeZone({end}-INTERVAL 1 SECOND,'UTC'))+INTERVAL 1 HOUR AND {scope} GROUP BY {keys})), \
          missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE expected_records!=source_records OR source_web_search_fee_observed<source_records OR source_web_fetch_fee_observed<source_records), \
-         raw_facts AS (SELECT minute,toStartOfHour(minute) AS hour,{DIMENSIONS},{raw_sum} FROM ({raw}) WHERE (hour,{DIMENSIONS}) IN (SELECT {keys} FROM missing) AND {scope} GROUP BY minute,{keys}), \
+         raw_facts AS (SELECT minute,toStartOfHour(minute) AS hour,{DIMENSIONS},{raw_sum} FROM view({raw}) WHERE (hour,{DIMENSIONS}) IN (SELECT {keys} FROM missing) AND {scope} GROUP BY minute,{keys}), \
          r AS (SELECT {keys},sum(calls) AS raw_calls,sum(records) AS raw_n,{raw_counts} FROM raw_facts GROUP BY {keys}), \
          mode AS (SELECT {keys},expected_calls,expected_records,\
              ((source_records!=expected_records AND raw_n>source_records) OR {richer_raw}) AS use_raw,\
