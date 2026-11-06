@@ -39,6 +39,18 @@ const OBSERVATION_MAX_AGE_SECS: i64 = okapi_providers::account::quota::MAX_AGE_S
 /// 失败退避：2、4、8…分钟，封顶 1 小时；成功即清零。
 const BACKOFF_BASE_SECS: i64 = 120;
 const BACKOFF_MAX_SECS: i64 = 3600;
+/// 账号所在组织对额度端点说 403（`permission_error`，如 `oauth_not_allowed_for_organization`）：这是组织策略、不是抖动，
+/// 一小时后重试多半还是同一个答案——六小时试一次就够，免得日志里一天十几条同样的告警。
+const PERMISSION_BACKOFF_SECS: i64 = 6 * 3600;
+
+fn permission_denied(error: &okapi_providers::UpstreamError) -> bool {
+    matches!(
+        error,
+        okapi_providers::UpstreamError::Status { status: 403, body, .. }
+            if String::from_utf8_lossy(body).contains("permission_error")
+                || String::from_utf8_lossy(body).contains("oauth_not_allowed_for_organization")
+    )
+}
 
 fn backoff_secs(failures: i64, retry_after: Option<i64>) -> i64 {
     let exponent = u32::try_from(failures.saturating_sub(1).clamp(0, 10)).unwrap_or(10);
@@ -385,7 +397,11 @@ async fn back_off(state: &AppState, key: i64, error: &okapi_providers::UpstreamE
         .incr_by_with_ttl(&format!("quota:fail:ck:{key}"), 1, BACKOFF_MAX_SECS * 2)
         .await
         .unwrap_or(1);
-    let delay = backoff_secs(failures, error.retry_after_secs());
+    let delay = if permission_denied(error) {
+        PERMISSION_BACKOFF_SECS
+    } else {
+        backoff_secs(failures, error.retry_after_secs())
+    };
     let _: Result<bool, _> = state
         .sched
         .client()
@@ -427,7 +443,29 @@ async fn api_base(
 
 #[cfg(test)]
 mod tests {
-    use super::backoff_secs;
+    use super::{backoff_secs, permission_denied};
+    use okapi_providers::UpstreamError;
+
+    fn status(status: u16, body: &str) -> UpstreamError {
+        UpstreamError::Status {
+            status,
+            body: bytes::Bytes::from(body.to_owned()),
+            retry_after_secs: None,
+        }
+    }
+
+    #[test]
+    fn an_organization_that_forbids_oauth_is_policy_not_jitter() {
+        let denied = r#"{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}}}"#;
+        assert!(permission_denied(&status(403, denied)));
+        assert!(!permission_denied(&status(
+            403,
+            "<html>forbidden by cdn</html>"
+        )));
+        assert!(!permission_denied(&status(401, denied)));
+        assert!(!permission_denied(&status(500, denied)));
+        assert!(!permission_denied(&UpstreamError::Timeout));
+    }
 
     #[test]
     fn failures_back_off_exponentially_and_honor_longer_retry_after() {
