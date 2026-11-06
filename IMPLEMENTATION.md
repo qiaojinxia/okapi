@@ -3593,6 +3593,32 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
 
 `ChannelsPage.tsx` 手上有未提交的改动，没动；等它落地再把 8 个 mutation 收成 `useChannelActions`。
 
+### 11.70 线上日志排查（2026-11-06）：被拒 beta 自愈、count_tokens 换候选、两处告警噪声
+
+读第 32 次部署之后的应用日志（WARN 以上）加 ClickHouse 请求日志，逐条归因。起因是线上一度出现订阅账号的 `count_tokens` 被上游以
+「未知 beta」400 拒绝、网关回 502；顺着这条链路收拾了同类的几处，另有两处纯噪声（没人受影响，但淹没真正要紧的告警）。
+
+- **订阅适配器：被点名拒收的 beta 去掉重发并记住**：同一个 beta 是否被接受取决于端点与组织，抓包里看不出来。真机自己有一份「被拒 beta」闩锁
+  （二进制里的 `requestLatches.refusedBetaHeaders`），碰到 400「Unexpected value(s) `x` for the `anthropic-beta` header」就把点名的 beta 去掉重发、
+  之后不再带。`anthropic_max` 的 `messages` 与 `count_tokens` 现在照做：点名了本次请求里**非必备**的 beta（必备的 `claude-code` / `oauth` /
+  `interleaved-thinking` 永不拉黑，缺了订阅路径本身就过不了）时，去掉它们重发**一次**，并按账号记一小时（账号 UUID；只导入了 token 的用 token 哈希，不存 token 本身）；
+  之后一小时这个账号一开始就不带。点名的东西不在请求里的 400、重发后仍 400 的，原样交回调用方。一个被拒的 beta 不该变成客户端可见的错误。
+- **`count_tokens` 一个候选失败就整体 502**：原先只取第一个放行的 Anthropic 候选，任何失败都是 502。一个账号的组织禁用 OAuth（403
+  `oauth_not_allowed_for_organization`）会让所有计数失败，哪怕另一个账号能答。现在最多试三个候选；全部失败且每个都是「端点不存在」（404 / 405 / 501）就回
+  **501**（真机收到 501 会改用一个 token 的采样计数，而不是粗估），其余仍是 502；请求体本身改写不了（本地就能判断的 400）立即回、不换候选；
+  上游 200 回网页的 502 不变（可能先换候选再 502）。仍然不返回估算值（"不给假数"的约束没动）。
+- **用量端点被组织拒绝后每小时重试**：同一个 403 `oauth_not_allowed_for_organization` 也出现在额度观测上——这是组织策略，不是抖动，等到一小时的退避上限再试仍是同样的答案，
+  同一个 key 每两小时记六条 warning。现在 permission_error 类的 403 之后下一次尝试等**六小时**，其余失败仍走指数退避（120 秒起翻倍、上限一小时）。
+- **没人用的死代理每十分钟一条 warn**：代理 3 不通了、也没有渠道用它，出口探测每十分钟记一条 warning（上次看已连续失败 53 轮）。现在没有渠道使用的代理在第 1、3 轮
+  和每 36 轮（约六小时）warn，其余记 debug；有渠道在用的代理仍每轮 warn；`egress_down` 通知不变。
+
+没动的：①11-04 一次 `claude-sonnet-5-5` 的 400「To turn thinking off on this model, send thinking {type: between_tools}」只出现一次，等再现、知道是哪类请求触发再决定要不要反应式重试；
+②代理 3 本身该停用或删除，归用户；③渠道 1 的组织级 OAuth 限制是外部原因（现在计数会换账号、额度观测六小时才问一次）。
+
+**验收**：`tests/anthropic_beta_refusal.rs`（脚本化的本地服务端：重发一次并按账号记住、别的账号不受影响、其它 400 原样交回）、
+`gateway_non_json_200` 的 `count_tokens_fails_over_when_the_first_account_is_refused` 与 `count_tokens_reports_a_missing_endpoint_as_501_and_other_refusals_as_502`
+（原有的网页 502 用例不变）、`quota` 与 `egress_probe` 各一个单测；变异检查：不重发 / 首个失败即返回 / 缺端点仍 502 三处各被对应用例咬住。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
