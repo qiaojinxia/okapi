@@ -7,6 +7,7 @@ mod published_pricing;
 
 use axum::Router;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use okapi_domain::Money;
@@ -70,7 +71,33 @@ async fn good_count_tokens(State(hits): State<Hits>) -> axum::response::Response
     axum::Json(json!({"input_tokens": 42})).into_response()
 }
 
-/// `/good/…` 是正常的 API，其余一切（包括 `/page/…`）都是网页前端。
+/// 账号所在组织不许 OAuth：count_tokens / 额度端点回 403（线上渠道 1，2026-11-06）。
+async fn denied_count_tokens(State(hits): State<Hits>) -> axum::response::Response {
+    hits.lock().unwrap().push("denied count_tokens".to_owned());
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(
+            json!({"type": "error", "error": {"type": "permission_error",
+            "message": "OAuth authentication is currently not allowed for this organization.",
+            "details": {"error_code": "oauth_not_allowed_for_organization"}}}),
+        ),
+    )
+        .into_response()
+}
+
+/// 中转站没有这个端点（new-api 一类）：404。
+async fn gone_count_tokens(State(hits): State<Hits>) -> axum::response::Response {
+    hits.lock().unwrap().push("gone count_tokens".to_owned());
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(
+            json!({"type": "error", "error": {"type": "not_found_error", "message": "Not Found"}}),
+        ),
+    )
+        .into_response()
+}
+
+/// `/good/…` 是正常的 API，`/denied/…` 与 `/gone/…` 只有 count_tokens 且拒绝 / 不存在，其余一切（包括 `/page/…`）都是网页前端。
 async fn spawn_site() -> (SocketAddr, Hits) {
     let hits = Hits::default();
     let router = Router::new()
@@ -78,6 +105,11 @@ async fn spawn_site() -> (SocketAddr, Hits) {
         .route("/good/v1/chat/completions", post(good_chat))
         .route("/good/v1/embeddings", post(good_embeddings))
         .route("/good/v1/messages/count_tokens", post(good_count_tokens))
+        .route(
+            "/denied/v1/messages/count_tokens",
+            post(denied_count_tokens),
+        )
+        .route("/gone/v1/messages/count_tokens", post(gone_count_tokens))
         .fallback(web_front)
         .with_state(Arc::clone(&hits));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -339,6 +371,53 @@ async fn count_tokens_does_not_invent_a_zero_for_a_web_page() {
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["input_tokens"], 42, "正常的 JSON 原样回");
+}
+
+/// 第一个账号被上游拒绝（组织不许 OAuth 的 403、beta 被拒的 400……）：换下一个候选，而不是直接给客户端 502
+/// （线上 2026-11-06 19:56，count_tokens 一律 502、日志里一条 ERROR 一条 WARN）。
+#[tokio::test]
+async fn count_tokens_fails_over_when_the_first_account_is_refused() {
+    let env = setup("anthropic", &[("/denied/v1", 10), ("/good/v1", 0)]).await;
+    let response = post_messages(&env, "/v1/messages/count_tokens").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["input_tokens"], 42);
+    assert_eq!(
+        env.hits.lock().unwrap().as_slice(),
+        ["denied count_tokens", "good count_tokens"]
+    );
+}
+
+/// 全部候选都拒绝：403 之类照旧 502；上游说「没有这个端点」（404 / 405 / 501）回 501——
+/// 真机 Claude Code 对网关的 501 会改用一次 1 token 的采样来数，比 502 后只能粗估准。
+#[tokio::test]
+async fn count_tokens_reports_a_missing_endpoint_as_501_and_other_refusals_as_502() {
+    let denied = setup("anthropic", &[("/denied/v1", 0)]).await;
+    assert_eq!(
+        post_messages(&denied, "/v1/messages/count_tokens")
+            .await
+            .status(),
+        502
+    );
+    let gone = setup("anthropic", &[("/gone/v1", 0)]).await;
+    assert_eq!(
+        post_messages(&gone, "/v1/messages/count_tokens")
+            .await
+            .status(),
+        501
+    );
+    // 一个 404 一个 403：不全是「没有这个端点」，回 502
+    let mixed = setup("anthropic", &[("/gone/v1", 10), ("/denied/v1", 0)]).await;
+    assert_eq!(
+        post_messages(&mixed, "/v1/messages/count_tokens")
+            .await
+            .status(),
+        502
+    );
+    assert_eq!(
+        mixed.hits.lock().unwrap().as_slice(),
+        ["gone count_tokens", "denied count_tokens"]
+    );
 }
 
 /// embeddings / rerank 共用的候选循环：网页当失败换下一个，只为成功的那次付费（120 × $2/1M = 240 micro）。

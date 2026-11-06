@@ -18,7 +18,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 /// Anthropic `POST /v1/messages/count_tokens`：鉴权 + 模型可见，**不计费**。
-/// 有 anthropic 候选则代理上游 tokenizer；否则本地估算（Claude Code 缺此端点会退本地）。
+/// 有 anthropic 候选则代理上游 tokenizer（一个被拒就换下一个）；没有候选才本地估算（Claude Code 缺此端点会退本地）。
 pub async fn messages_count_tokens(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -88,11 +88,19 @@ pub(super) async fn count_tokens_inner(
     // 换下一个——不计费的旁路同样占用账号，同模型下别的 key 空闲时不该整体 429；
     // 能用的候选都挡在限速上才报限速，全被账号准入挡住（或根本没有 anthropic 候选）就退本地估算
     let mut limited = None;
+    // 上游拒绝（账号所在组织不许 OAuth 的 403、beta 被拒的 400……）就换下一个候选，最多试三个；
+    // 全部失败且都是「没有这个端点」（404 / 405 / 501）才回 501：真机 Claude Code 对网关的 501 会改用一次 1 token 的采样来数
+    let mut failed = false;
+    let mut unsupported = true;
+    let mut attempts = 0;
     let candidates = order_candidates(rows)
         .into_iter()
         .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"))
         .filter(|c| counts_for(c, headers));
     for cand in candidates {
+        if attempts == MAX_COUNT_ATTEMPTS {
+            break;
+        }
         if super::super::account_control::admit(state, cand.channel_id, Some(cand.channel_key_id))
             .await
             .is_err()
@@ -111,8 +119,26 @@ pub(super) async fn count_tokens_inner(
             limited = Some("channel_concurrency");
             continue;
         };
-        return count_via_upstream(state, headers, &key, &cand, &canonical, &probe.model, &body)
-            .await;
+        attempts += 1;
+        match count_via_upstream(state, headers, &key, &cand, &canonical, &probe.model, &body).await
+        {
+            Ok(response) => return Ok(response),
+            Err(CountFailure::Request(error)) => return Err(error),
+            Err(CountFailure::Upstream {
+                unsupported: is_unsupported,
+            }) => {
+                failed = true;
+                unsupported &= is_unsupported;
+            }
+        }
+    }
+    if failed {
+        return Err(if unsupported {
+            AppError::new(StatusCode::NOT_IMPLEMENTED, codes::UPSTREAM_ERROR)
+                .with_param("input_tokens_unsupported")
+        } else {
+            AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+        });
     }
     if let Some(param) = limited {
         return Err(
@@ -124,6 +150,15 @@ pub(super) async fn count_tokens_inner(
     Ok(axum::Json(serde_json::json!({ "input_tokens": tokens })).into_response())
 }
 
+/// 一个候选没数成的原因：请求本身有问题（不必换候选）/ 上游拒绝（换下一个；`unsupported` = 上游说没有这个端点）。
+pub(super) enum CountFailure {
+    Request(AppError),
+    Upstream { unsupported: bool },
+}
+
+/// 一次 count_tokens 最多试几个候选。
+const MAX_COUNT_ATTEMPTS: usize = 3;
+
 /// 用选中的 anthropic 候选的凭证打上游 tokenizer（调用方持有渠道并发许可）。
 pub(super) async fn count_via_upstream(
     state: &AppState,
@@ -133,10 +168,10 @@ pub(super) async fn count_via_upstream(
     canonical: &str,
     requested_model: &str,
     body: &Bytes,
-) -> Result<Response, AppError> {
+) -> Result<Response, CountFailure> {
     let upstream_model = cand.upstream_model(canonical).to_owned();
     let body_up = rewrite_model(body, requested_model, &upstream_model)
-        .map_err(|_| AppError::bad_request())?;
+        .map_err(|_| CountFailure::Request(AppError::bad_request()))?;
     let base = cand
         .api_base
         .clone()
@@ -178,10 +213,9 @@ pub(super) async fn count_via_upstream(
         Ok(value) => Ok(axum::Json(value).into_response()),
         Err(error) => {
             log_count_upstream_failure(cand, &error);
-            Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                codes::UPSTREAM_ERROR,
-            ))
+            Err(CountFailure::Upstream {
+                unsupported: matches!(error.upstream_status(), Some(404 | 405 | 501)),
+            })
         }
     }
 }
