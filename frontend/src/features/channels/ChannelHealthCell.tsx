@@ -123,15 +123,22 @@ export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabl
   )
 }
 
-/// 状态列的明细行：左列短标签说明是什么，右列是值。放在 `<dl>` 两列网格里，标签自然对齐。
+/// 状态列的补充短行：图标和值放在同一内容列，与上方的延迟左对齐；标签保留给读屏与悬停。
 /// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看状态点，明细只在异常时抢眼。
 export function StatusLine({ label, title, icon: Icon, children }: { label: string; title?: string; icon?: LucideIcon; children: ReactNode }) {
   return (
     <>
-      <dt className="flex h-5 items-center whitespace-nowrap text-xs leading-5 text-muted-foreground/75" title={label}>
-        {Icon ? <><Icon aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} /><span className="sr-only">{label}</span></> : label}
+      <dt className="flex h-5 items-center whitespace-nowrap text-xs leading-5 text-muted-foreground/75">
+        <span className="sr-only">{label}</span>
       </dt>
-      <dd className="min-w-0 whitespace-nowrap leading-5" title={title}>{children}</dd>
+      <dd className="flex min-w-0 items-center gap-1.5 whitespace-nowrap leading-5" title={title}>
+        {Icon && (
+          <span className="inline-flex shrink-0 text-muted-foreground/70" title={label}>
+            <Icon aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
+          </span>
+        )}
+        {children}
+      </dd>
     </>
   )
 }
@@ -180,7 +187,7 @@ export function LastBalance({ balance }: { balance: ChannelBalance | null | unde
         <Wallet aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
         <span className="sr-only">{t('admin:channelBalanceLabel')}</span>
       </span>
-      <span className={cn('text-[15px] font-semibold tracking-[-0.015em] tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
+      <span className={cn('text-sm font-semibold tracking-normal tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
         {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language)}
       </span>
       <span className="ml-auto text-xs text-muted-foreground/70 tabular-nums">{stampOf(when)}</span>
@@ -223,7 +230,7 @@ export function Health24h({
     <>
       <button
         type="button"
-        className="-mx-1 rounded px-1 whitespace-nowrap underline-offset-2 hover:bg-muted/60 hover:underline"
+        className="rounded whitespace-nowrap underline-offset-2 hover:bg-muted/60 hover:underline"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >
@@ -293,7 +300,7 @@ export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) 
         {t('admin:channelUsageTokens', { n: compact.format(total) })}
       </span>
       {' '}
-      <span className="ml-auto text-base font-semibold tracking-[-0.025em] text-foreground">
+      <span className="ml-auto text-sm font-semibold tracking-normal text-foreground">
         {formatMoneyAggregate(usage.amount_micro, lang)}
       </span>
     </span>

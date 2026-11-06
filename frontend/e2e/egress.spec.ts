@@ -157,11 +157,13 @@ test('全局默认出口在系统设置：代理页页头直达「出口代理�
   await expect(row).toContainText('jp-1')
 })
 
-test('渠道：出口在编辑抽屉里维护，列表不重复；编辑抽屉单独保存出口；批量设置出口', async ({ page }) => {
+test('渠道：列表只列出口目标名，类型在悬停提示里；编辑抽屉单独保存出口；批量设置出口', async ({ page }) => {
   await prepare(page, '/admin/channels')
   const row = page.getByRole('row').filter({ hasText: 'claude-max-a' })
-  // 列表只保留扫读所需的健康信息：出口明细不再列在状态列里，抽屉里才有
-  await expect(row).not.toContainText('代理 hk-1')
+  await expect(row.getByTitle('代理 hk-1', { exact: true })).toHaveText('hk-1')
+  // 状态列短行的标签挂在图标上：左边的标签格是空的，挂在那里鼠标碰不到
+  await expect(row.getByTitle('出口', { exact: true }).locator('svg')).toHaveCount(1)
+  await expect(row.getByTitle('近 24h', { exact: true }).locator('svg')).toHaveCount(1)
 
   let bound: Json | undefined
   await page.route('**/admin/channels/42/egress', async (route) => {
@@ -192,6 +194,18 @@ test('渠道：出口在编辑抽屉里维护，列表不重复；编辑抽屉�
   await batchDrawer.locator('#batch-egress-mode').selectOption('direct')
   await batchDrawer.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => batch).toEqual({ ids: [42], action: 'set_egress', egress: { mode: 'direct' } })
+})
+
+test('渠道：出口是代理组时，列表只列组名，类型与分配方式在悬停提示里', async ({ page }) => {
+  await prepare(page, '/admin/channels')
+  await page.route((url) => url.pathname === '/admin/channels', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    return route.fulfill({ json: { data: [{ ...channel, egress: { mode: 'group', group_code: 'hk' } }], total: 1, enabled: 1 } })
+  })
+  await page.reload()
+  const row = page.getByRole('row').filter({ hasText: 'claude-max-a' })
+  await expect(row.getByTitle('代理组 香港固定（固定分配）', { exact: true })).toHaveText('香港固定')
+  await expect(row).not.toContainText('代理组')
 })
 
 test('批量导入：按行提交、带上缺省协议与统一设置，逐行回显跳过原因', async ({ page }) => {

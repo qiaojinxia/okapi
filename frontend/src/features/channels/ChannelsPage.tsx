@@ -39,6 +39,8 @@ import {
 } from '@/features/channels/ChannelHealthCell'
 import { RouteDiagnosisDrawer } from '@/features/channels/RouteDiagnosis'
 import { BatchEgressDrawer } from '@/features/channels/ChannelEgress'
+import { describeEgress } from '@/features/proxies/EgressPicker'
+import { proxyGroupOptions, proxyOptions } from '@/features/proxies/options'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Menu, MenuItem, MenuSeparator } from '@/components/ui/menu'
@@ -100,6 +102,9 @@ export function ChannelsPage() {
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
   const [batchEgress, setBatchEgress] = useState(false)
+  // 行内出口只显示图标与目标名称；目录整表缓存，列表翻页不重拉。
+  const proxies = useQuery(proxyOptions())
+  const proxyGroups = useQuery(proxyGroupOptions())
   const [testingId, setTestingId] = useState<number | null>(null)
   const [balancingId, setBalancingId] = useState<number | null>(null)
   const { confirm, dialog } = useConfirm()
@@ -285,6 +290,16 @@ export function ChannelsPage() {
   const filtered = query !== '' || providerFilter !== '' || statusFilter !== ''
   const applySearch = () => setFilters({ q: draft })
   const clearFilters = () => setFilters({ q: '', provider: '', status: '' })
+  const egressLabel = (c: ChannelRow) => {
+    const egress = c.egress
+    if (egress?.mode === 'proxy') {
+      return proxies.data?.find((proxy) => proxy.id === egress.proxy_id)?.name ?? `#${egress.proxy_id}`
+    }
+    if (egress?.mode === 'group') {
+      return proxyGroups.data?.find((group) => group.code === egress.group_code)?.name ?? egress.group_code
+    }
+    return describeEgress(t, egress, proxies.data, proxyGroups.data)
+  }
 
   const togglePick = (id: number) =>
     setPicked((prev) => {
@@ -442,8 +457,8 @@ export function ChannelsPage() {
                 <Td className="py-3 align-top">
                   <ChannelNameCell channel={c} />
                 </Td>
-                {/* 渠道"启用"≠ 能打：首行是状态点（key 状态机汇总）+ 最近一次测试，
-                    第二行只保留近 24h 健康；凭证与出口明细留在编辑抽屉，列表不重复展示。 */}
+                {/* 首行回答“现在能不能打”；下面用图标短行补充近 24h 与显式出口。
+                    凭证到期属于编辑详情，不占列表的扫读空间。 */}
                 <Td className="py-3 align-top">
                   <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2.5 gap-y-0.5 text-foreground/90">
                     <dt>
@@ -465,6 +480,13 @@ export function ChannelsPage() {
                         channel={{ id: c.id, name: c.name, provider: c.provider }}
                       />
                     </StatusLine>
+                    {c.egress !== undefined && c.egress.mode !== 'inherit' && (
+                      <StatusLine label={t('admin:channelStatusEgress')} icon={Globe} title={describeEgress(t, c.egress, proxies.data, proxyGroups.data)}>
+                        <span className={cn((c.egress.mode === 'proxy' || c.egress.mode === 'group') && 'text-xs text-muted-foreground', c.egress.mode === 'proxy' && 'font-mono')}>
+                          {egressLabel(c)}
+                        </span>
+                      </StatusLine>
+                    )}
                   </dl>
                 </Td>
                 {/* 用量窗口：近 30 天用量一行 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}

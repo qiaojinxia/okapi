@@ -290,10 +290,10 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / �
   await expect(state.locator('dd').first()).toContainText('10-16 22:06')
   await expect(state).toContainText('近 24h')
   await expect(state).toContainText('0.0% 错误 · 1 次')
-  // 列表只保留扫读所需的健康信息；凭证与出口在编辑抽屉里维护
+  // 凭证不占列表；出口压缩为地球图标 + 代理名，不再重复“代理”文字
   await expect(state).not.toContainText('凭证')
   await expect(state).not.toContainText('10-24 01:50 到期')
-  await expect(state).not.toContainText('出口')
+  await expect(state).toContainText('216.167.15.231')
   await expect(state).not.toContainText('代理 216.167.15.231')
   // 旧的「测试」标签行已并进第一行
   await expect(state.locator('dt', { hasText: /^测试$/ })).toHaveCount(0)
@@ -356,7 +356,7 @@ test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复
 
   const openai = rowOf(page, 'openai-main')
   await expect(openai).toContainText('未入池')
-  await expect(openai).not.toContainText('直连')
+  await expect(openai).toContainText('直连')
   // 上游余额：带标签，不和上面的计费金额混在一起
   await expect(openai).toContainText('余额')
   await expect(openai).toContainText('US$12.34')
