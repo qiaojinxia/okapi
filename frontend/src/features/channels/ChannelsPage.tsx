@@ -438,9 +438,11 @@ export function ChannelsPage() {
                   }
                 />
               </Th>
-              <Th className="w-[28%] min-w-60">{t('admin:channelsTitle')}</Th>
-              <Th className="w-[29%] min-w-56">{t('common:status')}</Th>
-              <Th className="w-[30%] min-w-64">{t('admin:channelColUsage')}</Th>
+              {/* 窄屏（表格 < 约 1100px）四列按比例分，谁都不富余；宽屏时状态列定宽（够放「胶囊 + 延迟 + 时间」），
+                  用量列吃掉剩下的——额度条是唯一能拉长的内容，长一点比列与列之间留出一大块空白好看。 */}
+              <Th className="w-[28%] min-w-60 min-[1420px]:w-[27%]">{t('admin:channelsTitle')}</Th>
+              <Th className="w-[29%] min-w-56 min-[1420px]:w-[17.5rem]">{t('common:status')}</Th>
+              <Th className="w-[30%] min-w-64 min-[1420px]:w-auto">{t('admin:channelColUsage')}</Th>
               <Th className="w-[9%] min-w-36 pr-5 text-right">{t('admin:channelColActions')}</Th>
             </Tr>
           </THead>
@@ -495,7 +497,7 @@ export function ChannelsPage() {
                 </Td>
                 {/* 用量窗口：近 30 天用量一行 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}
                 <Td className="py-3 align-top">
-                  <div className="flex w-full flex-col items-start gap-2.5">
+                  <div className="flex w-full max-w-[38rem] flex-col items-start gap-2.5">
                     <ChannelUsage usage={usage.data?.data.find((u) => u.channel_id === c.id)} />
                     {c.status === 1 && <ChannelQuotaCell channelId={c.id} provider={c.provider} />}
                     <LastBalance balance={c.last_balance} />

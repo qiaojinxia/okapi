@@ -66,6 +66,8 @@ function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'de
     <span
       className={cn(
         'inline-flex min-h-6 items-center rounded-md px-2 py-0.5 text-xs leading-4 font-semibold whitespace-nowrap',
+        // 宽屏等宽：「正常」「1/2 可用」「没有 key」宽度各不相同，胶囊右边的文字列起点就逐行错位；窄屏省下这点宽度给文字
+        'min-[1420px]:min-w-[4.75rem] min-[1420px]:justify-center',
         'before:mr-1.5 before:inline-block before:size-1.5 before:shrink-0 before:rounded-full before:bg-current before:content-[""]',
         color,
         surface,
@@ -291,8 +293,8 @@ export function useChannelUsage() {
   })
 }
 
-/// 近 30 天用量一行：请求数 · token · 计费金额（金额是这行的重点，用前景色），
-/// 悬停看输入 / 缓存 / 输出明细与上游成本。
+/// 近 30 天用量一行：计费金额打头（这行的重点，用前景色），后面跟请求数 · token，
+/// 悬停看输入 / 缓存 / 输出明细与上游成本。金额放在左边、紧挨着它的说明：列变宽时金额靠右会和计数隔出一大块空白。
 export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) {
   const { t, i18n } = useTranslation()
   if (!usage || usage.requests === 0) return null
@@ -309,15 +311,15 @@ export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) 
   })
   const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
   return (
-    <span className="flex w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={detail}>
+    <span className="flex w-full flex-wrap items-baseline gap-x-2.5 gap-y-0.5 whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={detail}>
+      <span className="text-sm font-semibold tracking-normal text-foreground">
+        {formatMoneyAggregate(usage.amount_micro, lang)}
+      </span>
+      {' '}
       <span>
         {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
         {' · '}
         {t('admin:channelUsageTokens', { n: compact.format(total) })}
-      </span>
-      {' '}
-      <span className="ml-auto text-sm font-semibold tracking-normal text-foreground">
-        {formatMoneyAggregate(usage.amount_micro, lang)}
       </span>
     </span>
   )

@@ -298,9 +298,9 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / �
   // 旧的「测试」标签行已并进第一行
   await expect(state.locator('dt', { hasText: /^测试$/ })).toHaveCount(0)
 
-  // 用量窗口：计数一行（金额是重点）+ 额度窗口条
-  await expect(alice).toContainText('2,085 次 · 6.4亿 tokens US$314.68')
-  await expect(alice).not.toContainText('tokens · US$314.68')
+  // 用量窗口：第一行金额打头（重点）、后面跟计数，再是额度窗口条
+  await expect(alice).toContainText('US$314.68 2,085 次 · 6.4亿 tokens')
+  await expect(alice).not.toContainText('US$314.68 ·')
   const fiveHour = alice.getByRole('progressbar', { name: '5小时额度用量' })
   const sevenDay = alice.getByRole('progressbar', { name: '7天额度用量' })
   await expect(fiveHour).toHaveAttribute('aria-valuenow', '0')
@@ -343,7 +343,7 @@ test('渠道列表：额度条只用红黄绿三种颜色；账号与渠道名�
   await expect(carol.getByRole('progressbar', { name: '7天额度用量' }).locator('div')).toHaveClass(/bg-warning/)
 })
 
-test('渠道列表：各行额度条起止对齐，剩余时长靠右与金额右缘齐平，勾选框与名称同高', async ({ page }) => {
+test('渠道列表：各行额度条起止对齐，剩余时长靠右且各行右缘一致，勾选框与名称同高', async ({ page }) => {
   await prepare(page)
   // 三个订阅渠道共 6 个额度窗口。每个渠道一张自己的网格，剩余时长列有下限，所以不论是「5天22小时」
   // 还是「50分钟」，条的起点与宽度在所有行都一样（此前按各自文字宽度排，相差好几个像素）
@@ -355,15 +355,18 @@ test('渠道列表：各行额度条起止对齐，剩余时长靠右与金额�
     expect(Math.abs(box.x - boxes[0].x)).toBeLessThanOrEqual(1)
     expect(Math.abs(box.width - boxes[0].width)).toBeLessThanOrEqual(1)
   }
-  // 剩余时长靠右：右缘与同一行金额的右缘齐平
+  // 剩余时长靠右：不论是「5天22小时」「15分钟」还是「50分钟」，各行的右缘一致
   const alice = rowOf(page, ALICE_MASKED)
-  const aliceAmount = (await alice.getByText('US$314.68').boundingBox())!
-  const aliceReset = (await alice.getByText('5天22小时').boundingBox())!
-  expect(Math.abs(aliceReset.x + aliceReset.width - (aliceAmount.x + aliceAmount.width))).toBeLessThanOrEqual(1)
-  const bob = rowOf(page, 'bob-team')
-  const bobAmount = (await bob.getByText('US$737.87').boundingBox())!
-  const bobReset = (await bob.getByText('15分钟').boundingBox())!
-  expect(Math.abs(bobReset.x + bobReset.width - (bobAmount.x + bobAmount.width))).toBeLessThanOrEqual(1)
+  const rightEdge = async (row: ReturnType<typeof rowOf>, text: string) => {
+    const box = (await row.getByText(text, { exact: true }).boundingBox())!
+    return box.x + box.width
+  }
+  const edges = [
+    await rightEdge(alice, '5天22小时'),
+    await rightEdge(rowOf(page, 'bob-team'), '15分钟'),
+    await rightEdge(rowOf(page, CAROL_MASKED), '50分钟'),
+  ]
+  expect(Math.max(...edges) - Math.min(...edges)).toBeLessThanOrEqual(1)
   // 勾选框与名称首行垂直居中对齐（行内框落在基线上时会比名字高出两三像素）
   const checkbox = (await alice.getByRole('checkbox').boundingBox())!
   const name = (await alice.getByText(ALICE_MASKED, { exact: true }).first().boundingBox())!
@@ -544,6 +547,32 @@ test('渠道列表：1280 宽下五列放得下，不出现横向滚动', async 
   await expect(page.getByRole('group', { name: '表格横向浏览' })).toHaveCount(0)
   // 表头五列：勾选 / 渠道 / 状态 / 用量窗口 / 调度 / 操作
   await expect(page.locator('thead th')).toHaveText(['', '渠道', '状态', '用量窗口', '调度 / 操作'])
+})
+
+test('渠道列表：宽屏（1608）下列与列不留大块空白——状态文字列逐行对齐，额度条拉长，金额挨着计数、与额度标签左对齐', async ({ page }) => {
+  await page.setViewportSize({ width: 1608, height: 900 })
+  await prepare(page)
+  const viewport = page.locator('[data-slot="table-viewport"]')
+  expect(await viewport.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  const alice = rowOf(page, ALICE_MASKED)
+  const bob = rowOf(page, 'bob-team')
+  const carol = rowOf(page, CAROL_MASKED)
+  // 状态格：胶囊等宽（「正常」「1/2 可用」宽度本来不同），所以右边那列文字的起点逐行一致
+  const starts = []
+  for (const row of [alice, bob, carol]) starts.push((await row.locator('dd').first().boundingBox())!.x)
+  expect(Math.max(...starts) - Math.min(...starts)).toBeLessThanOrEqual(1)
+  // 用量格吃掉富余的宽度：额度条比窄屏时长得多（1280 宽时只有 60~70px）
+  const bar = (await alice.getByRole('progressbar', { name: '5小时额度用量' }).boundingBox())!
+  expect(bar.width).toBeGreaterThanOrEqual(220)
+  // 金额打头：左缘与下面「5小时」标签的左缘对齐，计数紧跟在它后面（不是隔着一大截被推到右缘）
+  const amount = (await alice.getByText('US$314.68').boundingBox())!
+  const label = (await alice.getByText('5小时', { exact: true }).boundingBox())!
+  const counts = (await alice.getByText('2,085 次 · 6.4亿 tokens').boundingBox())!
+  expect(Math.abs(amount.x - label.x)).toBeLessThanOrEqual(1)
+  expect(counts.x - (amount.x + amount.width)).toBeLessThanOrEqual(16)
+  // 状态首行文字的末端与用量格的左缘之间留得出空隙（状态列定宽后曾紧贴）
+  const probeText = (await alice.locator('dd').first().locator('xpath=./span[1]').boundingBox())!
+  expect(amount.x - (probeText.x + probeText.width)).toBeGreaterThanOrEqual(24)
 })
 
 test('渠道列表：深色主题下状态点与额度条仍用语义色', async ({ page }) => {
