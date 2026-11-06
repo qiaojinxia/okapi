@@ -165,6 +165,7 @@ export default {
   health24hIdle: '无请求',
   channelStatus24h: '近 24h',
   channelStatusEgress: '出口',
+  channelStatusKeys: '凭证状态',
   health24hHint: '近 24h 错误率与请求数；点击看健康时间线。TTFT p95 {{p95}}ms',
   dlqTitle: '死信队列',
   dlqPending: '{{n}} 条待处理',

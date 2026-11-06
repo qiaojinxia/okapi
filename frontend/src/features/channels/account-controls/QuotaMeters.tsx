@@ -44,8 +44,10 @@ export function QuotaMeters({ quota, limits, compact = false }: {
         : format.format(minutes, 'minute')
   }
   if (compact) {
+    // 每行一张表格自己的网格，列宽只能按各自内容算：标签列与剩余时长列都给下限（「5小时」「5天22小时」那么宽），
+    // 剩余时长靠右，这样不同渠道的额度条起止对齐、右缘与上面的金额齐平，不会因为「50分钟」比「5天22小时」短就长出一截。
     return (
-      <div className="grid w-full max-w-full grid-cols-[auto_minmax(3rem,1fr)_2.25rem_auto] items-center gap-x-2.5 gap-y-2.5">
+      <div className="grid w-full max-w-full grid-cols-[minmax(2.25rem,auto)_minmax(3rem,1fr)_2.25rem_minmax(4.75rem,auto)] items-center gap-x-2.5 gap-y-2.5">
         {quota.allowed === false && <p className="col-span-4 text-destructive">{t('admin:channelQuotaBlocked')}</p>}
         {quota.windows.map((window) => {
           const stale = window.resets_at !== null && window.resets_at * 1000 <= now
@@ -64,7 +66,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
                 {stale ? '—' : `${percent}%`}
               </span>
               {/* 行内只放剩余时长，具体重置时刻进悬停提示：表格不必为它横向滚动 */}
-              <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-muted-foreground/75 tabular-nums"
+              <span className="inline-flex items-center justify-self-end gap-1 whitespace-nowrap text-xs text-muted-foreground/75 tabular-nums"
                 title={!stale && window.resets_at !== null ? resetCompact(window.resets_at).full : undefined}>
                 {stale ? t('admin:channelQuotaRefreshing') : window.resets_at !== null && <>
                   <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-3 w-3 shrink-0" />

@@ -343,6 +343,33 @@ test('渠道列表：额度条只用红黄绿三种颜色；账号与渠道名�
   await expect(carol.getByRole('progressbar', { name: '7天额度用量' }).locator('div')).toHaveClass(/bg-warning/)
 })
 
+test('渠道列表：各行额度条起止对齐，剩余时长靠右与金额右缘齐平，勾选框与名称同高', async ({ page }) => {
+  await prepare(page)
+  // 三个订阅渠道共 6 个额度窗口。每个渠道一张自己的网格，剩余时长列有下限，所以不论是「5天22小时」
+  // 还是「50分钟」，条的起点与宽度在所有行都一样（此前按各自文字宽度排，相差好几个像素）
+  await expect(page.getByRole('progressbar')).toHaveCount(6)
+  const bars = await page.getByRole('progressbar').all()
+  const boxes = []
+  for (const bar of bars) boxes.push((await bar.boundingBox())!)
+  for (const box of boxes) {
+    expect(Math.abs(box.x - boxes[0].x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(box.width - boxes[0].width)).toBeLessThanOrEqual(1)
+  }
+  // 剩余时长靠右：右缘与同一行金额的右缘齐平
+  const alice = rowOf(page, ALICE_MASKED)
+  const aliceAmount = (await alice.getByText('US$314.68').boundingBox())!
+  const aliceReset = (await alice.getByText('5天22小时').boundingBox())!
+  expect(Math.abs(aliceReset.x + aliceReset.width - (aliceAmount.x + aliceAmount.width))).toBeLessThanOrEqual(1)
+  const bob = rowOf(page, 'bob-team')
+  const bobAmount = (await bob.getByText('US$737.87').boundingBox())!
+  const bobReset = (await bob.getByText('15分钟').boundingBox())!
+  expect(Math.abs(bobReset.x + bobReset.width - (bobAmount.x + bobAmount.width))).toBeLessThanOrEqual(1)
+  // 勾选框与名称首行垂直居中对齐（行内框落在基线上时会比名字高出两三像素）
+  const checkbox = (await alice.getByRole('checkbox').boundingBox())!
+  const name = (await alice.getByText(ALICE_MASKED, { exact: true }).first().boundingBox())!
+  expect(Math.abs(checkbox.y + checkbox.height / 2 - (name.y + name.height / 2))).toBeLessThanOrEqual(1.5)
+})
+
 test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复时间；停用与未入池各有标识', async ({ page }) => {
   await prepare(page)
   const carol = rowOf(page, CAROL_MASKED)
@@ -351,6 +378,11 @@ test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复
   await expect(carol).toContainText('约 20 分钟后恢复')
   // 最近一次测试失败：写错误码而不是延迟
   await expect(carol.locator('dd').first()).toContainText('upstream_timeout')
+  // 计数与恢复时间自成一行，不挤进第一行的「错误码 + 时间」里（挤在一起时会随列宽东一个西一个地折行）
+  await expect(carol.locator('dd').first()).not.toContainText('冷却 1')
+  const keyLine = carol.locator('dd', { hasText: '冷却 1' })
+  await expect(keyLine).toContainText('约 20 分钟后恢复')
+  await expect(keyLine).not.toContainText('upstream_timeout')
   await expect(carol).toContainText('15.0% 错误 · 80 次')
   await expect(carol).not.toContainText('已过期')
 

@@ -448,11 +448,14 @@ export function ChannelsPage() {
             {rows.map((c) => (
               <Tr key={c.id} selected={picked.has(c.id)} className="group/row hover:bg-accent/30 data-[selected]:shadow-[inset_2px_0_0_var(--primary)]">
                 <Td className="py-3 pr-0 pl-5 align-top">
-                  <Checkbox
-                    srLabel={t('admin:batchPick', { name: shownName(c) })}
-                    checked={picked.has(c.id)}
-                    onChange={() => togglePick(c.id)}
-                  />
+                  {/* 与名称首行同高居中：直接放行内框，勾选框会落在基线上、比名字高出两三像素 */}
+                  <div className="flex h-5 items-center">
+                    <Checkbox
+                      srLabel={t('admin:batchPick', { name: shownName(c) })}
+                      checked={picked.has(c.id)}
+                      onChange={() => togglePick(c.id)}
+                    />
+                  </div>
                 </Td>
                 <Td className="py-3 align-top">
                   <ChannelNameCell channel={c} />
@@ -466,7 +469,6 @@ export function ChannelsPage() {
                     </dt>
                     <dd className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
                       <LastProbe probe={c.last_test} />
-                      <KeyStateDetail keys={c.keys} enabled={c.status === 1} />
                       {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见 */}
                       {c.status === 1 && (c.pools ?? []).length === 0 && (
                         <Badge variant="destructive" className="min-h-5 rounded-md px-1.5 py-0 text-[11px]" title={t('admin:poolOrphanWarning')}>
@@ -474,6 +476,8 @@ export function ChannelsPage() {
                         </Badge>
                       )}
                     </dd>
+                    {/* 部分 key 不可用时才有：各态计数 + 恢复时间，自成一行 */}
+                    <KeyStateDetail keys={c.keys} enabled={c.status === 1} />
                     <StatusLine label={t('admin:channelStatus24h')} icon={Activity}>
                       <Health24h
                         stat={health.data?.data.find((s) => s.channel_id === c.id)}

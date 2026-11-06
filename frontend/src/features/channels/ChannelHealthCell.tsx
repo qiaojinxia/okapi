@@ -102,36 +102,52 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
   }
 }
 
-/// 状态点后面的补充：部分 key 不可用时的各态计数与最近一把的恢复时间；其余状态没有补充。
+/// 状态点下面单独一行：部分 key 不可用时的各态计数与最近一把的恢复时间；其余状态没有这一行。
+///
+/// 单独成行是为了版面稳定：这些小标签数量不定，混在「延迟 + 时间」那一行里会随列宽东一个西一个地折行，
+/// 一个渠道能占五六行；放进自己的一行，折行也是整枚标签为单位，读起来始终是「状态 → 原因 → 健康」三层。
 export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
   const { t } = useTranslation()
   const state = keyStateOf(keys, enabled)
   if (state.kind !== 'partial') return null
   return (
-    <>
+    <StatusLine label={t('admin:channelStatusKeys')} className="flex-wrap gap-y-1">
       {state.counts.map(([name, n]) => (
         <Badge key={name} variant="muted" className="min-h-5 rounded-md px-1.5 py-0 text-[11px]" title={state.titles.get(name) ?? ''}>
           {t(`admin:keyState_${name}`, { n })}
         </Badge>
       ))}
       {state.soonest && state.soonest.isAfter(dayjs()) && (
-        <span className="text-xs text-muted-foreground">
+        <span className="text-xs text-muted-foreground tabular-nums">
           {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(state.soonest.diff(dayjs(), 'minute', true))) })}
         </span>
       )}
-    </>
+    </StatusLine>
   )
 }
 
 /// 状态列的补充短行：图标和值放在同一内容列，与上方的延迟左对齐；标签保留给读屏与悬停。
 /// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看状态点，明细只在异常时抢眼。
-export function StatusLine({ label, title, icon: Icon, children }: { label: string; title?: string; icon?: LucideIcon; children: ReactNode }) {
+/// 字号 13px：比第一行的延迟（14px 加粗）低一档、比时间 / 地址这类 12px 的元信息高一档，三层各有各的字号。
+export function StatusLine({
+  label,
+  title,
+  icon: Icon,
+  className,
+  children,
+}: {
+  label: string
+  title?: string
+  icon?: LucideIcon
+  className?: string
+  children: ReactNode
+}) {
   return (
     <>
       <dt className="flex h-5 items-center whitespace-nowrap text-xs leading-5 text-muted-foreground/75">
         <span className="sr-only">{label}</span>
       </dt>
-      <dd className="flex min-w-0 items-center gap-1.5 whitespace-nowrap leading-5" title={title}>
+      <dd className={cn('flex min-w-0 items-center gap-1.5 whitespace-nowrap text-[13px] leading-5', className)} title={title}>
         {Icon && (
           <span className="inline-flex shrink-0 text-muted-foreground/70" title={label}>
             <Icon aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
@@ -230,7 +246,7 @@ export function Health24h({
     <>
       <button
         type="button"
-        className="rounded whitespace-nowrap underline-offset-2 hover:bg-muted/60 hover:underline"
+        className="rounded whitespace-nowrap tabular-nums underline-offset-2 hover:bg-muted/60 hover:underline"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >

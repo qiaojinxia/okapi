@@ -165,6 +165,7 @@ export default {
   health24hIdle: 'no requests',
   channelStatus24h: 'Last 24h',
   channelStatusEgress: 'Egress',
+  channelStatusKeys: 'Credential states',
   health24hHint: 'Last-24h error rate and requests; click for the health timeline. TTFT p95 {{p95}}ms',
   dlqTitle: 'Dead-letter queue',
   dlqPending: '{{n}} pending',
