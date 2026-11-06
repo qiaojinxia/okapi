@@ -187,14 +187,24 @@ async fn probe_one(
     };
     let error = result.err().map(|e| e.code);
     if let Some(code) = error {
-        tracing::warn!(
-            proxy = proxy.id,
-            name = %proxy.name,
-            code,
-            in_use = proxy.in_use,
-            consecutive = streak,
-            "egress probe failed"
-        );
+        if warn_this_round(proxy.in_use, streak) {
+            tracing::warn!(
+                proxy = proxy.id,
+                name = %proxy.name,
+                code,
+                in_use = proxy.in_use,
+                consecutive = streak,
+                "egress probe failed"
+            );
+        } else {
+            tracing::debug!(
+                proxy = proxy.id,
+                name = %proxy.name,
+                code,
+                consecutive = streak,
+                "egress probe failed (unused proxy, repeated)"
+            );
+        }
     }
     Some(Outcome {
         id: proxy.id,
@@ -207,6 +217,12 @@ async fn probe_one(
         error,
         change,
     })
+}
+
+/// 失败的每一轮留不留 WARN：在用的代理每轮都留（会影响请求）；没人用的代理死了不影响任何请求，
+/// 只在第 1、3 轮和之后每 36 轮（约六小时）留一条——线上代理 3 死了八小时不止，十分钟一条 WARN 把真告警淹了。
+fn warn_this_round(in_use: bool, streak: i64) -> bool {
+    in_use || matches!(streak, 1 | 3) || (streak > 0 && streak % 36 == 0)
 }
 
 struct Outcome {
@@ -243,6 +259,17 @@ impl From<&Vec<Outcome>> for RoundReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_proxy_nobody_uses_is_logged_sparsely_but_a_used_one_every_round() {
+        let rounds: Vec<i64> = (1..=80).filter(|n| warn_this_round(false, *n)).collect();
+        assert_eq!(rounds, [1, 3, 36, 72]);
+        assert!((1..=80).all(|n| warn_this_round(true, n)));
+        assert!(
+            !warn_this_round(false, 0),
+            "a successful round logs nothing"
+        );
+    }
 
     #[test]
     fn policy_defaults_and_bounds() {
