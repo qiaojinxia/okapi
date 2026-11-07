@@ -201,17 +201,6 @@ impl AppState {
         Ok(())
     }
 
-    /// 模型的候选渠道（走 chat 同一份 5s 进程缓存，console 写路径主动失效）。
-    /// 各入口拿到的是自己的副本，可以就地排序、过滤。
-    pub async fn candidates_for_model(
-        &self,
-        model: &str,
-        pool_chain: &[&str],
-    ) -> Result<Vec<okapi_store::ChannelCandidate>, okapi_store::StoreError> {
-        let rows = super::candidates::cached_candidates(self, model, pool_chain, false).await?;
-        Ok(rows.as_ref().clone())
-    }
-
     /// 预扣准入：先在进程内按用户排队，轮到了才拿 PG 连接与用户锁（见 `user_turns`）。
     /// 所有计费端点都经这里，单个高并发用户不能把全站连接池耗在等锁上。
     pub async fn reserve_for_key(

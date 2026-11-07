@@ -732,7 +732,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |
 | `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
-| `conc:ck:{<channel_key_id>}:v2` | ZSET | 成员 90s / 键 2× | 渠道 key 在途并发租约（member = 请求租约，score = Redis 服务器时钟的到期毫秒；准入先 ZREMRANGEBYSCORE 清过期）；生成和原生 Token 计数共用。`least_concurrency` 池没设上限的 key 也登记（只计数不拦），选路时按 ZCOUNT 读在途数 |
+| `conc:ck:{<channel_key_id>}:v2` | ZSET | 成员 90s / 键 2× | 渠道 key 在途并发租约（member = 请求租约，score = Redis 服务器时钟的到期毫秒；准入先 ZREMRANGEBYSCORE 清过期）；生成和原生 Token 计数共用。`least_concurrency` 池没设上限的 key 也登记（只计数不拦；对话、媒体端点与 realtime 会话都算），选路时按 ZCOUNT 读在途数 |
 | `conc:px:{<proxy_id>}:v1` | ZSET | 成员 90s 续租 / 键 2× | 出口代理在途并发租约（`proxies.max_concurrency`，§11.41）：与 key 租约一起占，任一满了当「渠道忙」并退回已占的那份；跨 key、跨网关实例共享 |
 | `egress:probe:round` | STRING | ≈ 探测间隔 | 出口代理后台探测的本轮租约（SET NX EX）：多 worker 实例时每轮只由拿到的那个执行 |
 | `inflight:gauge` | HASH | 整键 1h；字段超过 10s 不计入、5min 清除 | 集群在途量（HTTP 请求与 Responses WS 活动轮次）：`node → <count>\|<unix_ms>`。HTTP 在启用 surge 规则时跟踪响应体；Responses WS 跟踪单轮准入至结算；活动期间每秒续报，零/非零切换及时上报，其余变化一秒采样。正常结束、报错、断开、取消均释放；每实例串行写入，节点名称须唯一。软实时计价输入，不用于严格并发限流 |

@@ -24,7 +24,7 @@ pub(super) async fn eligible_candidates(
 ) -> Result<(super::super::scheduler::CandidateQueue, Option<i64>), ForwardFailure> {
     // 候选 5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL 收敛）
     // 缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户
-    use super::super::scheduler::{CandidateQueue, CandidateSet};
+    use super::super::scheduler::CandidateSet;
     let chain: Vec<&str> = bill.pool_chain.iter().map(String::as_str).collect();
     let raw = cached_candidates(
         &bill.state,
@@ -34,36 +34,9 @@ pub(super) async fn eligible_candidates(
     )
     .await
     .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
-    let mut candidates = match Strategy::parse(bill.pool_strategy.as_deref()) {
-        // soonest_reset 的先后要读额度观测，在下面的准入筛选里排；这里的加权随机只管同一时刻的并列
-        Strategy::PriorityWeighted | Strategy::SoonestReset => {
-            CandidateQueue::weighted(Arc::clone(&raw))
-        }
-        Strategy::LeastLatency => {
-            let latency = bill
-                .state
-                .sched
-                .channel_key_latencies(raw.iter().map(|c| c.channel_key_id))
-                .await;
-            CandidateQueue::by_latency(Arc::clone(&raw), &latency)
-        }
-        Strategy::LeastUsage => {
-            let spend = bill
-                .state
-                .sched
-                .channel_key_spends(raw.iter().map(|c| c.channel_key_id))
-                .await;
-            CandidateQueue::by_load(Arc::clone(&raw), &spend)
-        }
-        Strategy::LeastConcurrency => {
-            let in_flight = bill
-                .state
-                .sched
-                .channel_key_in_flight(raw.iter().map(|c| c.channel_key_id))
-                .await;
-            CandidateQueue::by_load(Arc::clone(&raw), &in_flight).counting_in_flight()
-        }
-    };
+    let strategy = Strategy::parse(bill.pool_strategy.as_deref());
+    let mut candidates =
+        super::super::candidates::queue(&bill.state, Arc::clone(&raw), strategy).await;
     // 与诊断和接入示例共用入口规则；配置正常但入口错误时不要报服务不可用。
     candidates.retain(|c| bill.ingress.accepts(c, &bill.model));
     if !raw.is_empty() && candidates.is_empty() {
@@ -167,13 +140,7 @@ pub(super) async fn eligible_candidates(
         }
     }
     // 负毛利熔断（§11.34）：该分组打这条渠道在亏钱，摘掉让同池其它渠道承接
-    let quota_order = match Strategy::parse(bill.pool_strategy.as_deref()) {
-        Strategy::PriorityWeighted => super::super::account_control::QuotaOrder::HeadroomTiers,
-        Strategy::SoonestReset => super::super::account_control::QuotaOrder::SoonestReset,
-        Strategy::LeastLatency | Strategy::LeastUsage | Strategy::LeastConcurrency => {
-            super::super::account_control::QuotaOrder::Keep
-        }
-    };
+    let quota_order = super::super::account_control::QuotaOrder::of(strategy);
     // L2 会话粘性映射：额度准入要先知道缓存还热不热（热会话可以用到保留线，冷请求按整段 prompt
     // 估增量），所以读取放在准入之前；把它提到候选首位仍在准入之后——被额度挡下的账号，
     // 亲和不越过准入。

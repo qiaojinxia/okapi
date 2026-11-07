@@ -74,16 +74,18 @@ impl ChannelPermit {
         key: i64,
         cap: Option<i32>,
     ) -> Result<Option<Self>, UpstreamError> {
-        Self::acquire_parts(sched, key, cap, None).await
+        Self::acquire_parts(sched, key, cap, None, false).await
     }
-    /// 不走候选的入口（Realtime、custom_pass）显式给出出口代理与它的上限。
+    /// 不在准入时手握候选的入口（Realtime、custom_pass）显式给出出口代理与它的上限；
+    /// `count` 同 [`okapi_store::ChannelCandidate::count_in_flight`]（没设上限也登记只计数的租约）。
     pub async fn acquire_parts(
         sched: &SchedulerRedis,
         key: i64,
         cap: Option<i32>,
         proxy: Option<(i64, i32)>,
+        count: bool,
     ) -> Result<Option<Self>, UpstreamError> {
-        Self::acquire_with_ttl(sched, key, cap, proxy, false, LEASE_MS).await
+        Self::acquire_with_ttl(sched, key, cap, proxy, count, LEASE_MS).await
     }
     #[allow(clippy::too_many_lines)] // 准入、回滚与续租共用同一份租约清单，拆开反而难核对
     async fn acquire_with_ttl(
@@ -264,12 +266,13 @@ mod tests {
     async fn proxy_cap_is_shared_across_keys_and_rolls_back_the_key_lease() {
         let sched = scheduler().await;
         let (first_key, second_key, proxy) = (key(), key(), key());
-        let first = ChannelPermit::acquire_parts(&sched, first_key, Some(1), Some((proxy, 1)))
-            .await
-            .unwrap()
-            .unwrap();
+        let first =
+            ChannelPermit::acquire_parts(&sched, first_key, Some(1), Some((proxy, 1)), false)
+                .await
+                .unwrap()
+                .unwrap();
         assert!(
-            ChannelPermit::acquire_parts(&sched, second_key, Some(1), Some((proxy, 1)))
+            ChannelPermit::acquire_parts(&sched, second_key, Some(1), Some((proxy, 1)), false)
                 .await
                 .unwrap()
                 .is_none(),
@@ -282,10 +285,11 @@ mod tests {
             .unwrap();
         alone.release().await;
         first.release().await;
-        let second = ChannelPermit::acquire_parts(&sched, second_key, None, Some((proxy, 1)))
-            .await
-            .unwrap()
-            .unwrap();
+        let second =
+            ChannelPermit::acquire_parts(&sched, second_key, None, Some((proxy, 1)), false)
+                .await
+                .unwrap()
+                .unwrap();
         second.release().await;
     }
     #[tokio::test]

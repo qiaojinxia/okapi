@@ -3,7 +3,11 @@ pub mod forecast;
 pub mod policy;
 pub mod quota;
 
-use super::{diagnostics, scheduler::CandidateSet, state::AppState};
+use super::{
+    diagnostics,
+    scheduler::{CandidateSet, Strategy},
+    state::AppState,
+};
 use okapi_kernel::sched_redis::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
 use okapi_providers::UpstreamError;
 use okapi_store::ChannelCandidate;
@@ -131,6 +135,19 @@ pub enum QuotaOrder {
     Keep,
     /// `soonest_reset` 池：层内按最近一次窗口重置升序，先用快要重置的额度。
     SoonestReset,
+}
+
+impl QuotaOrder {
+    /// 池策略对应的额度排序。
+    pub const fn of(strategy: Strategy) -> Self {
+        match strategy {
+            Strategy::PriorityWeighted => Self::HeadroomTiers,
+            Strategy::SoonestReset => Self::SoonestReset,
+            Strategy::LeastLatency | Strategy::LeastUsage | Strategy::LeastConcurrency => {
+                Self::Keep
+            }
+        }
+    }
 }
 
 /// 余量分档：≥50 高、20–49 中、<20 低；没有观测按中档——既不冒充空闲账号，也不压到最后。

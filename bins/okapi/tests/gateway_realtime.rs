@@ -430,6 +430,82 @@ async fn realtime_protocol_violations_are_answered_with_a_status_code() {
     }
 }
 
+/// 把本用例的渠道放进一个新池（选路策略 `strategy`），API key 钉在这个池上；回渠道 key。
+async fn pin_to_pool(env: &TestEnv, strategy: &str) -> i64 {
+    let pool = format!("p-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    okapi_store::admin::upsert_channel_pool(&env.pg, &pool, "t", strategy, None)
+        .await
+        .unwrap();
+    let (channel, key): (i64, i64) = sqlx::query_as(
+        "SELECT c.id, k.id FROM channels c JOIN channel_keys k ON k.channel_id = c.id
+         WHERE c.models @> $1",
+    )
+    .bind(json!([env.model]))
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let member = okapi_store::admin::PoolMember {
+        pool_code: pool.clone(),
+        priority_override: None,
+        weight_override: None,
+    };
+    okapi_store::admin::set_channel_pools(&env.pg, channel, &[member])
+        .await
+        .unwrap();
+    sqlx::query("UPDATE api_keys SET pool_override = $1 WHERE user_id = $2")
+        .bind(&pool)
+        .bind(env.user_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    key
+}
+
+/// 某把渠道 key 未到期的在途租约数（与网关读数同一口径）。
+async fn in_flight(key: i64) -> i64 {
+    use fred::interfaces::SortedSetsInterface;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    #[allow(clippy::cast_precision_loss)]
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    redis
+        .zcount(format!("conc:ck:{{{key}}}:v2"), now, f64::MAX)
+        .await
+        .unwrap()
+}
+
+/// least_concurrency 池：一条 realtime 会话在整个会话期间算这把 key 的一个在途
+/// （与对话同一份并发租约），断开后退回。
+#[tokio::test]
+async fn a_least_concurrency_pool_counts_a_realtime_session_in_flight() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let key = pin_to_pool(&env, "least_concurrency").await;
+
+    let mut ws = connect(&env).await.expect("握手应成功");
+    assert_eq!(recv_text(&mut ws).await["type"], "session.created");
+    assert_eq!(in_flight(key).await, 1, "会话期间登记一份在途");
+    ws.send(CliMsg::text(json!({"type": "response.create"}).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_text(&mut ws).await["type"],
+        "response.output_text.delta"
+    );
+    assert_eq!(recv_text(&mut ws).await["type"], "response.done");
+    assert_eq!(in_flight(key).await, 1, "一次响应结束不退，整段会话算一个");
+
+    ws.close(None).await.unwrap();
+    drop(ws);
+    for _ in 0..100 {
+        if in_flight(key).await == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("会话断开后在途租约应退回");
+}
+
 /// 双向泵 + 计费闭环：事件转发、二进制回显、usage 累计、断开 commit、余额一致。
 #[tokio::test]
 async fn realtime_bridge_bills_on_disconnect() {

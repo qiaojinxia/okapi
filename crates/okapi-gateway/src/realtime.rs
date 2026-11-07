@@ -150,6 +150,8 @@ struct Prep {
     egress_max_concurrency: Option<i32>,
     channel: (i64, i64),
     channel_concurrency: Option<i32>,
+    /// `least_concurrency` 池的候选：会话期间登记一份在途（见 `ChannelPermit::acquire_parts`）。
+    count_in_flight: bool,
     cost_milli: i64,
     calc: CalcContext,
     book: std::sync::Arc<okapi_pricing::PriceBook>,
@@ -321,6 +323,7 @@ async fn prepare(
         egress_max_concurrency: cand.egress_max_concurrency,
         channel: (cand.channel_id, cand.channel_key_id),
         channel_concurrency: cand.max_concurrency,
+        count_in_flight: cand.count_in_flight,
         cost_milli: cand.cost_milli,
         calc,
         book,
@@ -362,6 +365,7 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
         prep.channel.1,
         prep.channel_concurrency,
         prep.egress_proxy_id.zip(prep.egress_max_concurrency),
+        prep.count_in_flight,
     )
     .await;
     let Ok(Some(mut permit)) = permit else {

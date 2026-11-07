@@ -44,10 +44,17 @@ async fn mock_rerank(body: axum::body::Bytes) -> axum::response::Response {
     .into_response()
 }
 
+/// 慢上游：让请求在途一会儿，看得到在途租约。
+async fn mock_slow(body: axum::body::Bytes) -> axum::response::Response {
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    mock_ok(body).await
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
         .route("/ok/v1/embeddings", post(mock_ok))
         .route("/ok/v1/rerank", post(mock_rerank))
+        .route("/slow/v1/embeddings", post(mock_slow))
         .route("/fail/v1/embeddings", post(mock_fail));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -474,4 +481,139 @@ async fn embeddings_answer_503_when_every_key_is_over_its_cap() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert_eq!(held, 0, "被挡下的请求不留预扣");
+}
+
+/// 本用例模型的全部渠道 key（按 id 升序）。
+async fn keys_of(pg: &PgPool, model: &str) -> Vec<i64> {
+    sqlx::query_scalar(
+        "SELECT k.id FROM channel_keys k JOIN channels c ON c.id = k.channel_id
+         WHERE c.models @> $1 ORDER BY k.id",
+    )
+    .bind(json!([model]))
+    .fetch_all(pg)
+    .await
+    .unwrap()
+}
+
+/// 把本用例的渠道放进一个新池（选路策略 `strategy`），API key 钉在这个池上。
+async fn pin_to_pool(env: &TestEnv, strategy: &str) {
+    let pool = format!("p-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    okapi_store::admin::upsert_channel_pool(&env.pg, &pool, "t", strategy, None)
+        .await
+        .unwrap();
+    let channels: Vec<i64> = sqlx::query_scalar("SELECT id FROM channels WHERE models @> $1")
+        .bind(json!([env.model]))
+        .fetch_all(&env.pg)
+        .await
+        .unwrap();
+    for channel in channels {
+        let member = okapi_store::admin::PoolMember {
+            pool_code: pool.clone(),
+            priority_override: None,
+            weight_override: None,
+        };
+        okapi_store::admin::set_channel_pools(&env.pg, channel, &[member])
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE api_keys SET pool_override = $1 WHERE user_id = $2")
+        .bind(&pool)
+        .bind(env.user_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
+
+/// 某把 key 未到期的在途租约数（与网关读数同一口径）。
+async fn in_flight(redis: &fred::clients::Client, key: i64) -> i64 {
+    use fred::interfaces::SortedSetsInterface;
+    #[allow(clippy::cast_precision_loss)]
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    redis
+        .zcount(format!("conc:ck:{{{key}}}:v2"), now, f64::MAX)
+        .await
+        .unwrap()
+}
+
+/// 媒体端点按池的选路策略排 failover 序：least_usage 池里当日消费多的 key 让路，
+/// 同一层的请求都落到消费少的那把（此前媒体一律加权随机）。
+#[tokio::test]
+async fn embeddings_follow_a_least_usage_pool() {
+    use fred::interfaces::KeysInterface;
+    let env = setup(&[("/ok/v1", 0), ("/ok/v1", 0)]).await;
+    pin_to_pool(&env, "least_usage").await;
+    let keys = keys_of(&env.pg, &env.model).await;
+    let (heavy, light) = (keys[0], keys[1]);
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let day = chrono::Utc::now().format("%Y%m%d");
+    let _: () = redis
+        .set(
+            format!("spend:ck:{heavy}:{day}"),
+            1_000_000_000_i64,
+            Some(fred::types::Expiration::EX(600)),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        assert_eq!(post_embeddings(&env).await.status(), 200);
+    }
+    let mut served: Vec<Option<i64>> = Vec::new();
+    for _ in 0..50 {
+        served = sqlx::query_scalar(
+            "SELECT channel_key_id FROM billing_records WHERE user_id = $1 AND log_type = 2",
+        )
+        .bind(env.user_id)
+        .fetch_all(&env.pg)
+        .await
+        .unwrap();
+        if served.len() == 4 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(served, vec![Some(light); 4]);
+}
+
+/// least_concurrency 池：媒体请求和对话一样登记在途（同一份并发租约），结束后退回。
+/// 这把 key 没设并发上限，只计数。
+#[tokio::test]
+async fn embeddings_count_in_flight_in_a_least_concurrency_pool() {
+    let env = setup(&[("/slow/v1", 0)]).await;
+    pin_to_pool(&env, "least_concurrency").await;
+    let key = keys_of(&env.pg, &env.model).await[0];
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let request = tokio::spawn({
+        let (gateway, token, model) = (env.gateway, env.token.clone(), env.model.clone());
+        async move {
+            reqwest::Client::new()
+                .post(format!("http://{gateway}/v1/embeddings"))
+                .bearer_auth(token)
+                .json(&json!({"model": model, "input": "hello"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    });
+    // 一直看到请求结束：上游要睡 800ms，这期间租约必须在
+    let mut seen = 0;
+    while seen == 0 && !request.is_finished() {
+        seen = in_flight(&redis, key).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(seen, 1, "请求在途时这把 key 应登记一份在途");
+    assert_eq!(request.await.unwrap(), 200);
+    for _ in 0..50 {
+        if in_flight(&redis, key).await == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("请求结束后在途租约应退回");
 }

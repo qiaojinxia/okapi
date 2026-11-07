@@ -186,11 +186,13 @@ async fn handle(
     let result = async {
         use okapi_providers::response_lifetime::ResponseLifetime;
         super::account_control::admit(state, channel_id, Some(channel.key_id)).await?;
+        // 按渠道 id 直达、不走池的排序，不登记只计数的在途
         let mut permit = okapi_kernel::sched_redis::channel_permit::ChannelPermit::acquire_parts(
             &state.sched,
             channel.key_id,
             channel.max_concurrency,
             channel.egress_proxy_id.zip(channel.egress_max_concurrency),
+            false,
         )
         .await?
         .ok_or_else(|| okapi_kernel::sched_redis::channel_permit::blocked("concurrency"))?;
