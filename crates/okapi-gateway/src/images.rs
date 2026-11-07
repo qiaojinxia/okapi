@@ -15,6 +15,7 @@ use okapi_kernel::error::with_request_id;
 use okapi_ledger::SettlementInput;
 use okapi_pricing::{CalcContext, PriceBook, Quote, calculate};
 use okapi_providers::UpstreamError;
+use okapi_providers::registry::MediaSurface;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -215,37 +216,15 @@ async fn handle(
         source_window.as_deref(),
     );
     // —— 预扣已建立 ——
-    let rows = state
-        .candidates_for_model(&canonical, &key.pool_chain())
-        .await
-        .map_err(AppError::from);
-    let mut candidates: Vec<_> = match rows {
-        Ok(rows) => super::scheduler::order_candidates(rows)
-            .into_iter()
-            .filter(|c| {
-                c.provider != "anthropic"
-                    && c.provider != "gemini"
-                    && !super::dialect::chat_only(&c.provider)
-            })
-            .collect(),
-        Err(err) => {
-            let _ = refund(state, key, request_id, task).await;
-            failure.error(&err);
-            return Err(err);
-        }
-    };
-    let margin_removed = state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    if candidates.is_empty() {
-        let _ = refund(state, key, request_id, task).await;
-        let error = AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            super::state::no_candidates_code(margin_removed),
-        );
-        failure.error(&error);
-        return Err(error);
-    }
+    let candidates =
+        match super::candidates::media(state, key, &canonical, MediaSurface::Images).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let _ = refund(state, key, request_id, task).await;
+                failure.error(&error);
+                return Err(error);
+            }
+        };
 
     if input.stream {
         // The tracked stream pump owns terminal cleanup from this point.

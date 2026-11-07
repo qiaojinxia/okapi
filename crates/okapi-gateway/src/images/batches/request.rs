@@ -62,10 +62,11 @@ impl Input {
             || input.task_name.chars().any(char::is_control)
             || input.items.is_empty()
             || input.items.len() > 200
-            || input
-                .provider
-                .as_deref()
-                .is_some_and(|p| !matches!(p, "gemini" | "vertex"))
+            || input.provider.as_deref().is_some_and(|p| {
+                okapi_providers::registry::lookup(p).is_none_or(|adapter| {
+                    !adapter.serves(okapi_providers::registry::MediaSurface::ImageBatches)
+                })
+            })
         {
             return Err(invalid("batch_request"));
         }

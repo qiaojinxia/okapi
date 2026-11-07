@@ -71,6 +71,24 @@ pub enum RequestExtensionKind {
     CodexClient,
 }
 
+/// Non-chat gateway surfaces. A registration lists the ones the gateway has wired for the
+/// adapter; whether a given model works there is still up to the channel's model list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaSurface {
+    /// `/v1/embeddings` and `/v1/rerank` (one OpenAI-shaped JSON relay).
+    Embeddings,
+    /// `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`.
+    Audio,
+    /// `/v1/images/generations` and `/v1/images/edits`, streamed and as async tasks too.
+    Images,
+    /// `/v1/videos`.
+    Videos,
+    /// `/v1/realtime` (WebSocket).
+    Realtime,
+    /// Native image batches (Gemini Batch API, Vertex batch prediction).
+    ImageBatches,
+}
+
 pub use okapi_domain::provider_contract::NativeResponses;
 
 #[derive(Clone, Copy, Debug)]
@@ -79,12 +97,14 @@ pub struct ProviderDescriptor {
     pub kind: AdapterKind,
     pub inference: Option<crate::inference::Factory>,
     pub dialect_for_model: fn(&str) -> Dialect,
-    pub chat_only: bool,
     pub credential: CredentialKind,
     pub default_base: Option<&'static str>,
     pub native_responses: NativeResponses,
     pub ingress: &'static [ApiFormat],
     pub transports: &'static [WireTransport],
+    /// Media surfaces the gateway may route to this adapter; anything unlisted is never a
+    /// candidate there, so a new adapter starts with none rather than inheriting OpenAI's.
+    pub media: &'static [MediaSurface],
     /// Compiled extension support, independent of credential kind and transport.
     pub extensions: &'static [RequestExtensionKind],
     pub forward_client_identity: bool,
@@ -120,8 +140,8 @@ impl ProviderDescriptor {
     }
 
     #[must_use]
-    pub const fn chat_only(&self) -> bool {
-        self.chat_only
+    pub fn serves(&self, surface: MediaSurface) -> bool {
+        self.media.contains(&surface)
     }
 }
 
@@ -155,6 +175,21 @@ const CHAT_FORMATS: &[ApiFormat] = &[
 const RESPONSES_FORMATS: &[ApiFormat] = &[ApiFormat::Responses, ApiFormat::ResponsesCompact];
 const HTTP: &[WireTransport] = &[WireTransport::Http];
 const HTTP_AND_WS: &[WireTransport] = &[WireTransport::Http, WireTransport::ResponsesWebSocket];
+const OPENAI_MEDIA: &[MediaSurface] = &[
+    MediaSurface::Embeddings,
+    MediaSurface::Audio,
+    MediaSurface::Images,
+    MediaSurface::Videos,
+    MediaSurface::Realtime,
+];
+// Azure's deployment URLs cover the JSON relay, audio and images. Sora's job API and the
+// Realtime handshake URL are separate shapes that are not wired.
+const AZURE_MEDIA: &[MediaSurface] = &[
+    MediaSurface::Embeddings,
+    MediaSurface::Audio,
+    MediaSurface::Images,
+];
+const IMAGE_BATCHES: &[MediaSurface] = &[MediaSurface::ImageBatches];
 
 /// Adding an adapter starts with an explicit registration, rather than a fallback to OpenAI.
 pub const BUILT_INS: &[ProviderDescriptor] = &[
@@ -163,12 +198,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::OpenAi,
         inference: Some(crate::inference::openai),
         dialect_for_model: openai_dialect,
-        chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: Some("https://api.openai.com/v1"),
         native_responses: okapi_domain::provider_contract::OPENAI.native_responses,
         ingress: CHAT_FORMATS,
         transports: HTTP_AND_WS,
+        media: OPENAI_MEDIA,
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -178,13 +213,13 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::OpenAiCompatible,
         inference: Some(crate::inference::openai),
         dialect_for_model: openai_dialect,
-        chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: Some("https://api.openai.com/v1"),
         native_responses: okapi_domain::provider_contract::OPENAI_COMPAT.native_responses,
         ingress: CHAT_FORMATS,
         // Preserve the existing WS ingress boundary; compatibility requires separate verification.
         transports: HTTP,
+        media: OPENAI_MEDIA,
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -194,12 +229,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::Azure,
         inference: Some(crate::inference::azure),
         dialect_for_model: openai_dialect,
-        chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: None,
         native_responses: NativeResponses::Unsupported,
         ingress: CHAT_FORMATS,
         transports: HTTP,
+        media: AZURE_MEDIA,
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -209,12 +244,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::Anthropic,
         inference: Some(crate::inference::anthropic),
         dialect_for_model: anthropic_dialect,
-        chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: Some("https://api.anthropic.com/v1"),
         native_responses: NativeResponses::Unsupported,
         ingress: CHAT_FORMATS,
         transports: HTTP,
+        media: &[],
         extensions: &[RequestExtensionKind::ClaudeCode],
         forward_client_identity: false,
         account: None,
@@ -224,12 +259,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::Gemini,
         inference: Some(crate::inference::gemini),
         dialect_for_model: gemini_dialect,
-        chat_only: false,
         credential: CredentialKind::StaticKey,
         default_base: Some("https://generativelanguage.googleapis.com/v1beta"),
         native_responses: NativeResponses::Unsupported,
         ingress: CHAT_FORMATS,
         transports: HTTP,
+        media: IMAGE_BATCHES,
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -239,12 +274,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::Bedrock,
         inference: Some(crate::inference::bedrock),
         dialect_for_model: anthropic_dialect,
-        chat_only: true,
         credential: CredentialKind::CloudIdentity,
         default_base: None,
         native_responses: NativeResponses::Unsupported,
         ingress: CHAT_FORMATS,
         transports: HTTP,
+        media: &[],
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -254,12 +289,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::Vertex,
         inference: Some(crate::inference::vertex),
         dialect_for_model: vertex_dialect,
-        chat_only: true,
         credential: CredentialKind::CloudIdentity,
         default_base: None,
         native_responses: NativeResponses::Unsupported,
         ingress: CHAT_FORMATS,
         transports: HTTP,
+        media: IMAGE_BATCHES,
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -269,12 +304,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::AnthropicOAuth,
         inference: Some(crate::inference::claude),
         dialect_for_model: anthropic_dialect,
-        chat_only: true,
         credential: CredentialKind::OAuth(OAuthKind::Anthropic),
         default_base: Some(crate::oauth::anthropic_max::DEFAULT_API_BASE),
         native_responses: NativeResponses::Unsupported,
         ingress: CHAT_FORMATS,
         transports: HTTP,
+        media: &[],
         extensions: &[RequestExtensionKind::ClaudeCode],
         forward_client_identity: true,
         account: Some(&crate::oauth::anthropic_max::account::HOOKS),
@@ -284,12 +319,12 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::CodexOAuth,
         inference: Some(crate::inference::codex),
         dialect_for_model: openai_dialect,
-        chat_only: true,
         credential: CredentialKind::OAuth(OAuthKind::Codex),
         default_base: Some(crate::oauth::codex::DEFAULT_API_BASE),
         native_responses: okapi_domain::provider_contract::CODEX.native_responses,
         ingress: RESPONSES_FORMATS,
         transports: HTTP_AND_WS,
+        media: &[],
         extensions: &[RequestExtensionKind::CodexClient],
         forward_client_identity: true,
         account: Some(&crate::oauth::codex::account::HOOKS),
@@ -299,12 +334,13 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         kind: AdapterKind::CustomPass,
         inference: None,
         dialect_for_model: opaque_dialect,
-        chat_only: false,
         credential: CredentialKind::PassThrough,
         default_base: None,
         native_responses: NativeResponses::Unsupported,
         ingress: &[],
         transports: HTTP,
+        // Reached only through its own /pass route (path allow-list, per-call billing).
+        media: &[],
         extensions: &[],
         forward_client_identity: false,
         account: None,
@@ -377,6 +413,28 @@ mod tests {
         assert!(!codex.accepts(ApiFormat::ChatCompletions, "x", true));
         assert!(!codex.accepts(ApiFormat::Messages, "x", true));
         assert!(!codex.accepts(ApiFormat::Gemini, "x", true));
+    }
+
+    #[test]
+    fn media_surfaces_are_declared_per_adapter() {
+        let serving = |surface| {
+            BUILT_INS
+                .iter()
+                .filter(|d| d.serves(surface))
+                .map(|d| d.id)
+                .collect::<Vec<_>>()
+        };
+        let openai_shaped = ["openai", "openai_compat", "azure"];
+        assert_eq!(serving(MediaSurface::Embeddings), openai_shaped);
+        assert_eq!(serving(MediaSurface::Audio), openai_shaped);
+        assert_eq!(serving(MediaSurface::Images), openai_shaped);
+        assert_eq!(serving(MediaSurface::Videos), ["openai", "openai_compat"]);
+        assert_eq!(serving(MediaSurface::Realtime), ["openai", "openai_compat"]);
+        assert_eq!(serving(MediaSurface::ImageBatches), ["gemini", "vertex"]);
+        // Subscription accounts and the pass-through adapter only ever take their own routes.
+        for id in ["anthropic_max", "codex", "custom_pass"] {
+            assert!(lookup(id).unwrap().media.is_empty(), "{id}");
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Query;
 use okapi_ledger::{Pool, SettlementInput};
 use okapi_pricing::{CalcContext, calculate};
+use okapi_providers::registry::MediaSurface;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -254,32 +255,17 @@ async fn prepare(
         codes::CLIENT_CLOSED_REQUEST,
     ));
 
-    // 候选：openai 协议渠道（anthropic/gemini 无 Realtime 面；能力显式 false 排除）
-    let rows = state
-        .candidates_for_model(&canonical, &key.pool_chain())
-        .await;
-    let mut candidates: Vec<_> = match rows {
-        Ok(rows) => super::scheduler::order_candidates(rows)
-            .into_iter()
-            .filter(|c| {
-                // azure：Realtime 是 `wss://.../openai/realtime?deployment=&api-version=`
-                // 另一种握手 URL，本期不接（IMPLEMENTATION §11.29）
-                !matches!(
-                    c.provider.as_str(),
-                    "anthropic" | "gemini" | "azure" | "bedrock" | "vertex"
-                ) && c.capabilities.get("realtime").and_then(Value::as_bool) != Some(false)
-            })
-            .collect(),
-        Err(err) => {
-            admission.disarm();
-            release_reservation_and_slot(state, key, request_id, reservation_pool).await;
-            return Err(err.into());
-        }
-    };
-    let margin_removed = state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    let no_candidates = candidates.is_empty();
+    // 候选：注册表里声明了 Realtime 的渠道（openai / openai_compat）。azure 的 Realtime 是
+    // `wss://.../openai/realtime?deployment=&api-version=` 另一种握手 URL，本期不接（IMPLEMENTATION §11.29）
+    let candidates =
+        match super::candidates::media(state, key, &canonical, MediaSurface::Realtime).await {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                admission.disarm();
+                release_reservation_and_slot(state, key, request_id, reservation_pool).await;
+                return Err(err);
+            }
+        };
     // 一条会话只接一个上游：取第一个过得了 key 级 RPM / 当日消费闸的候选
     let mut picked = None;
     for cand in candidates {
@@ -291,12 +277,10 @@ async fn prepare(
     let Some(cand) = picked else {
         admission.disarm();
         release_reservation_and_slot(state, key, request_id, reservation_pool).await;
-        let code = if no_candidates {
-            super::state::no_candidates_code(margin_removed)
-        } else {
-            codes::NO_AVAILABLE_CHANNEL
-        };
-        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, code));
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            codes::NO_AVAILABLE_CHANNEL,
+        ));
     };
     let upstream_model = cand.upstream_model(&canonical).to_owned();
     let base = cand

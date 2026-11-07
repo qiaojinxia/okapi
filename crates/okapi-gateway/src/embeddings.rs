@@ -15,6 +15,7 @@ use okapi_kernel::error::AppError;
 use okapi_kernel::error::with_request_id;
 use okapi_ledger::SettlementInput;
 use okapi_pricing::calculate;
+use okapi_providers::registry::MediaSurface;
 use okapi_providers::{UpstreamError, rewrite_model};
 use serde::Deserialize;
 use std::time::Instant;
@@ -438,27 +439,10 @@ async fn forward(
     request_id: Uuid,
     est_prompt: u32,
 ) -> Result<ForwardOk, (AppError, Option<(i64, i64, String)>, i16)> {
-    let rows = state
-        .candidates_for_model(canonical, &key.pool_chain())
+    // rerank 与 embeddings 是同一条 OpenAI 形态的 JSON 中继，按同一面选渠道
+    let candidates = super::candidates::media(state, key, canonical, MediaSurface::Embeddings)
         .await
-        .map_err(|e| (AppError::from(e), None, 0))?;
-    let mut candidates: Vec<_> = super::scheduler::order_candidates(rows)
-        .into_iter()
-        .filter(|c| c.provider != "anthropic" && !super::dialect::chat_only(&c.provider))
-        .collect();
-    let margin_removed = state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    if candidates.is_empty() {
-        return Err((
-            AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                super::state::no_candidates_code(margin_removed),
-            ),
-            None,
-            0,
-        ));
-    }
+        .map_err(|e| (e, None, 0))?;
 
     let mut failover: i16 = 0;
     let mut last: Option<(i64, i64, String)> = None;

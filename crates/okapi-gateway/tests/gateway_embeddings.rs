@@ -284,6 +284,36 @@ async fn embeddings_failover_on_transient() {
     assert_eq!(failover, 1);
 }
 
+/// 候选只认注册表里声明了 embeddings 的 provider，渠道还能用 `capabilities.embeddings = false`
+/// 关掉这一面：排在前面的那条不会被选上（也不算一次 failover），请求直接落到后面能接的渠道。
+#[tokio::test]
+async fn embeddings_skip_channels_that_do_not_serve_the_surface() {
+    for (provider, capabilities) in [
+        ("gemini", json!({})),
+        ("custom_pass", json!({})),
+        ("openai", json!({"embeddings": false})),
+    ] {
+        let env = setup(&[("/fail/v1", 10), ("/ok/v1", 0)]).await;
+        sqlx::query(
+            "UPDATE channels SET provider = $2, capabilities = $3 WHERE models @> $1 AND priority = 10",
+        )
+        .bind(json!([env.model]))
+        .bind(provider)
+        .bind(&capabilities)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+        let resp = post_embeddings(&env).await;
+        assert_eq!(resp.status(), 200, "{provider} {capabilities}");
+        let (status, amount, _, failover) = wait_record(&env.pg, env.user_id).await;
+        assert_eq!(
+            (status, amount, failover),
+            (20, 240, 0),
+            "{provider} {capabilities}: 不该先打到 /fail 那条"
+        );
+    }
+}
+
 #[tokio::test]
 async fn embeddings_failover_uses_the_successful_channel_cost() {
     for (ratio, cost) in [(2250, 540), (0, 0)] {

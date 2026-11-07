@@ -11,9 +11,6 @@ use okapi_store::ChannelCandidate;
 pub fn upstream_dialect(provider: &str, model: &str) -> &'static str {
     registry::lookup(provider).map_or("opaque", |adapter| adapter.dialect(model).as_str())
 }
-pub fn chat_only(provider: &str) -> bool {
-    registry::lookup(provider).is_some_and(registry::ProviderDescriptor::chat_only)
-}
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub async fn infer_via(
@@ -156,6 +153,5 @@ mod tests {
             "anthropic"
         );
         assert_eq!(upstream_dialect("vertex", "gemini-2.5-flash"), "gemini");
-        assert!(chat_only("bedrock") && chat_only("vertex") && !chat_only("azure"));
     }
 }

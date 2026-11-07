@@ -40,10 +40,8 @@ pub(super) enum Remote {
     Vertex(VertexBatch, Box<GcsStore>),
 }
 pub(super) fn eligible(c: &ChannelCandidate, provider: Option<&str>) -> bool {
-    matches!(c.provider.as_str(), "gemini" | "vertex")
-        && provider.is_none_or(|p| p == c.provider)
-        && c.capabilities.get("batch_images") != Some(&serde_json::Value::Bool(false))
-        && c.capabilities.get("images") != Some(&serde_json::Value::Bool(false))
+    provider.is_none_or(|p| p == c.provider)
+        && crate::candidates::serves(c, okapi_providers::registry::MediaSurface::ImageBatches)
 }
 impl Binding {
     pub async fn capture(

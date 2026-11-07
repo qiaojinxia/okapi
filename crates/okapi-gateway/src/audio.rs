@@ -16,6 +16,7 @@ use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Multipart;
 use okapi_ledger::SettlementInput;
 use okapi_pricing::{Quote, calculate, calculate_characters};
+use okapi_providers::registry::MediaSurface;
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
 use serde_json::Value;
@@ -29,32 +30,13 @@ struct SpeechProbe {
     input: String,
 }
 
-/// 候选（openai 系）：audio 只走 openai/openai_compat 渠道。
+/// 候选：注册表里声明了 audio 的渠道（openai / openai_compat / azure）。
 async fn first_candidate(
     state: &AppState,
     canonical: &str,
     key: &okapi_store::AuthedKey,
 ) -> Result<okapi_store::ChannelCandidate, AppError> {
-    let rows = state
-        .candidates_for_model(canonical, &key.pool_chain())
-        .await?;
-    let mut candidates: Vec<_> = super::scheduler::order_candidates(rows)
-        .into_iter()
-        .filter(|c| {
-            c.provider != "anthropic"
-                && c.provider != "gemini"
-                && !super::dialect::chat_only(&c.provider)
-        })
-        .collect();
-    let margin_removed = state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    if candidates.is_empty() {
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            super::state::no_candidates_code(margin_removed),
-        ));
-    }
+    let candidates = super::candidates::media(state, key, canonical, MediaSurface::Audio).await?;
     // 只发一次（不 failover）：取第一个过得了 key 级 RPM / 当日消费闸的候选
     for cand in candidates {
         if super::key_gate::check(state, &cand).await.is_ok() {

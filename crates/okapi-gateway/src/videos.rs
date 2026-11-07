@@ -20,6 +20,7 @@ use okapi_kernel::error::with_request_id;
 use okapi_kernel::extract::Path;
 use okapi_ledger::SettlementInput;
 use okapi_pricing::{Quote, calculate};
+use okapi_providers::registry::MediaSurface;
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
 use serde_json::Value;
@@ -133,40 +134,15 @@ async fn handle_create(
         source_window.as_deref(),
     );
     // —— 预扣已建立 ——
-    let rows = state
-        .candidates_for_model(&canonical, &key.pool_chain())
-        .await
-        .map_err(AppError::from);
-    let mut candidates: Vec<_> = match rows {
-        Ok(rows) => super::scheduler::order_candidates(rows)
-            .into_iter()
-            // azure：Sora 走 `/openai/v1/video/generations/jobs` 另一套任务 API，本期不接
-            // 订阅类渠道（codex / anthropic_max …）只有对话接口：配了视频模型也只会 502，与 audio 同样排除
-            .filter(|c| {
-                !matches!(
-                    c.provider.as_str(),
-                    "anthropic" | "gemini" | "azure" | "bedrock" | "vertex"
-                ) && !super::dialect::chat_only(&c.provider)
-            })
-            .collect(),
-        Err(err) => {
-            refund(state, &key, request_id, "videos").await;
-            failure.error(&err);
-            return Err(err);
-        }
-    };
-    let margin_removed = state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    if candidates.is_empty() {
-        refund(state, &key, request_id, "videos").await;
-        let error = AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            super::state::no_candidates_code(margin_removed),
-        );
-        failure.error(&error);
-        return Err(error);
-    }
+    let candidates =
+        match super::candidates::media(state, &key, &canonical, MediaSurface::Videos).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                refund(state, &key, request_id, "videos").await;
+                failure.error(&error);
+                return Err(error);
+            }
+        };
 
     let mut failover: i16 = 0;
     let mut last_err: Option<AppError> = None;
