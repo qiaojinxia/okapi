@@ -1,7 +1,7 @@
 //! A checked protocol/adapter operation, not a normalized request or response IR.
 use super::ingress::Ingress;
 use okapi_providers::registry::{
-    self, ApiFormat, Dialect, NativeResponses, ProviderDescriptor, WireTransport,
+    self, AdapterKind, ApiFormat, Dialect, NativeResponses, ProviderDescriptor, WireTransport,
 };
 use okapi_store::ChannelCandidate;
 use serde_json::Value;
@@ -124,6 +124,40 @@ impl ExecutionPlan {
             self.operation,
             Operation::Responses | Operation::ResponsesCompact
         )
+    }
+
+    /// 这次尝试打到上游的端点（`{model}` 是上游模型名的占位）：账单与日志的 `upstream_endpoint`、
+    /// 诊断里每次尝试记的端点都用它，同一次尝试只有一个标签。
+    pub const fn endpoint(self, stream: bool) -> &'static str {
+        match (self.operation, self.adapter.kind) {
+            (Operation::ResponsesCompact, _) => "/v1/responses/compact",
+            (Operation::Responses, _) => "/v1/responses",
+            (Operation::Messages, AdapterKind::Bedrock) if stream => {
+                "/model/{model}/invoke-with-response-stream"
+            }
+            (Operation::Messages, AdapterKind::Bedrock) => "/model/{model}/invoke",
+            (Operation::Messages, AdapterKind::Vertex) if stream => {
+                "/publishers/anthropic/models/{model}:streamRawPredict"
+            }
+            (Operation::Messages, AdapterKind::Vertex) => {
+                "/publishers/anthropic/models/{model}:rawPredict"
+            }
+            (Operation::Messages, _) => "/v1/messages",
+            (Operation::GenerateContent, AdapterKind::Vertex) if stream => {
+                "/publishers/google/models/{model}:streamGenerateContent"
+            }
+            (Operation::GenerateContent, AdapterKind::Vertex) => {
+                "/publishers/google/models/{model}:generateContent"
+            }
+            (Operation::GenerateContent, _) if stream => {
+                "/v1beta/models/{model}:streamGenerateContent"
+            }
+            (Operation::GenerateContent, _) => "/v1beta/models/{model}:generateContent",
+            (Operation::ChatCompletions, AdapterKind::Azure) => {
+                "/openai/deployments/{model}/chat/completions"
+            }
+            (Operation::ChatCompletions, _) => "/v1/chat/completions",
+        }
     }
 
     pub const fn can_fallback_to_chat(self) -> bool {
@@ -354,5 +388,98 @@ mod tests {
                 .unwrap()
                 .websocket_ingress()
         );
+    }
+
+    /// 标签改由计划推导之前的那张表（按入口 × provider），留作对照。
+    fn previous_label(
+        ingress: Ingress,
+        provider: &str,
+        responses_native: bool,
+        stream: bool,
+    ) -> &'static str {
+        match (ingress, provider) {
+            (Ingress::ResponsesCompact, _) => "/v1/responses/compact",
+            (Ingress::Responses, _) if responses_native => "/v1/responses",
+            (_, "anthropic" | "anthropic_max") => "/v1/messages",
+            (_, "bedrock") if stream => "/model/{model}/invoke-with-response-stream",
+            (_, "bedrock") => "/model/{model}/invoke",
+            (_, "vertex") if stream => "/publishers/{publisher}/models/{model}:stream",
+            (_, "vertex") => "/publishers/{publisher}/models/{model}:predict",
+            (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") if stream => {
+                "/v1beta/models/{model}:streamGenerateContent"
+            }
+            (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") => {
+                "/v1beta/models/{model}:generateContent"
+            }
+            (_, "azure") => "/openai/deployments/{model}/chat/completions",
+            _ => "/v1/chat/completions",
+        }
+    }
+
+    /// 每种编得出计划的 入口 × provider × 模型方言 × 直转开关 × 流式 组合，标签都和原来那张表一样，
+    /// 只有 Vertex 改记真实路径（Claude 走 rawPredict，Gemini 走 generateContent）。
+    #[test]
+    fn endpoint_labels_keep_their_values_except_vertex() {
+        let mut compared = 0;
+        for provider in [
+            "openai",
+            "openai_compat",
+            "azure",
+            "anthropic",
+            "anthropic_max",
+            "bedrock",
+            "vertex",
+            "gemini",
+            "codex",
+            "custom_pass",
+        ] {
+            for model in ["gpt-5", "claude-sonnet-4-5@20250929", "gemini-2.5-pro"] {
+                for ingress in [
+                    Ingress::OpenAi,
+                    Ingress::Anthropic,
+                    Ingress::Responses,
+                    Ingress::ResponsesCompact,
+                    Ingress::Gemini,
+                ] {
+                    for native in [false, true] {
+                        let Ok(plan) = ExecutionPlan::compile_target(
+                            ingress,
+                            provider,
+                            model,
+                            native,
+                            &json!({}),
+                            Requirements::default(),
+                        ) else {
+                            continue;
+                        };
+                        // 渠道上存的是生效值（`okapi_store::channels::responses_native_for`）
+                        let effective =
+                            okapi_domain::provider_contract::native_responses_for(provider)
+                                .enabled(Some(native));
+                        for stream in [false, true] {
+                            let case = format!("{provider} {model} {ingress:?} {native} {stream}");
+                            let expected = match (provider, plan.dialect, stream) {
+                                ("vertex", Dialect::Anthropic, false) => {
+                                    "/publishers/anthropic/models/{model}:rawPredict"
+                                }
+                                ("vertex", Dialect::Anthropic, true) => {
+                                    "/publishers/anthropic/models/{model}:streamRawPredict"
+                                }
+                                ("vertex", _, false) => {
+                                    "/publishers/google/models/{model}:generateContent"
+                                }
+                                ("vertex", _, true) => {
+                                    "/publishers/google/models/{model}:streamGenerateContent"
+                                }
+                                _ => previous_label(ingress, provider, effective, stream),
+                            };
+                            assert_eq!(plan.endpoint(stream), expected, "{case}");
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 200, "对照的组合太少，循环条件写错了：{compared}");
     }
 }

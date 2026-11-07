@@ -105,6 +105,7 @@ impl AppState {
     pub async fn openai_chat(
         &self,
         cand: &ChannelCandidate,
+        endpoint: &str,
         upstream_model: &str,
         body: Bytes,
         stream: bool,
@@ -113,6 +114,7 @@ impl AppState {
             .infer_via(
                 cand,
                 okapi_providers::inference::Surface::Chat,
+                endpoint,
                 &openai_base(cand),
                 upstream_model,
                 body,

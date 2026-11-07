@@ -12,24 +12,20 @@ pub fn upstream_dialect(provider: &str, model: &str) -> &'static str {
     registry::lookup(provider).map_or("opaque", |adapter| adapter.dialect(model).as_str())
 }
 impl AppState {
+    /// `endpoint` 是这次尝试的执行计划给出的上游端点（`ExecutionPlan::endpoint`），诊断里按它记，
+    /// 与账单上的 `upstream_endpoint` 是同一个标签。
     #[allow(clippy::too_many_arguments)]
     pub async fn infer_via(
         &self,
         cand: &ChannelCandidate,
         surface: Surface,
+        endpoint: &str,
         base: &str,
         model: &str,
         body: Bytes,
         stream: bool,
         outbound: &Outbound,
     ) -> Result<Response, UpstreamError> {
-        let endpoint = match surface {
-            Surface::Chat => "/v1/chat/completions",
-            Surface::Messages => "/v1/messages",
-            Surface::Generate => "generateContent",
-            Surface::Responses { compact: true } => "/v1/responses/compact",
-            Surface::Responses { compact: false } => "/v1/responses",
-        };
         super::account_control::execute(self, cand, model, endpoint, async {
             let credential = CredentialManager.resolve(self, cand).await?;
             let account_id = credential
@@ -64,9 +60,11 @@ impl AppState {
         })
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn responses_via(
         &self,
         cand: &ChannelCandidate,
+        endpoint: &str,
         base: &str,
         body: Bytes,
         stream: bool,
@@ -77,6 +75,7 @@ impl AppState {
             .infer_via(
                 cand,
                 Surface::Responses { compact },
+                endpoint,
                 base,
                 "",
                 body,
@@ -93,6 +92,7 @@ impl AppState {
     pub async fn messages_via(
         &self,
         cand: &ChannelCandidate,
+        endpoint: &str,
         base: &str,
         model: &str,
         body: Bytes,
@@ -100,7 +100,16 @@ impl AppState {
         outbound: &Outbound,
     ) -> Result<okapi_providers::anthropic::MessagesResponse, UpstreamError> {
         match self
-            .infer_via(cand, Surface::Messages, base, model, body, stream, outbound)
+            .infer_via(
+                cand,
+                Surface::Messages,
+                endpoint,
+                base,
+                model,
+                body,
+                stream,
+                outbound,
+            )
             .await?
         {
             Response::Messages(response) => Ok(response),
@@ -110,6 +119,7 @@ impl AppState {
     pub async fn generate_via(
         &self,
         cand: &ChannelCandidate,
+        endpoint: &str,
         base: &str,
         model: &str,
         body: Bytes,
@@ -119,6 +129,7 @@ impl AppState {
             .infer_via(
                 cand,
                 Surface::Generate,
+                endpoint,
                 base,
                 model,
                 body,

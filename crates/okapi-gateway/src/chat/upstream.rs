@@ -1,5 +1,5 @@
 //! 上游请求体：按入口 × 渠道方言构造与改写，并分派到注册的上游实现。
-use super::super::execution_plan::{ExecutionPlan, Requirements};
+use super::super::execution_plan::{ExecutionPlan, Operation, PlanError, Requirements};
 use super::super::ingress::Ingress;
 use super::{ProbeInfo, RequestBilling, UnifiedReasoning, bound_default_output, lost_tools};
 use bytes::Bytes;
@@ -45,63 +45,7 @@ pub(super) fn build_upstream_body(
     // 改名之后收到被拒的 max_tokens。`source` 仍是客户端的原文：后面判断"客户端自己写没写
     // 上限"要看它，补上的缺省不能被当成客户端的硬上限。
     let body = &bound_default_output(bill.ingress, bill.default_output_cap, source.clone());
-    let built = match (bill.ingress, dialect) {
-        // Responses 同方言：只改 model，其余字段（previous_response_id/store/include/
-        // 内置工具/reasoning）一律原样——这正是直转相对降级链的全部价值。
-        // usage 随 response.completed 必带，无需 stream_options。
-        (Ingress::Responses, _) if native_responses => {
-            rewrite_model(body, &info.requested_model, upstream_model)
-        }
-        (Ingress::OpenAi, "anthropic") => {
-            convert::request_openai_to_anthropic(body, upstream_model, bill.completion_cap)
-        }
-        (Ingress::OpenAi, "gemini") => conv_gem::request_openai_to_gemini(body),
-        // Compact 同方言只重写 model，不注入 stream_options。
-        (Ingress::ResponsesCompact, _) => {
-            rewrite_model(body, &info.requested_model, upstream_model)
-        }
-        (Ingress::Anthropic, "anthropic") => {
-            rewrite_model(body, &info.requested_model, upstream_model)
-                .and_then(|body| with_anthropic_default_cap(body, bill.completion_cap))
-        }
-        // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
-        // 转换器早已强制注入，唯独这条最常用的路曾漏掉——客户端不主动开
-        // stream_options 时上游不返 usage，结算落字符估算，实测漏收约七成。
-        (Ingress::OpenAi, _) => rewrite_model(body, &info.requested_model, upstream_model)
-            .and_then(|b| {
-                if info.stream {
-                    ensure_stream_usage(&b)
-                } else {
-                    Ok(b)
-                }
-            }),
-        (Ingress::Anthropic, _) => conv_a2o::request_anthropic_to_openai(body, upstream_model),
-        (Ingress::Responses, dialect) => conv_resp::request_responses_to_chat(body, upstream_model)
-            .and_then(|chat_body| match dialect {
-                "anthropic" => convert::request_openai_to_anthropic(
-                    &chat_body,
-                    upstream_model,
-                    bill.completion_cap,
-                ),
-                "gemini" => conv_gem::request_openai_to_gemini(&chat_body),
-                _ => Ok(chat_body),
-            }),
-        // Gemini 同方言：原样透传（模型名在 URL 上，body 里没有可重写的 model）
-        (Ingress::Gemini, "gemini") => Ok(body.clone()),
-        // Gemini 客户端 + anthropic 上游：gemini→chat→anthropic 两跳
-        (Ingress::Gemini, "anthropic") => conv_g2o::request_gemini_to_openai(
-            body,
-            upstream_model,
-            info.stream,
-        )
-        .and_then(|chat_body| {
-            convert::request_openai_to_anthropic(&chat_body, upstream_model, bill.completion_cap)
-        }),
-        // Gemini 客户端 + OpenAI(兼容) 上游：转换器已按 stream 注入 stream_options
-        (Ingress::Gemini, _) => {
-            conv_g2o::request_gemini_to_openai(body, upstream_model, info.stream)
-        }
-    }?;
+    let built = convert_request(bill, info, plan.operation, body, upstream_model)?;
     let built = bill.server_tools.restore(built, dialect)?;
     let profile = okapi_providers::model_parameters::profile(
         dialect,
@@ -126,15 +70,105 @@ pub(super) fn build_upstream_body(
     {
         return result;
     }
-    match bill.directive {
-        _ if bill.ingress == Ingress::ResponsesCompact => Ok(built),
-        Some(d) if native_responses => reasoning::apply_responses(&built, d),
-        Some(d) => match dialect {
-            "anthropic" => reasoning::apply_anthropic(&built, d),
-            "gemini" => reasoning::apply_gemini(&built, d),
-            _ => reasoning::apply_openai(&built, d),
-        },
-        None => Ok(built),
+    let Some(directive) = bill.directive else {
+        return Ok(built);
+    };
+    match plan.operation {
+        // Compact 不带推理强度
+        Operation::ResponsesCompact => Ok(built),
+        Operation::Responses => reasoning::apply_responses(&built, directive),
+        Operation::Messages => reasoning::apply_anthropic(&built, directive),
+        Operation::GenerateContent => reasoning::apply_gemini(&built, directive),
+        Operation::ChatCompletions => reasoning::apply_openai(&built, directive),
+    }
+}
+
+/// 请求体的「入口 × 操作」矩阵：同方言只改 model（外加该入口必要的补丁），跨方言走对应的转换器。
+fn convert_request(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    operation: Operation,
+    body: &Bytes,
+    upstream_model: &str,
+) -> Result<Bytes, UpstreamError> {
+    match (bill.ingress, operation) {
+        // Responses 同方言：只改 model，其余字段（previous_response_id/store/include/
+        // 内置工具/reasoning）一律原样——这正是直转相对降级链的全部价值。
+        // usage 随 response.completed 必带，无需 stream_options。
+        // Compact 同方言同样只重写 model，不注入 stream_options。
+        (Ingress::Responses, Operation::Responses)
+        | (Ingress::ResponsesCompact, Operation::ResponsesCompact) => {
+            rewrite_model(body, &info.requested_model, upstream_model)
+        }
+        // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
+        // 转换器早已强制注入，唯独这条最常用的路曾漏掉——客户端不主动开
+        // stream_options 时上游不返 usage，结算落字符估算，实测漏收约七成。
+        (Ingress::OpenAi, Operation::ChatCompletions) => {
+            rewrite_model(body, &info.requested_model, upstream_model).and_then(|b| {
+                if info.stream {
+                    ensure_stream_usage(&b)
+                } else {
+                    Ok(b)
+                }
+            })
+        }
+        (Ingress::OpenAi, Operation::Messages) => {
+            convert::request_openai_to_anthropic(body, upstream_model, bill.completion_cap)
+        }
+        (Ingress::OpenAi, Operation::GenerateContent) => conv_gem::request_openai_to_gemini(body),
+        (Ingress::Anthropic, Operation::Messages) => {
+            rewrite_model(body, &info.requested_model, upstream_model)
+                .and_then(|body| with_anthropic_default_cap(body, bill.completion_cap))
+        }
+        (Ingress::Anthropic, Operation::ChatCompletions) => {
+            conv_a2o::request_anthropic_to_openai(body, upstream_model)
+        }
+        // Responses 客户端 + 上游没有 /responses：先转成 chat 形状，再按上游方言转
+        (Ingress::Responses, Operation::ChatCompletions) => {
+            conv_resp::request_responses_to_chat(body, upstream_model)
+        }
+        (Ingress::Responses, Operation::Messages) => {
+            conv_resp::request_responses_to_chat(body, upstream_model).and_then(|chat_body| {
+                convert::request_openai_to_anthropic(
+                    &chat_body,
+                    upstream_model,
+                    bill.completion_cap,
+                )
+            })
+        }
+        (Ingress::Responses, Operation::GenerateContent) => {
+            conv_resp::request_responses_to_chat(body, upstream_model)
+                .and_then(|chat_body| conv_gem::request_openai_to_gemini(&chat_body))
+        }
+        // Gemini 同方言：原样透传（模型名在 URL 上，body 里没有可重写的 model）
+        (Ingress::Gemini, Operation::GenerateContent) => Ok(body.clone()),
+        // Gemini 客户端 + anthropic 上游：gemini→chat→anthropic 两跳
+        (Ingress::Gemini, Operation::Messages) => conv_g2o::request_gemini_to_openai(
+            body,
+            upstream_model,
+            info.stream,
+        )
+        .and_then(|chat_body| {
+            convert::request_openai_to_anthropic(&chat_body, upstream_model, bill.completion_cap)
+        }),
+        // Gemini 客户端 + OpenAI(兼容) 上游：转换器已按 stream 注入 stream_options
+        (Ingress::Gemini, Operation::ChatCompletions) => {
+            conv_g2o::request_gemini_to_openai(body, upstream_model, info.stream)
+        }
+        // 编计划时已排除：Messages 入口不接 Gemini 方言，Responses / Compact 操作只给同名入口
+        (
+            Ingress::OpenAi | Ingress::Anthropic | Ingress::Gemini,
+            Operation::Responses | Operation::ResponsesCompact,
+        )
+        | (Ingress::Anthropic, Operation::GenerateContent)
+        | (Ingress::Responses, Operation::ResponsesCompact)
+        | (
+            Ingress::ResponsesCompact,
+            Operation::ChatCompletions
+            | Operation::Messages
+            | Operation::GenerateContent
+            | Operation::Responses,
+        ) => Err(PlanError::Endpoint.into()),
     }
 }
 
@@ -300,25 +334,25 @@ pub(super) async fn dispatch_chat(
         &bill.client_headers,
         Some(bill.user_id),
     );
-    // 方言臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
-    let dialect = plan.dialect.as_str();
-    let resp = match (bill.ingress, dialect) {
-        (Ingress::ResponsesCompact, _) => {
+    // 操作臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
+    let endpoint = plan.endpoint(stream);
+    let resp = match (bill.ingress, plan.operation) {
+        (Ingress::ResponsesCompact, Operation::ResponsesCompact) => {
             bill.state
-                .responses_via(cand, base, body, false, true, &outbound)
+                .responses_via(cand, endpoint, base, body, false, true, &outbound)
                 .await
         }
         // Responses 客户端 + 说 Responses 方言的上游：直转，事件原样透出
-        (Ingress::Responses, _) if native_responses => {
+        (Ingress::Responses, Operation::Responses) => {
             bill.state
-                .responses_via(cand, base, body, stream, false, &outbound)
+                .responses_via(cand, endpoint, base, body, stream, false, &outbound)
                 .await
         }
         // Gemini 客户端 + gemini 方言上游：透传 + 计费元数据扫描
-        (Ingress::Gemini, "gemini") => {
+        (Ingress::Gemini, Operation::GenerateContent) => {
             match bill
                 .state
-                .generate_via(cand, base, &upstream_model, body, stream)
+                .generate_via(cand, endpoint, base, &upstream_model, body, stream)
                 .await?
             {
                 okapi_providers::gemini::GeminiResponse::Json {
@@ -349,41 +383,65 @@ pub(super) async fn dispatch_chat(
             }
         }
         // Gemini 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
-        (Ingress::Gemini, "anthropic") => bill
+        (Ingress::Gemini, Operation::Messages) => bill
             .state
-            .messages_via(cand, base, &upstream_model, body, stream, &outbound)
+            .messages_via(
+                cand,
+                endpoint,
+                base,
+                &upstream_model,
+                body,
+                stream,
+                &outbound,
+            )
             .await
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model))
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // Gemini 客户端 + OpenAI(兼容 / Azure) 上游：chat 形状 → Gemini 形状
-        (Ingress::Gemini, _) => bill
+        (Ingress::Gemini, Operation::ChatCompletions) => bill
             .state
-            .openai_chat(cand, &upstream_model, body, stream)
+            .openai_chat(cand, endpoint, &upstream_model, body, stream)
             .await
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + gemini 方言上游：providers 内转回 OpenAI 形状
-        (Ingress::OpenAi | Ingress::Responses, "gemini") => bill
+        (Ingress::OpenAi | Ingress::Responses, Operation::GenerateContent) => bill
             .state
-            .generate_via(cand, base, &upstream_model, body, stream)
+            .generate_via(cand, endpoint, base, &upstream_model, body, stream)
             .await
             .and_then(|resp| conv_gem::wrap_generate(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状
-        (Ingress::OpenAi | Ingress::Responses, "anthropic") => bill
+        (Ingress::OpenAi | Ingress::Responses, Operation::Messages) => bill
             .state
-            .messages_via(cand, base, &upstream_model, body, stream, &outbound)
+            .messages_via(
+                cand,
+                endpoint,
+                base,
+                &upstream_model,
+                body,
+                stream,
+                &outbound,
+            )
             .await
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model)),
         // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
-        (Ingress::OpenAi | Ingress::Responses, _) => {
+        (Ingress::OpenAi | Ingress::Responses, Operation::ChatCompletions) => {
             bill.state
-                .openai_chat(cand, &upstream_model, body, stream)
+                .openai_chat(cand, endpoint, &upstream_model, body, stream)
                 .await
         }
         // Anthropic 客户端 + anthropic 方言上游：透传 + 计费元数据扫描
-        (Ingress::Anthropic, "anthropic") => {
+        (Ingress::Anthropic, Operation::Messages) => {
             match bill
                 .state
-                .messages_via(cand, base, &upstream_model, body, stream, &outbound)
+                .messages_via(
+                    cand,
+                    endpoint,
+                    base,
+                    &upstream_model,
+                    body,
+                    stream,
+                    &outbound,
+                )
                 .await?
             {
                 okapi_providers::anthropic::MessagesResponse::Json {
@@ -414,10 +472,10 @@ pub(super) async fn dispatch_chat(
             }
         }
         // Anthropic 客户端 + OpenAI(兼容 / Azure) 上游：回向转换为 Anthropic 事件/JSON
-        (Ingress::Anthropic, _) => {
+        (Ingress::Anthropic, Operation::ChatCompletions) => {
             match bill
                 .state
-                .openai_chat(cand, &upstream_model, body, stream)
+                .openai_chat(cand, endpoint, &upstream_model, body, stream)
                 .await?
             {
                 ChatResponse::Json {
@@ -446,6 +504,20 @@ pub(super) async fn dispatch_chat(
                 }
             }
         }
+        // 编计划时已排除：Messages 入口不接 Gemini 方言，Responses / Compact 操作只给同名入口
+        (
+            Ingress::OpenAi | Ingress::Anthropic | Ingress::Gemini,
+            Operation::Responses | Operation::ResponsesCompact,
+        )
+        | (Ingress::Anthropic, Operation::GenerateContent)
+        | (Ingress::Responses, Operation::ResponsesCompact)
+        | (
+            Ingress::ResponsesCompact,
+            Operation::ChatCompletions
+            | Operation::Messages
+            | Operation::GenerateContent
+            | Operation::Responses,
+        ) => Err(PlanError::Endpoint.into()),
     };
     let mut resp = resp?;
     if native_responses {

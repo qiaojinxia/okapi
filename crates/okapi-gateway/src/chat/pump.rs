@@ -1,5 +1,6 @@
 //! 流泵：首字后的转发、终止帧闸门、流结束时的结算交接。
 use super::super::estimate;
+use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
 use super::{
     FIRST_OUTPUT_TIMEOUT, ForwardFailure, RequestBilling, RespMeta, capture_chunk_meta,
@@ -67,31 +68,19 @@ pub(super) fn cand_info(
         bill_resp_model: cand.bill_by_response_model,
         trust_usage: cand.trust_upstream_usage,
         upstream_model: cand.upstream_model(model).to_owned(),
-        upstream_endpoint: upstream_endpoint(cand, stream, ingress).to_owned(),
+        upstream_endpoint: upstream_endpoint(cand, model, stream, ingress).to_owned(),
     }
 }
+/// 账单与日志里的 `upstream_endpoint`：由这次尝试的执行计划推导（[`ExecutionPlan::endpoint`]），
+/// 诊断里记的是同一个标签。编不出计划的候选发不到上游（构造请求体时就被拒），记空串。
 pub(super) fn upstream_endpoint(
     cand: &ChannelCandidate,
+    model: &str,
     stream: bool,
     ingress: Ingress,
 ) -> &'static str {
-    match (ingress, cand.provider.as_str()) {
-        (Ingress::ResponsesCompact, _) => "/v1/responses/compact",
-        (Ingress::Responses, _) if cand.responses_native => "/v1/responses",
-        (_, "anthropic" | "anthropic_max") => "/v1/messages",
-        (_, "bedrock") if stream => "/model/{model}/invoke-with-response-stream",
-        (_, "bedrock") => "/model/{model}/invoke",
-        (_, "vertex") if stream => "/publishers/{publisher}/models/{model}:stream",
-        (_, "vertex") => "/publishers/{publisher}/models/{model}:predict",
-        (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") if stream => {
-            "/v1beta/models/{model}:streamGenerateContent"
-        }
-        (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") => {
-            "/v1beta/models/{model}:generateContent"
-        }
-        (_, "azure") => "/openai/deployments/{model}/chat/completions",
-        _ => "/v1/chat/completions",
-    }
+    ExecutionPlan::compile(ingress, cand, model, Requirements::default())
+        .map_or("", |plan| plan.endpoint(stream))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -438,16 +427,24 @@ mod upstream_endpoint_tests {
         for provider in ["anthropic", "anthropic_max"] {
             cand.provider = provider.into();
             assert_eq!(
-                upstream_endpoint(&cand, true, Ingress::Anthropic),
+                upstream_endpoint(&cand, "claude-x", true, Ingress::Anthropic),
                 "/v1/messages",
                 "{provider}"
             );
         }
         cand.provider = "openai".into();
         assert_eq!(
-            upstream_endpoint(&cand, false, Ingress::OpenAi),
+            upstream_endpoint(&cand, "gpt-x", false, Ingress::OpenAi),
             "/v1/chat/completions"
         );
+    }
+
+    /// 编不出执行计划的候选（这里是只做透传的 custom_pass）发不到上游，不编一个端点出来。
+    #[test]
+    fn an_unplannable_candidate_has_no_upstream_endpoint() {
+        let mut cand = crate::scheduler::tests::cand(0, 1, 1000);
+        cand.provider = "custom_pass".into();
+        assert_eq!(upstream_endpoint(&cand, "m", false, Ingress::OpenAi), "");
     }
 }
 
