@@ -1,5 +1,6 @@
 //! Same upstream token fixture through Chat, Responses and Gemini, JSON and SSE.
-//! Retained server-tool statistics live in `gateway_server_tool_statistics` (split for the per-suite deadline).
+//! Retained server-tool statistics live in `gateway_server_tool_statistics`, and server-tool billing with the cost and
+//! reservation provenance of tool requests in `gateway_server_tool_billing` (both split for the per-suite deadline).
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 
@@ -11,44 +12,8 @@ mod published_pricing;
 mod usage_modalities;
 use usage_modalities::*;
 
-#[path = "support/server_tool_prices.rs"]
-mod server_tool_prices;
-
 #[path = "support/anthropic_usage.rs"]
 mod anthropic_usage;
-
-#[path = "support/server_tools.rs"]
-mod server_tools;
-
-#[path = "support/server_tool_fees.rs"]
-mod server_tool_fees;
-
-#[path = "support/server_tool_admission.rs"]
-mod server_tool_admission;
-
-#[path = "support/server_tool_scope.rs"]
-mod server_tool_scope;
-
-#[path = "support/server_tool_routing.rs"]
-mod server_tool_routing;
-
-#[path = "support/native_gemini_tools.rs"]
-mod native_gemini_tools;
-
-#[path = "support/server_tool_followups.rs"]
-mod server_tool_followups;
-
-#[path = "support/native_cost_coverage.rs"]
-mod native_cost_coverage;
-
-#[path = "support/cost_source.rs"]
-mod cost_source;
-
-#[path = "support/refund_cost_source.rs"]
-mod refund_cost_source;
-
-#[path = "support/reservation_provenance.rs"]
-mod reservation_provenance;
 
 #[path = "support/cache_ttl_billing.rs"]
 mod cache_ttl_billing;

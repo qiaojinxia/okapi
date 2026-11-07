@@ -1,5 +1,5 @@
 //! Draft and publish a model's server-tool prices through the admin API, then swap the gateway onto the new epoch.
-//! Test-free so both `gateway_usage_modalities` and `gateway_server_tool_statistics` can include it.
+//! Test-free so both `gateway_server_tool_billing` and `gateway_server_tool_statistics` can include it.
 use super::{Env, report};
 use serde_json::{Value, json};
 

@@ -1,6 +1,6 @@
-//! Harness shared by `gateway_usage_modalities` and `gateway_server_tool_statistics`: the mock upstream for every
-//! protocol (JSON and SSE), the per-test user / key / model / channel / published price, and the request / report /
-//! settlement-record helpers. No tests live here, so each suite runs its own cases exactly once.
+//! Harness shared by `gateway_usage_modalities`, `gateway_server_tool_billing` and `gateway_server_tool_statistics`:
+//! the mock upstream for every protocol (JSON and SSE), the per-test user / key / model / channel / published price,
+//! and the request / report / settlement-record helpers. No tests live here, so each suite runs only its own cases.
 use axum::{Json, Router, extract::State, http::Uri, response::IntoResponse, routing::post};
 use okapi::{console, gateway};
 use okapi_domain::Money;
