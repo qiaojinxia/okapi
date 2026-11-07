@@ -93,7 +93,7 @@ async fn handle_create(
     normalized["seconds"] = Value::String(units.to_string());
     let body = Bytes::from(serde_json::to_vec(&normalized).map_err(|_| AppError::bad_request())?);
 
-    let meta = super::chat::resolve_model_cached(state, &probe.model).await?;
+    let meta = super::candidates::resolve_model_cached(state, &probe.model).await?;
     let Some(meta) = meta.as_ref() else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };
@@ -265,7 +265,7 @@ async fn handle_create(
                     state,
                     &cand,
                     err.error_code(),
-                    super::chat::failure_kind_of(&err),
+                    super::upstream_failure::failure_kind_of(&err),
                 )
                 .await;
                 failover = failover.saturating_add(1);

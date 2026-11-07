@@ -1,12 +1,12 @@
-//! 准入：模型解析（含变体与推理指令）、估价与预扣、兜底模型冻结，以及候选缓存。
+//! 准入：模型解析（含变体与推理指令）、估价与预扣、兜底模型冻结。
 use super::super::estimate;
 use super::super::ingress::Ingress;
 use super::super::state::AppState;
 use super::{
     AdmittedFallback, CancelRefund, FailureReply, ForwardFailure, IMAGE_INPUT_TOKENS, ProbeInfo,
     RequestBilling, SettlementHandoff, UnifiedReasoning, admitted_completion_cap,
-    attachment_tokens, default_output_cap, image_inputs, price_above_max, settle_failure,
-    try_model, upstream_passthrough_response, user_agent,
+    attachment_tokens, cached_candidates, default_output_cap, image_inputs, price_above_max,
+    resolve_model_cached, settle_failure, try_model, upstream_passthrough_response, user_agent,
 };
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
@@ -17,7 +17,6 @@ use okapi_kernel::clients::detect_client_type;
 use okapi_kernel::error::AppError;
 use okapi_kernel::sched_redis::response_affinity;
 use okapi_providers::reasoning::{self, ReasoningDirective};
-use okapi_store::ChannelCandidate;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -61,23 +60,6 @@ pub(super) async fn resolve_with_directive(
         return Ok(Some((meta.clone(), m.reasoning(), Some(variant))));
     }
     Ok(None)
-}
-
-/// 模型解析（60s 进程缓存；miss 回源 PG）。
-pub(crate) async fn resolve_model_cached(
-    state: &AppState,
-    requested: &str,
-) -> Result<Arc<Option<okapi_store::channels::ResolvedModel>>, AppError> {
-    if let Some(hit) = state.routing.model_cache.get(requested).await {
-        return Ok(hit);
-    }
-    let resolved = Arc::new(okapi_store::channels::resolve_model(&state.pg, requested).await?);
-    state
-        .routing
-        .model_cache
-        .insert(requested.to_owned(), Arc::clone(&resolved))
-        .await;
-    Ok(resolved)
 }
 
 pub(super) async fn handle_chat(
@@ -488,35 +470,6 @@ pub(super) fn fallback_billing(bill: &RequestBilling, fb: &AdmittedFallback) -> 
         downgraded_from: Some(bill.model.clone()),
         ..bill.clone()
     }
-}
-
-/// 模型在池链上的候选渠道。5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL
-/// 收敛）；缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户。
-pub(crate) async fn cached_candidates(
-    state: &AppState,
-    model: &str,
-    pool_chain: &[&str],
-    fresh: bool,
-) -> Result<Arc<Vec<ChannelCandidate>>, okapi_store::StoreError> {
-    let cache_key = format!("{model}|{}", pool_chain.join(">"));
-    if !fresh && let Some(hit) = state.routing.cand_cache.get(&cache_key).await {
-        return Ok(hit);
-    }
-    let rows = Arc::new(
-        okapi_store::channels::candidates_for_model(
-            &state.pg,
-            model,
-            pool_chain,
-            state.master_key.as_deref(),
-        )
-        .await?,
-    );
-    state
-        .routing
-        .cand_cache
-        .insert(cache_key, Arc::clone(&rows))
-        .await;
-    Ok(rows)
 }
 
 /// 预扣前看这个模型的候选渠道会怎样改写请求（客户端模拟会加 system 文本、1h 缓存断点，

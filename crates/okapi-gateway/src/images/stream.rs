@@ -154,7 +154,7 @@ async fn open(
                     &ctx.state,
                     &candidate,
                     error.error_code(),
-                    super::super::chat::failure_kind_of(&error),
+                    super::super::upstream_failure::failure_kind_of(&error),
                 )
                 .await;
                 last = Some(super::super::account_control::attempt_error(&error));

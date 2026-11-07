@@ -141,7 +141,7 @@ async fn handle(
     // 分词放在鉴权之后：匿名请求不该让网关替它跑整段 BPE（与 images 先鉴权再碰请求体同一纪律）
     let est_prompt = estimate();
 
-    let meta = super::chat::resolve_model_cached(state, requested_model).await?;
+    let meta = super::candidates::resolve_model_cached(state, requested_model).await?;
     let Some(meta) = meta.as_ref() else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };
@@ -411,7 +411,7 @@ async fn non_json_failure(
     request_id: Uuid,
     body: &[u8],
 ) -> Option<AppError> {
-    let kind = super::chat::non_json_kind(body)?;
+    let kind = super::upstream_failure::non_json_kind(body)?;
     super::key_health::failure(
         state,
         cand,
@@ -512,7 +512,7 @@ async fn forward(
                 } else {
                     AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
                 };
-                let kind = super::chat::failure_kind_of(&err);
+                let kind = super::upstream_failure::failure_kind_of(&err);
                 super::key_health::failure(state, &cand, err.error_code(), kind).await;
                 tracing::warn!(request_id = %request_id, channel_key = cand.channel_key_id,
                     code = err.error_code(), "embeddings 失败，failover 下一候选");

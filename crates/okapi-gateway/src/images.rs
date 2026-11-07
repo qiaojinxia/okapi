@@ -109,7 +109,7 @@ async fn prepare_pricing(
     units: u32,
     input: Option<&request::Input>,
 ) -> Result<Prepared, AppError> {
-    let meta = super::chat::resolve_model_cached(state, model).await?;
+    let meta = super::candidates::resolve_model_cached(state, model).await?;
     let Some(meta) = meta.as_ref() else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };
@@ -388,7 +388,7 @@ async fn handle(
                     state,
                     &cand,
                     err.error_code(),
-                    super::chat::failure_kind_of(&err),
+                    super::upstream_failure::failure_kind_of(&err),
                 )
                 .await;
                 failover = failover.saturating_add(1);
@@ -402,7 +402,7 @@ async fn handle(
                         state,
                         &cand,
                         err.error_code(),
-                        super::chat::failure_kind_of(&err),
+                        super::upstream_failure::failure_kind_of(&err),
                     )
                     .await;
                 }

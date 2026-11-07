@@ -208,7 +208,7 @@ impl AppState {
         model: &str,
         pool_chain: &[&str],
     ) -> Result<Vec<okapi_store::ChannelCandidate>, okapi_store::StoreError> {
-        let rows = super::chat::cached_candidates(self, model, pool_chain, false).await?;
+        let rows = super::candidates::cached_candidates(self, model, pool_chain, false).await?;
         Ok(rows.as_ref().clone())
     }
 

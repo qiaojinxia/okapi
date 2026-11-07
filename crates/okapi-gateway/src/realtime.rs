@@ -164,7 +164,7 @@ async fn prepare(
     requested_model: &str,
     request_id: Uuid,
 ) -> Result<Prep, AppError> {
-    let meta = super::chat::resolve_model_cached(state, requested_model).await?;
+    let meta = super::candidates::resolve_model_cached(state, requested_model).await?;
     let Some(meta) = meta.as_ref() else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };

@@ -51,7 +51,7 @@ async fn count(state: &AppState, headers: &HeaderMap, body: Bytes) -> Result<Res
     let key = super::auth::authenticate_data_plane(state, headers).await?;
     let mode = CountMode::from_headers(headers)?;
     let (requested, value) = validate_request(&body)?;
-    let meta = super::chat::resolve_model_cached(state, &requested).await?;
+    let meta = super::candidates::resolve_model_cached(state, &requested).await?;
     let meta = meta
         .as_ref()
         .as_ref()

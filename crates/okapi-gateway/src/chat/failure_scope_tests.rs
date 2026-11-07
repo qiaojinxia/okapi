@@ -415,53 +415,6 @@ fn status(status: u16, body: &str) -> UpstreamError {
     }
 }
 #[test]
-fn request_errors_and_resource_permissions_do_not_change_account_health() {
-    for error in [
-        UpstreamError::Connect("dns".into()),
-        UpstreamError::Timeout,
-        UpstreamError::Stream("transport".into()),
-        status(403, r#"{"error":{"code":"access_denied"}}"#),
-        status(408, ""),
-    ] {
-        assert!(matches!(failure_kind_of(&error), KeyFailure::Request));
-    }
-    assert!(matches!(
-        failure_kind_of(&status(401, "")),
-        KeyFailure::Invalid
-    ));
-    assert!(matches!(
-        failure_kind_of(&status(403, r#"{"error":{"code":"invalid_api_key"}}"#)),
-        KeyFailure::Invalid
-    ));
-    assert!(matches!(
-        failure_kind_of(&status(429, r#"{"error":{"code":"insufficient_quota"}}"#)),
-        KeyFailure::QuotaExhausted
-    ));
-    assert!(matches!(
-        failure_kind_of(&status(529, "")),
-        KeyFailure::RateLimited {
-            retry_after_secs: Some(600)
-        }
-    ));
-    assert!(matches!(
-        failure_kind_of(&status(503, "")),
-        KeyFailure::Transient
-    ));
-}
-
-/// Google 系的 429 把等待时间放在正文的 `RetryInfo.retryDelay`：key 的冷却按它走，不再落到缺省 60 秒。
-#[test]
-fn google_retry_info_sets_the_key_cooldown() {
-    let body = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"34s"}]}}"#;
-    assert!(matches!(
-        failure_kind_of(&status(429, body)),
-        KeyFailure::RateLimited {
-            retry_after_secs: Some(34)
-        }
-    ));
-}
-
-#[test]
 fn account_level_errors_inside_request_statuses_register_on_the_key_and_fail_over() {
     let credit = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
     let org = r#"{"type":"error","error":{"type":"invalid_request_error","message":"This organization has been disabled."}}"#;

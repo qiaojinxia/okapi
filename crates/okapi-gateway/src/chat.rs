@@ -8,8 +8,10 @@
 //! 首字后）或 json（非流式）→ settle（结算）；另有 count（count_tokens）与 limits（上限）。
 //! 子模块的条目都从这里原路径再导出，媒体端点、WebSocket 与控制面的引用不变。
 
+use super::candidates::{cached_candidates, resolve_model_cached};
 use super::estimate::estimate_prompt_tokens;
 use super::state::AppState;
+use super::upstream_failure::{failure_kind_of, non_json_failure, non_json_kind};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
@@ -23,7 +25,6 @@ use okapi_kernel::sched_redis::response_affinity::{
 use okapi_kernel::sched_redis::session_hash;
 use okapi_ledger::Pool;
 use okapi_pricing::{CalcContext, PriceBook};
-use okapi_providers::account_fault::AccountFault;
 use okapi_providers::convert::tool_loss::ForeignTools;
 use okapi_providers::reasoning::ReasoningDirective;
 use okapi_providers::{ChatEvent, StreamHandle, UpstreamError};
@@ -64,7 +65,6 @@ pub(super) use self::input::{check_input, request_features};
 #[cfg(test)]
 use self::json::non_stream_content_chars;
 use self::json::{RespMeta, attempt_json, capture_chunk_meta, upstream_passthrough_response};
-pub(super) use self::json::{non_json_failure, non_json_kind};
 use self::limits::{
     admitted_completion_cap, bound_default_output, default_output_cap, price_above_max,
 };
@@ -72,7 +72,6 @@ use self::limits::{
 use self::prepare::reserved_token_count;
 #[cfg(test)]
 use self::prepare::with_admission_hints;
-pub(crate) use self::prepare::{cached_candidates, resolve_model_cached};
 use self::prepare::{handle_chat, prepare_chat, resolve_with_directive};
 #[cfg(test)]
 use self::pump::advance_stream_sequence;
@@ -306,86 +305,6 @@ enum AttemptError {
     },
     /// 不可重试：立即向客户端返回。
     Fatal(ForwardFailure),
-}
-
-/// 上游错误 → key 状态机类别（§3.6 重试矩阵）。
-/// 注意顺序：insufficient_quota 判定先于 429——OpenAI 风格的
-/// `429 + insufficient_quota` 语义是配额耗尽（冷却到次日），不是限速（60s）。
-pub(super) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
-    match err {
-        UpstreamError::Status { status, body, .. }
-            if *status == 402 || (*status == 429 && body_says_insufficient_quota(body)) =>
-        {
-            KeyFailure::QuotaExhausted
-        }
-        UpstreamError::Status { status: 529, .. } => KeyFailure::RateLimited {
-            retry_after_secs: Some(err.retry_after_secs().unwrap_or(600)),
-        },
-        UpstreamError::Status { status: 429, .. } => KeyFailure::RateLimited {
-            retry_after_secs: err.retry_after_secs(),
-        },
-        UpstreamError::Status { status: 401, .. } => KeyFailure::Invalid,
-        // 403 只在 body 明说凭证问题时才算凭证失效，否则按资源级失败回退，不改变 key 健康（详见
-        // `body_says_credential_rejected`）
-        UpstreamError::Status {
-            status: 403, body, ..
-        } if body_says_credential_rejected(body) => KeyFailure::Invalid,
-        UpstreamError::Status {
-            status: 500..=599, ..
-        } => KeyFailure::Transient,
-        // 连接阶段失败：凭证无从判断；走了代理时归给代理的被动熔断（§11.41）
-        UpstreamError::Unreachable { proxy_hop, .. } => KeyFailure::Unreachable {
-            proxy_hop: *proxy_hop,
-        },
-        // 状态码看不出来、正文明说账号不能用了（余额耗尽 / 组织停用 / key 无效，常被包成 400 或
-        // 不带关键词的 403）：这把 key 要按账号级故障登记，否则它会一直被选中、一直失败
-        UpstreamError::Status { .. } => match err.account_fault() {
-            Some(AccountFault::QuotaExhausted) => KeyFailure::QuotaExhausted,
-            Some(AccountFault::Invalid) => KeyFailure::Invalid,
-            None => KeyFailure::Request,
-        },
-        UpstreamError::Connect(_)
-        | UpstreamError::Timeout
-        | UpstreamError::Stream(_)
-        | UpstreamError::Session { .. }
-        | UpstreamError::Build(_) => KeyFailure::Request,
-    }
-}
-
-/// 上游的 403 是不是真的在说「这把凭证不认」。
-///
-/// 401 = 没通过认证 → 凭证必然有问题；403 = 认证过了但不被允许，本质是**按资源**的判定。
-/// 聚合型上游普遍拿 403 表达「这个模型你的套餐没开通」（实测到的原文：
-/// `access_denied / Deposit required to unlock premium models`），而 key 本身完全有效。
-/// 此前 401 与 403 一并判 `Invalid`（`status=6`，无冷却、不自愈，控制面也没有复活入口），
-/// 于是调一次未开通的模型就把该渠道**所有**模型打死，只能靠重置凭证救回来。
-/// 故 403 改为：body 明说凭证问题才算失效，否则不改变 key 健康状态。
-fn body_says_credential_rejected(body: &Bytes) -> bool {
-    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
-    [
-        "invalid_api_key",
-        "invalid api key",
-        "incorrect api key",
-        "invalid_authentication",
-        "authentication_error",
-        "invalid token",
-        "api key not valid",
-        "unauthorized",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-}
-
-fn body_says_insufficient_quota(body: &Bytes) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            let err = v.get("error")?;
-            let code = err.get("code").and_then(|c| c.as_str()).unwrap_or("");
-            let kind = err.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            Some(code.contains("insufficient_quota") || kind.contains("insufficient_quota"))
-        })
-        .unwrap_or(false)
 }
 
 fn elapsed_ms_i32(started: Instant) -> i32 {

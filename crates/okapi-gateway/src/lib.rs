@@ -5,6 +5,7 @@ pub(crate) mod admission;
 pub mod audio;
 pub mod auth;
 pub mod bootstrap;
+pub(crate) mod candidates;
 pub mod channel_test;
 pub mod chat;
 pub mod credentials;
@@ -35,6 +36,7 @@ pub mod state;
 pub mod stream_policy;
 pub mod token_count;
 pub(crate) mod upstream_cost;
+pub(crate) mod upstream_failure;
 pub mod user_turns;
 pub mod videos;
 
