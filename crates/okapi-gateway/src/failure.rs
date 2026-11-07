@@ -1,6 +1,6 @@
 //! A reserved media request must end with a charge or a durable failure log.
+use super::admission::{Origin, Payer};
 use super::state::AppState;
-use okapi_domain::{BillingState, Money, TokenUsage};
 use okapi_ledger::{Pool, SettlementInput};
 use std::time::Instant;
 use uuid::Uuid;
@@ -9,6 +9,7 @@ pub(crate) struct Guard {
     state: AppState,
     key: okapi_store::AuthedKey,
     id: Uuid,
+    origin: Origin,
     model: String,
     dimensions: okapi_ledger::pg::UsageDimensions,
     started: Instant,
@@ -31,11 +32,13 @@ impl Guard {
         started: Instant,
         pool: Pool,
         window: Option<&str>,
+        origin: &Origin,
     ) -> Self {
         Self {
             state: state.clone(),
             key: key.clone(),
             id,
+            origin: origin.clone(),
             model: model.to_owned(),
             dimensions: okapi_ledger::pg::UsageDimensions::new(requested, "", endpoint, endpoint),
             started,
@@ -85,6 +88,7 @@ impl Drop for Guard {
         let state = self.state.clone();
         let key = self.key.clone();
         let id = self.id;
+        let origin = self.origin.clone();
         let model = self.model.clone();
         let dimensions = self
             .dimensions
@@ -98,43 +102,14 @@ impl Drop for Guard {
         // Shutdown tracks this detached cleanup, including cancellation of the handler.
         self.state.settlements.spawn(async move {
             let _ = state.ledger.refund(key.user_id, key.key_id, id).await;
+            let payer = Payer::new(&state, &key, id, &origin, pool, window.as_deref());
             state
                 .settle_write(SettlementInput {
-                    dimensions,
-                    request_id: id,
-                    log_type: 5,
-                    user_id: key.user_id,
-                    api_key_id: key.key_id,
-                    group_code: &key.group_code,
-                    model_name: &model,
                     channel_id: channel.map(|c| c.0),
                     channel_key_id: channel.map(|c| c.1),
-                    state: BillingState::Failed,
-                    usage: TokenUsage::default(),
-                    amount: Money::ZERO,
-                    original: Money::ZERO,
-                    discount: Money::ZERO,
-                    list_price: Money::ZERO,
-                    upstream_cost: None,
-                    pricing_epoch: None,
-                    pricing_snapshot: None,
                     latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-                    ttft_ms: None,
-                    is_stream: false,
-                    retry_count: 0,
-                    failover_count: 0,
-                    upstream_status: None,
                     error_code: Some(&error_code),
-                    upstream_request_id: None,
-                    node: &state.node,
-                    sticky_layer: 0,
-                    client_type: "",
-                    client_ip: None,
-                    delta_micro: 0,
-                    balance_after: None,
-                    event_type: "refund",
-                    pool,
-                    source_window: window,
+                    ..payer.settlement(&model, dimensions)
                 })
                 .await;
         });

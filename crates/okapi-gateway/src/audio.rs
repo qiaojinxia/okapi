@@ -3,6 +3,7 @@
 //! - transcriptions：per_call 模式必须（时长无法本地解码）；multipart 解析重组转发，
 //!   上游 verbose_json 的 duration 若在则记入快照 media_units（秒，审计用）。
 
+use super::admission::{Origin, Payer};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -11,10 +12,10 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, TokenUsage};
-use okapi_kernel::clients::detect_client_type;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Multipart;
 use okapi_ledger::SettlementInput;
+use okapi_ledger::pg::UsageDimensions;
 use okapi_pricing::{Quote, calculate, calculate_characters};
 use okapi_providers::registry::MediaSurface;
 use okapi_providers::rewrite_model;
@@ -99,6 +100,7 @@ async fn handle_speech(
     } = super::admission::reserve(state, &key, request_id, quote.amount, 0, chrono::Utc::now())
         .await?;
 
+    let origin = Origin::of(headers);
     let mut failure = super::failure::Guard::new(
         state,
         &key,
@@ -109,6 +111,7 @@ async fn handle_speech(
         started,
         reservation_pool,
         source_window.as_deref(),
+        &origin,
     );
     let cand = match first_candidate(state, &canonical, &key).await {
         Ok(c) => c,
@@ -138,18 +141,22 @@ async fn handle_speech(
             settle(
                 state,
                 &key,
+                Payer::new(
+                    state,
+                    &key,
+                    request_id,
+                    &origin,
+                    reservation_pool,
+                    source_window.as_deref(),
+                ),
                 &canonical,
                 &probe.model,
                 "/v1/audio/speech",
                 &quote,
                 usage,
-                request_id,
                 started,
                 Some(&cand),
                 None,
-                headers,
-                reservation_pool,
-                source_window.as_deref(),
                 &mut failure,
             )
             .await
@@ -301,6 +308,7 @@ async fn handle_transcriptions(
     } else {
         "/v1/audio/transcriptions"
     };
+    let origin = Origin::of(headers);
     let mut failure = super::failure::Guard::new(
         state,
         &key,
@@ -311,6 +319,7 @@ async fn handle_transcriptions(
         started,
         reservation_pool,
         source_window.as_deref(),
+        &origin,
     );
     let cand = match first_candidate(state, &canonical, &key).await {
         Ok(c) => c,
@@ -350,18 +359,22 @@ async fn handle_transcriptions(
             settle(
                 state,
                 &key,
+                Payer::new(
+                    state,
+                    &key,
+                    request_id,
+                    &origin,
+                    reservation_pool,
+                    source_window.as_deref(),
+                ),
                 &canonical,
                 &model,
                 endpoint,
                 &quote,
                 TokenUsage::default(),
-                request_id,
                 started,
                 Some(&cand),
                 duration_secs,
-                headers,
-                reservation_pool,
-                source_window.as_deref(),
                 &mut failure,
             )
             .await
@@ -405,18 +418,15 @@ async fn handle_transcriptions(
 async fn settle(
     state: &AppState,
     key: &okapi_store::AuthedKey,
+    payer: Payer<'_>,
     canonical: &str,
     requested_model: &str,
     endpoint: &str,
     quote: &Quote,
     usage: TokenUsage,
-    request_id: Uuid,
     started: Instant,
     cand: Option<&okapi_store::ChannelCandidate>,
     media_units: Option<u32>,
-    headers: &HeaderMap,
-    reservation_pool: okapi_ledger::Pool,
-    source_window: Option<&str>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
     let mut snapshot = quote.snapshot.clone();
@@ -433,21 +443,8 @@ async fn settle(
             quote.list_price,
         );
     }
-    let client_ip = okapi_kernel::clients::detect_client_ip(headers);
     let input = SettlementInput {
-        source_window: source_window.map(str::to_owned),
-        dimensions: okapi_ledger::pg::UsageDimensions::new(
-            requested_model,
-            cand.map_or("", |c| c.upstream_model(canonical)),
-            endpoint,
-            endpoint,
-        ),
-        request_id,
         log_type: 2,
-        user_id: key.user_id,
-        api_key_id: key.key_id,
-        group_code: &key.group_code,
-        model_name: canonical,
         channel_id: cand.map(|c| c.channel_id),
         channel_key_id: cand.map(|c| c.channel_key_id),
         state: BillingState::Committed,
@@ -456,25 +453,21 @@ async fn settle(
         original: quote.original,
         discount: quote.discount,
         list_price: quote.list_price,
-        upstream_cost: None,
         pricing_epoch: Some(pricing_epoch),
         pricing_snapshot: snapshot,
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-        ttft_ms: None,
-        is_stream: false,
-        retry_count: 0,
-        failover_count: 0,
         upstream_status: Some(200),
-        error_code: None,
-        upstream_request_id: None,
-        node: state.node.as_ref(),
-        sticky_layer: 0,
-        client_type: detect_client_type(headers),
-        client_ip: client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
-        balance_after: None,
         event_type: "commit",
-        pool: reservation_pool,
+        ..payer.settlement(
+            canonical,
+            UsageDimensions::new(
+                requested_model,
+                cand.map_or("", |c| c.upstream_model(canonical)),
+                endpoint,
+                endpoint,
+            ),
+        )
     };
     failure.disarm();
     if !state

@@ -3619,6 +3619,46 @@ NATS 广播」，现在都调 `admin::publish_pricing_inner`。
 `gateway_non_json_200` 的 `count_tokens_fails_over_when_the_first_account_is_refused` 与 `count_tokens_reports_a_missing_endpoint_as_501_and_other_refusals_as_502`
 （原有的网页 502 用例不变）、`quota` 与 `egress_probe` 各一个单测；变异检查：不重发 / 首个失败即返回 / 缺端点仍 502 三处各被对应用例咬住。
 
+### 11.71 媒体端点按注册表选渠道；落账的身份字段一处填（2026-11-06）
+
+起因：架构评审遗留的两处「同一件事写了好几份」。媒体端点各写一份 provider 黑名单，五份口径不一：embeddings 放行 gemini，
+realtime 放行订阅渠道，五个端点都放行 custom_pass 和注册表外的 provider。七个计费入口逐字段拼 `SettlementInput`，
+媒体失败账（`failure::Guard` 兜底写的那条）因此一直没有来源 IP 和客户端类型。
+
+- **媒体面声明进注册表**（`registry::MediaSurface`、`ProviderDescriptor.media`，替代只给这几处筛选用的 `chat_only`）：
+
+  | provider | embeddings / rerank | audio | images | videos | realtime | 图片批量 |
+  |---|---|---|---|---|---|---|
+  | openai、openai_compat | ✓ | ✓ | ✓ | ✓ | ✓ | |
+  | azure | ✓ | ✓ | ✓ | | | |
+  | gemini、vertex | | | | | | ✓ |
+  | anthropic、anthropic_max、bedrock、codex、custom_pass | | | | | | |
+
+  候选统一走 `candidates::media`：取模型的候选，排成 failover 序，只留声明了这一面的，再过毛利护栏，一个不剩就回 503。
+  图片批量的可选渠道和请求里的 `provider` 校验也查注册表。和此前黑名单的差异只有「放行 → 排除」，没有反方向的：
+  - gemini 不再接 embeddings / rerank。这条路径按 OpenAI 形态调用：渠道没配地址时，会带着 Gemini 的 key 打到 api.openai.com，
+    回 401 后这把 key 被判成失效。
+  - codex、anthropic_max 不再接 realtime。另外四个端点早就排除了它们。
+  - custom_pass 不再接五个媒体端点。它只走 `/pass/{id}`，那里有路径白名单和按次计费；此前它的 models 里列了模型，
+    媒体请求就会绕过白名单直打它的地址。
+  - 注册表外的 provider 也排除。控制台本来就建不出这种渠道。
+
+  2026-11-06 核对：线上渠道里没有这几种组合，媒体端点也没有请求。
+- **渠道级开关统一**：每一面都认渠道的 `capabilities.<面> = false`（embeddings / audio / images / videos / realtime；
+  图片批量认 `batch_images` 与 `images`），只有布尔 `false` 算关。此前只有 realtime 和图片批量认，所以 `images = false`
+  现在对同步出图也生效。
+- **落账的身份字段一处填**（`admission::Origin` / `Payer`）：入口取一次请求来源（客户端类型 + IP），由 `Payer::settlement`
+  填好请求 id、用户、key、分组、节点、来源、池与订阅窗口。结果字段缺省是「失败、没扣钱、没选上游」的零值，各入口写
+  `SettlementInput { 结果字段…, ..payer.settlement(…) }` 覆盖。`failure::Guard` 也带着来源，所以媒体失败账从此记
+  client_ip 与 client_type。realtime、custom_pass 的类型仍是固定的 `realtime`、`custom_pass`。图片批量按落库时冻结的批次行结算，不在此列。
+- **chat 不再被反向引用**：模型解析与候选缓存（`resolve_model_cached`、`cached_candidates`）挪到 `candidates`，
+  上游失败的分类（`failure_kind_of`、`non_json_kind`）挪到 `upstream_failure`。媒体端点、图片流、count_tokens 和
+  `AppState::candidates_for_model` 改为引用这两处，chat 自己照旧经根模块引用。
+
+**验收**：注册表单测锁住上表；`candidates` 单测覆盖声明和开关（只有布尔 false 算关）；
+`gateway_embeddings::embeddings_skip_channels_that_do_not_serve_the_surface` 验证 gemini、custom_pass、`embeddings = false`
+三种渠道都不被选上，也不算 failover；`gateway_images::image_failure_refunds_and_records_a_failed_terminal` 新增断言，检查失败账的 IP 和客户端类型。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

@@ -3,6 +3,7 @@
 //! 安全两道闸：api_base 固定 + settings.allowed_paths 前缀白名单（空 = 拒绝）。
 //! 计费红线：settings.billing_model 必填（models 表 per_call 模型），按次预扣/结算。
 
+use super::admission::{Origin, Payer};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -13,7 +14,7 @@ use okapi_api::codes;
 use okapi_domain::{BillingState, Money, TokenUsage};
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Path;
-use okapi_ledger::{Pool, SettlementInput};
+use okapi_ledger::SettlementInput;
 use okapi_pricing::calculate;
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
 use serde::Deserialize;
@@ -67,7 +68,7 @@ async fn handle(
     started: Instant,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
-    let client_ip = okapi_kernel::clients::detect_client_ip(headers);
+    let origin = Origin::labeled("custom_pass", headers);
 
     // 渠道点查（透传非热路径，直接 PG；可见性与 chat 同一矩阵语义）
     let channel = okapi_store::channels::custom_pass_channel(
@@ -140,6 +141,15 @@ async fn handle(
         started,
         reservation_pool,
         source_window.as_deref(),
+        &origin,
+    );
+    let payer = Payer::new(
+        state,
+        &key,
+        request_id,
+        &origin,
+        reservation_pool,
+        source_window.as_deref(),
     );
     failure.error(&AppError::new(
         StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
@@ -202,13 +212,10 @@ async fn handle(
                 &key,
                 billing_model,
                 &quote,
-                request_id,
                 started,
                 true,
                 None,
-                reservation_pool,
-                source_window.as_deref(),
-                client_ip.as_deref(),
+                payer,
                 &mut failure,
             )
             .await?;
@@ -235,13 +242,10 @@ async fn handle(
                 &key,
                 billing_model,
                 &quote,
-                request_id,
                 started,
                 false,
                 Some(i16::try_from(status).unwrap_or(0)),
-                reservation_pool,
-                source_window.as_deref(),
-                client_ip.as_deref(),
+                payer,
                 &mut failure,
             )
             .await?;
@@ -262,13 +266,10 @@ async fn handle(
                 &key,
                 billing_model,
                 &quote,
-                request_id,
                 started,
                 false,
                 None,
-                reservation_pool,
-                source_window.as_deref(),
-                client_ip.as_deref(),
+                payer,
                 &mut failure,
             )
             .await?;
@@ -291,13 +292,10 @@ async fn settle(
     key: &okapi_store::AuthedKey,
     billing_model: &str,
     quote: &okapi_pricing::Quote,
-    request_id: Uuid,
     started: Instant,
     success: bool,
     upstream_status: Option<i16>,
-    reservation_pool: Pool,
-    source_window: Option<&str>,
-    client_ip: Option<&str>,
+    payer: Payer<'_>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
     // 本函数接手终态：成功走 settle_success，失败自行退款留痕
@@ -309,41 +307,26 @@ async fn settle(
             "commit",
             quote.amount.as_micros().saturating_neg(),
             quote.amount,
-            reservation_pool,
+            payer.pool,
         )
     } else {
         let pool = match state
             .ledger
-            .refund(key.user_id, key.key_id, request_id)
+            .refund(key.user_id, key.key_id, payer.request_id)
             .await
         {
             Ok(r) if !r.released.is_zero() => r.pool,
-            Ok(_) => reservation_pool,
+            Ok(_) => payer.pool,
             Err(err) => {
-                tracing::error!(request_id = %request_id, error = %err, "custom_pass 退款失败（悬置待清理）");
-                reservation_pool
+                tracing::error!(request_id = %payer.request_id, error = %err, "custom_pass 退款失败（悬置待清理）");
+                payer.pool
             }
         };
         (BillingState::Failed, 5_i16, "refund", 0, Money::ZERO, pool)
     };
     let input = SettlementInput {
-        source_window: source_window.map(str::to_owned),
-        dimensions: okapi_ledger::pg::UsageDimensions::new(
-            "",
-            "",
-            "/pass/{path}",
-            "/{custom_path}",
-        ),
-        request_id,
         log_type,
-        user_id: key.user_id,
-        api_key_id: key.key_id,
-        group_code: &key.group_code,
-        model_name: billing_model,
-        channel_id: None,
-        channel_key_id: None,
         state: billing_state,
-        usage: TokenUsage::default(),
         amount,
         original: if success { quote.original } else { Money::ZERO },
         discount: if success { quote.discount } else { Money::ZERO },
@@ -352,25 +335,18 @@ async fn settle(
         } else {
             Money::ZERO
         },
-        upstream_cost: None,
         pricing_epoch: Some(quote.snapshot.epoch),
         pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-        ttft_ms: None,
-        is_stream: false,
-        retry_count: 0,
-        failover_count: 0,
         upstream_status,
         error_code: (!success).then_some(codes::UPSTREAM_ERROR),
-        upstream_request_id: None,
-        node: state.node.as_ref(),
-        sticky_layer: 0,
-        client_type: "custom_pass",
-        client_ip,
         delta_micro: delta,
-        balance_after: None,
         event_type,
         pool,
+        ..payer.settlement(
+            billing_model,
+            okapi_ledger::pg::UsageDimensions::new("", "", "/pass/{path}", "/{custom_path}"),
+        )
     };
     if !success {
         state.settle_write(input).await;

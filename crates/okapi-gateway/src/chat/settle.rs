@@ -1,4 +1,5 @@
 //! 结算：计价档位选择、成功提交、失败退款与终态留痕。
+use super::super::admission::Payer;
 use super::super::ingress::Ingress;
 use super::{CandInfo, ForwardFailure, RequestBilling, RespMeta, elapsed_ms_i32};
 use okapi_domain::{BillingState, ModelCode, Money, TokenUsage};
@@ -196,14 +197,7 @@ pub(super) async fn settle_commit(
         map.insert("requested_model".into(), serde_json::json!(from));
     }
     let input = SettlementInput {
-        source_window: bill.source_window.clone(),
-        dimensions: usage_dimensions(bill, info),
-        request_id: bill.request_id,
         log_type: 2,
-        user_id: bill.user_id,
-        api_key_id: bill.key_id,
-        group_code: &bill.group,
-        model_name: billed_model,
         channel_id: Some(info.channel),
         channel_key_id: Some(info.key),
         state: BillingState::Committed,
@@ -212,7 +206,6 @@ pub(super) async fn settle_commit(
         original: quote.original,
         discount: quote.discount,
         list_price: quote.list_price,
-        upstream_cost: None,
         pricing_epoch: Some(bill.book.epoch()),
         pricing_snapshot: snapshot,
         latency_ms: elapsed_ms_i32(bill.started),
@@ -223,14 +216,10 @@ pub(super) async fn settle_commit(
         upstream_status: Some(info.outcome.as_ref().map_or(200, |v| v.0)),
         error_code: info.outcome.as_ref().map(|v| v.1.as_str()),
         upstream_request_id: info.upstream_request_id.as_deref(),
-        node: bill.state.node.as_ref(),
         sticky_layer: info.sticky_layer,
-        client_type: bill.client_type,
-        client_ip: bill.client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
-        balance_after: None,
         event_type: "commit",
-        pool: bill.reservation_pool,
+        ..payer(bill).settlement(billed_model, usage_dimensions(bill, info))
     };
     if !bill.state.settle_success(input).await? {
         return Ok(());
@@ -306,6 +295,21 @@ pub(super) async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailu
     .await;
 }
 
+/// 这笔对话请求落账的身份字段（见 `admission::Payer`）。
+fn payer(bill: &RequestBilling) -> Payer<'_> {
+    Payer {
+        request_id: bill.request_id,
+        user_id: bill.user_id,
+        api_key_id: bill.key_id,
+        group_code: &bill.group,
+        node: bill.state.node.as_ref(),
+        client_type: bill.client_type,
+        client_ip: bill.client_ip.as_deref(),
+        pool: bill.reservation_pool,
+        source_window: bill.source_window.as_deref(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn record_terminal(
     bill: &RequestBilling,
@@ -322,25 +326,15 @@ pub(super) async fn record_terminal(
     delta_micro: i64,
     pool: Pool,
 ) {
+    // 与成功记账同口径：记实际计价所用的名字
+    let model_name = bill.calc.model.to_string();
     let input = SettlementInput {
-        source_window: bill.source_window.clone(),
-        dimensions: usage_dimensions(bill, info),
-        request_id: bill.request_id,
         log_type,
-        user_id: bill.user_id,
-        api_key_id: bill.key_id,
-        group_code: &bill.group,
-        // 与成功记账同口径：记实际计价所用的名字
-        model_name: &bill.calc.model.to_string(),
         channel_id: (info.channel != 0).then_some(info.channel),
         channel_key_id: (info.key != 0).then_some(info.key),
         state,
         usage,
         amount,
-        original: Money::ZERO,
-        discount: Money::ZERO,
-        list_price: Money::ZERO,
-        upstream_cost: None,
         pricing_epoch: Some(bill.book.epoch()),
         pricing_snapshot: Some(serde_json::json!({
             "epoch": bill.book.epoch(),
@@ -354,14 +348,11 @@ pub(super) async fn record_terminal(
         upstream_status,
         error_code,
         upstream_request_id: info.upstream_request_id.as_deref(),
-        node: bill.state.node.as_ref(),
         sticky_layer: info.sticky_layer,
-        client_type: bill.client_type,
-        client_ip: bill.client_ip.as_deref(),
         delta_micro,
-        balance_after: None,
         event_type,
         pool,
+        ..payer(bill).settlement(&model_name, usage_dimensions(bill, info))
     };
     if state == BillingState::Committed {
         if let Err(error) = bill.state.settle_success(input).await {

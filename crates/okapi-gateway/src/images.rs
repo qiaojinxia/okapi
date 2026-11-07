@@ -2,6 +2,7 @@
 //! per_call 按成功张数，ratio/tiered 按响应总用量；价簿固定于准入时。
 //! 仅路由 openai 系渠道。edits 支持 JSON 与 multipart，共用验证、路由和结算。
 
+use super::admission::{Origin, Payer};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -9,7 +10,6 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use okapi_api::codes;
 use okapi_domain::{BillingState, Money, TokenUsage};
-use okapi_kernel::clients::detect_client_type;
 use okapi_kernel::error::AppError;
 use okapi_kernel::error::with_request_id;
 use okapi_ledger::SettlementInput;
@@ -204,6 +204,7 @@ async fn handle(
     } = super::admission::reserve(state, key, request_id, quote.amount, estimated_tokens, now)
         .await?;
 
+    let origin = Origin::of(headers);
     let mut failure = super::failure::Guard::new(
         state,
         key,
@@ -214,6 +215,7 @@ async fn handle(
         started,
         reserved_pool,
         source_window.as_deref(),
+        &origin,
     );
     // —— 预扣已建立 ——
     let candidates =
@@ -233,7 +235,7 @@ async fn handle(
             stream::Context {
                 state: state.clone(),
                 key: key.clone(),
-                headers: headers.clone(),
+                origin,
                 input,
                 request_id,
                 started,
@@ -326,16 +328,20 @@ async fn handle(
                     &actual_quote,
                     actual_usage,
                     pricing_epoch,
-                    request_id,
                     started,
                     &cand,
                     failover,
-                    headers,
                     endpoint,
                     &resp,
                     task,
-                    reserved_pool,
-                    source_window.as_deref(),
+                    Payer::new(
+                        state,
+                        key,
+                        request_id,
+                        &origin,
+                        reserved_pool,
+                        source_window.as_deref(),
+                    ),
                     None,
                     Some(&mut failure),
                 )
@@ -414,16 +420,13 @@ async fn commit_and_record(
     quote: &Quote,
     usage: Option<TokenUsage>,
     pricing_epoch: i64,
-    request_id: Uuid,
     started: Instant,
     cand: &okapi_store::ChannelCandidate,
     failover: i16,
-    headers: &HeaderMap,
     endpoint: &str,
     upstream: &okapi_providers::openai::EmbeddingsResponse,
     task: Option<tasks::Lease>,
-    reserved_pool: okapi_ledger::Pool,
-    source_window: Option<&str>,
+    payer: Payer<'_>,
     stream: Option<stream::Receipt>,
     failure: Option<&mut super::failure::Guard>,
 ) -> Result<(), AppError> {
@@ -446,21 +449,8 @@ async fn commit_and_record(
         snapshot["image_stream_incomplete"] = serde_json::json!(stream.incomplete);
     }
     let usage = usage.unwrap_or_default();
-    let client_ip = okapi_kernel::clients::detect_client_ip(headers);
     let mut input = SettlementInput {
-        source_window: source_window.map(str::to_owned),
-        dimensions: okapi_ledger::pg::UsageDimensions::new(
-            requested_model,
-            cand.upstream_model(canonical),
-            &ingress,
-            endpoint,
-        ),
-        request_id,
         log_type: 2,
-        user_id: key.user_id,
-        api_key_id: key.key_id,
-        group_code: &key.group_code,
-        model_name: canonical,
         channel_id: Some(cand.channel_id),
         channel_key_id: Some(cand.channel_key_id),
         state: BillingState::Committed,
@@ -469,25 +459,25 @@ async fn commit_and_record(
         original: quote.original,
         discount: quote.discount,
         list_price: quote.list_price,
-        upstream_cost: None,
         pricing_epoch: Some(pricing_epoch),
         pricing_snapshot: Some(snapshot),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: stream.as_ref().and_then(|stream| stream.ttft_ms),
         is_stream: stream.is_some(),
-        retry_count: 0,
         failover_count: failover,
         upstream_status: i16::try_from(upstream.status).ok(),
-        error_code: None,
         upstream_request_id: upstream.upstream_request_id.as_deref(),
-        node: state.node.as_ref(),
-        sticky_layer: 0,
-        client_type: detect_client_type(headers),
-        client_ip: client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
-        balance_after: None,
         event_type: "commit",
-        pool: reserved_pool,
+        ..payer.settlement(
+            canonical,
+            okapi_ledger::pg::UsageDimensions::new(
+                requested_model,
+                cand.upstream_model(canonical),
+                &ingress,
+                endpoint,
+            ),
+        )
     };
     if let Some(task) = task {
         state.prepare_settlement(&mut input).await;

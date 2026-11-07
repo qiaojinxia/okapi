@@ -2,6 +2,7 @@
 //! 非流式单跳，复用 chat 同款调度语义（并发槽/状态机/退款兜底），
 //! anthropic 渠道无 embeddings 端点，候选层跳过。
 
+use super::admission::{Origin, Payer};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -9,8 +10,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
-use okapi_domain::{BillingState, Money, TokenUsage};
-use okapi_kernel::clients::detect_client_type;
+use okapi_domain::{BillingState, TokenUsage};
 use okapi_kernel::error::AppError;
 use okapi_kernel::error::with_request_id;
 use okapi_ledger::SettlementInput;
@@ -190,6 +190,15 @@ async fn handle(
     )
     .await?;
 
+    let origin = Origin::of(headers);
+    let payer = Payer::new(
+        state,
+        &key,
+        request_id,
+        &origin,
+        reservation_pool,
+        source_window.as_deref(),
+    );
     let mut failure = super::failure::Guard::new(
         state,
         &key,
@@ -200,6 +209,7 @@ async fn handle(
         started,
         reservation_pool,
         source_window.as_deref(),
+        &origin,
     );
     // —— 预扣已建立：一切失败路径必须退款与落失败账单 ——
     match forward(
@@ -239,21 +249,8 @@ async fn handle(
                         channel.2,
                         quote.list_price,
                     );
-                    let client_ip = okapi_kernel::clients::detect_client_ip(headers);
                     let input = SettlementInput {
-                        source_window: source_window.clone(),
-                        dimensions: okapi_ledger::pg::UsageDimensions::new(
-                            requested_model,
-                            &upstream_model,
-                            &format!("/v1{upstream_path}"),
-                            &format!("/v1{upstream_path}"),
-                        ),
-                        request_id,
                         log_type: 2,
-                        user_id: key.user_id,
-                        api_key_id: key.key_id,
-                        group_code: &key.group_code,
-                        model_name: &canonical,
                         channel_id: Some(channel.0),
                         channel_key_id: Some(channel.1),
                         state: BillingState::Committed,
@@ -262,25 +259,24 @@ async fn handle(
                         original: quote.original,
                         discount: quote.discount,
                         list_price: quote.list_price,
-                        upstream_cost: None,
                         pricing_epoch: Some(book.epoch()),
                         pricing_snapshot: snapshot,
                         latency_ms: elapsed_ms(started),
-                        ttft_ms: None,
-                        is_stream: false,
-                        retry_count: 0,
                         failover_count: failover,
                         upstream_status: Some(200),
-                        error_code: None,
                         upstream_request_id: upstream_request_id.as_deref(),
-                        node: state.node.as_ref(),
                         sticky_layer: 3,
-                        client_type: detect_client_type(headers),
-                        client_ip: client_ip.as_deref(),
                         delta_micro: quote.amount.as_micros().saturating_neg(),
-                        balance_after: None,
                         event_type: "commit",
-                        pool: reservation_pool,
+                        ..payer.settlement(
+                            &canonical,
+                            okapi_ledger::pg::UsageDimensions::new(
+                                requested_model,
+                                &upstream_model,
+                                &format!("/v1{upstream_path}"),
+                                &format!("/v1{upstream_path}"),
+                            ),
+                        )
                     };
                     failure.disarm();
                     if state
@@ -329,52 +325,27 @@ async fn handle(
                     reservation_pool
                 }
             };
-            let client_ip = okapi_kernel::clients::detect_client_ip(headers);
             let input = SettlementInput {
-                source_window: source_window.clone(),
-                dimensions: okapi_ledger::pg::UsageDimensions::new(
-                    requested_model,
-                    channel.as_ref().map_or("", |c| c.2.as_str()),
-                    &format!("/v1{upstream_path}"),
-                    &if channel.as_ref().is_some_and(|c| !c.2.is_empty()) {
-                        format!("/v1{upstream_path}")
-                    } else {
-                        String::new()
-                    },
-                ),
-                request_id,
-                log_type: 5,
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                group_code: &key.group_code,
-                model_name: &canonical,
                 channel_id: channel.as_ref().map(|c| c.0),
                 channel_key_id: channel.as_ref().map(|c| c.1),
-                state: BillingState::Failed,
-                usage: TokenUsage::default(),
-                amount: Money::ZERO,
-                original: Money::ZERO,
-                discount: Money::ZERO,
-                list_price: Money::ZERO,
-                upstream_cost: None,
                 pricing_epoch: Some(book.epoch()),
-                pricing_snapshot: None,
                 latency_ms: elapsed_ms(started),
-                ttft_ms: None,
-                is_stream: false,
-                retry_count: 0,
                 failover_count: failover,
-                upstream_status: None,
                 error_code: Some(err.code.as_str()),
-                upstream_request_id: None,
-                node: state.node.as_ref(),
-                sticky_layer: 0,
-                client_type: detect_client_type(headers),
-                client_ip: client_ip.as_deref(),
-                delta_micro: 0,
-                balance_after: None,
-                event_type: "refund",
                 pool,
+                ..payer.settlement(
+                    &canonical,
+                    okapi_ledger::pg::UsageDimensions::new(
+                        requested_model,
+                        channel.as_ref().map_or("", |c| c.2.as_str()),
+                        &format!("/v1{upstream_path}"),
+                        &if channel.as_ref().is_some_and(|c| !c.2.is_empty()) {
+                            format!("/v1{upstream_path}")
+                        } else {
+                            String::new()
+                        },
+                    ),
+                )
             };
             state.settle_write(input).await;
             failure.disarm();

@@ -138,7 +138,13 @@ async fn setup(balance_micro: i64) -> TestEnv {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // 带对端地址：失败账记 client_ip 的断言要用
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestEnv {
@@ -255,12 +261,14 @@ async fn images_edits_multipart_bills_n() {
     assert_eq!(rec.amount_micro, 80_000);
 }
 
+/// 失败账和成功账一样记来源：客户端类型与 IP（此前失败账两项都是空的）。
 #[tokio::test]
 async fn image_failure_refunds_and_records_a_failed_terminal() {
     let env = setup(1_000_000).await;
     let response = reqwest::Client::new()
         .post(format!("http://{}/v1/images/generations", env.gateway))
         .bearer_auth(&env.token)
+        .header("user-agent", "curl/8.5.0")
         .json(&json!({"model":env.model,"prompt":"test-upstream-failure"}))
         .send()
         .await
@@ -272,6 +280,17 @@ async fn image_failure_refunds_and_records_a_failed_terminal() {
             assert_eq!(
                 env.ledger.balance(env.user_id).await.unwrap().as_micros(),
                 1_000_000
+            );
+            let origin: (Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT host(client_ip), client_type FROM billing_records WHERE user_id=$1 AND log_type=5",
+            )
+            .bind(env.user_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+            assert_eq!(
+                origin,
+                (Some("127.0.0.1".to_owned()), Some("curl".to_owned()))
             );
             return;
         }

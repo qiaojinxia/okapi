@@ -2,7 +2,7 @@
 //! Client disconnect only drops delivery; a tracked, bounded pump still accounts for generation.
 use super::{AppError, AppState, Prepared, commit_and_record, refund, request, scale_quote, usage};
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response, Sse, sse::Event},
 };
 use futures::StreamExt;
@@ -28,7 +28,7 @@ use metering::Mode;
 pub(super) struct Context {
     pub state: AppState,
     pub key: okapi_store::AuthedKey,
-    pub headers: HeaderMap,
+    pub origin: super::super::admission::Origin,
     pub input: request::Input,
     pub request_id: Uuid,
     pub started: Instant,
@@ -56,7 +56,7 @@ pub(super) async fn start(
     let pending = ctx.state.settlements.clone();
     // Track the entire dispatch: cancellation while awaiting upstream headers must not orphan a bill.
     pending.spawn(async move {
-        let mut failure = super::super::failure::Guard::new(&ctx.state,&ctx.key,ctx.request_id,&ctx.prepared.canonical,&ctx.input.model,&ctx.endpoint,ctx.started,ctx.reserved_pool,ctx.source_window.as_deref());
+        let mut failure = super::super::failure::Guard::new(&ctx.state,&ctx.key,ctx.request_id,&ctx.prepared.canonical,&ctx.input.model,&ctx.endpoint,ctx.started,ctx.reserved_pool,ctx.source_window.as_deref(),&ctx.origin);
         let mut sender = Some(tx);
         let opened = tokio::time::timeout_at(deadline(&ctx), open(&ctx, candidates)).await
             .unwrap_or_else(|_| Err(AppError::new(StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT)));
@@ -212,16 +212,20 @@ async fn settle(
         &quote,
         result.usage,
         p.pricing_epoch,
-        ctx.request_id,
         ctx.started,
         candidate,
         failovers,
-        &ctx.headers,
         &ctx.endpoint,
         &upstream,
         None,
-        ctx.reserved_pool,
-        ctx.source_window.as_deref(),
+        super::super::admission::Payer::new(
+            &ctx.state,
+            &ctx.key,
+            ctx.request_id,
+            &ctx.origin,
+            ctx.reserved_pool,
+            ctx.source_window.as_deref(),
+        ),
         Some(Receipt {
             usage_mode: result.mode,
             usage_complete: result.usage_complete,

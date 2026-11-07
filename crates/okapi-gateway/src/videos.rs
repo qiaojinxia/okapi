@@ -6,6 +6,7 @@
 //!
 //! 轮询/下载不计费；JSON 提交（multipart input_reference 列 backlog）。
 
+use super::admission::{Origin, Payer};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -14,7 +15,6 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, Money, TokenUsage};
-use okapi_kernel::clients::detect_client_type;
 use okapi_kernel::error::AppError;
 use okapi_kernel::error::with_request_id;
 use okapi_kernel::extract::Path;
@@ -122,6 +122,7 @@ async fn handle_create(
         source_window,
     } = super::admission::reserve(state, &key, request_id, quote.amount, 0, now).await?;
 
+    let origin = Origin::of(headers);
     let mut failure = super::failure::Guard::new(
         state,
         &key,
@@ -132,6 +133,7 @@ async fn handle_create(
         started,
         reservation_pool,
         source_window.as_deref(),
+        &origin,
     );
     // —— 预扣已建立 ——
     let candidates =
@@ -211,13 +213,17 @@ async fn handle_create(
                     &quote,
                     &task_id,
                     units,
-                    request_id,
                     started,
                     &cand,
                     failover,
-                    headers,
-                    reservation_pool,
-                    source_window.as_deref(),
+                    Payer::new(
+                        state,
+                        &key,
+                        request_id,
+                        &origin,
+                        reservation_pool,
+                        source_window.as_deref(),
+                    ),
                     &mut failure,
                 )
                 .await
@@ -478,39 +484,21 @@ async fn commit_and_record(
     quote: &Quote,
     task_id: &str,
     _units: u32,
-    request_id: Uuid,
     started: Instant,
     cand: &okapi_store::ChannelCandidate,
     failover: i16,
-    headers: &HeaderMap,
-    reservation_pool: okapi_ledger::Pool,
-    source_window: Option<&str>,
+    payer: Payer<'_>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
-    let client_ip = okapi_kernel::clients::detect_client_ip(headers);
     let input = SettlementInput {
-        source_window: source_window.map(str::to_owned),
-        dimensions: okapi_ledger::pg::UsageDimensions::new(
-            requested_model,
-            cand.upstream_model(canonical),
-            "/v1/videos",
-            "/v1/videos",
-        ),
-        request_id,
         log_type: 2,
-        user_id: key.user_id,
-        api_key_id: key.key_id,
-        group_code: &key.group_code,
-        model_name: canonical,
         channel_id: Some(cand.channel_id),
         channel_key_id: Some(cand.channel_key_id),
         state: BillingState::Committed,
-        usage: TokenUsage::default(),
         amount: quote.amount,
         original: quote.original,
         discount: quote.discount,
         list_price: quote.list_price,
-        upstream_cost: None,
         pricing_epoch: Some(quote.snapshot.epoch),
         pricing_snapshot: super::upstream_cost::snapshot(
             serde_json::to_value(&quote.snapshot).ok(),
@@ -519,21 +507,20 @@ async fn commit_and_record(
             quote.list_price,
         ),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-        ttft_ms: None,
-        is_stream: false,
-        retry_count: 0,
         failover_count: failover,
         upstream_status: Some(200),
-        error_code: None,
         upstream_request_id: Some(task_id),
-        node: state.node.as_ref(),
-        sticky_layer: 0,
-        client_type: detect_client_type(headers),
-        client_ip: client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
-        balance_after: None,
         event_type: "commit",
-        pool: reservation_pool,
+        ..payer.settlement(
+            canonical,
+            okapi_ledger::pg::UsageDimensions::new(
+                requested_model,
+                cand.upstream_model(canonical),
+                "/v1/videos",
+                "/v1/videos",
+            ),
+        )
     };
     failure.disarm();
     if !state

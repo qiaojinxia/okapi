@@ -88,10 +88,10 @@ pub async fn realtime(
         Err(err) => return err.into_response_with(Some(request_id)),
     };
 
-    match prepare(&state, &key, &q.model, request_id).await {
+    let origin = super::admission::Origin::labeled("realtime", &headers);
+    match prepare(&state, &key, &q.model, request_id, origin).await {
         Ok(mut prep) => {
             prep.auth_headers = auth_headers.unwrap_or_default();
-            prep.client_ip = okapi_kernel::clients::detect_client_ip(&headers);
             ws.protocols(["realtime"])
                 .on_upgrade(move |socket| async move {
                     // 受下线跟踪：进程退出前等会话收尾落账，不留给 10 分钟后的过期退款
@@ -134,8 +134,8 @@ struct Prep {
     key: std::sync::Arc<okapi_store::AuthedKey>,
     /// 握手时用来鉴权的请求头（`Authorization` 或由子协议合成），会话期间复查 key 用。
     auth_headers: HeaderMap,
-    /// 握手请求的来源 IP（落 billing_records / CH 的 client_ip，同 HTTP 端点）。
-    client_ip: Option<String>,
+    /// 握手请求的来源（落 billing_records / CH 的 client_type、client_ip，同 HTTP 端点）。
+    origin: super::admission::Origin,
     request_id: Uuid,
     reserved: Money,
     reservation_pool: Pool,
@@ -164,6 +164,7 @@ async fn prepare(
     key: &std::sync::Arc<okapi_store::AuthedKey>,
     requested_model: &str,
     request_id: Uuid,
+    origin: super::admission::Origin,
 ) -> Result<Prep, AppError> {
     let meta = super::candidates::resolve_model_cached(state, requested_model).await?;
     let Some(meta) = meta.as_ref() else {
@@ -247,6 +248,7 @@ async fn prepare(
             Instant::now(),
             reservation_pool,
             source_window.as_deref(),
+            &origin,
         ),
         lease: Some((state.clone(), key.key_id, conn_id.clone())),
     };
@@ -299,7 +301,7 @@ async fn prepare(
         admission,
         key: std::sync::Arc::clone(key),
         auth_headers: HeaderMap::new(),
-        client_ip: None,
+        origin,
         request_id,
         reserved: est.amount,
         reservation_pool,
@@ -624,14 +626,7 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         }
     };
     let input = SettlementInput {
-        source_window: prep.source_window.clone(),
-        dimensions: prep.dimensions.clone(),
-        request_id: prep.request_id,
         log_type: 2,
-        user_id: prep.key.user_id,
-        api_key_id: prep.key.key_id,
-        group_code: &prep.key.group_code,
-        model_name: &prep.canonical,
         channel_id: Some(prep.channel.0),
         channel_key_id: Some(prep.channel.1),
         state: BillingState::Committed,
@@ -640,7 +635,6 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         original: quote.original,
         discount: quote.discount,
         list_price: quote.list_price,
-        upstream_cost: None,
         pricing_epoch: Some(book.epoch()),
         pricing_snapshot: super::upstream_cost::snapshot(
             serde_json::to_value(&quote.snapshot).ok(),
@@ -649,21 +643,11 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
             quote.list_price,
         ),
         latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),
-        ttft_ms: None,
         is_stream: true,
-        retry_count: 0,
-        failover_count: 0,
         upstream_status: Some(101),
-        error_code: None,
-        upstream_request_id: None,
-        node: state.node.as_ref(),
-        sticky_layer: 0,
-        client_type: "realtime",
-        client_ip: prep.client_ip.as_deref(),
         delta_micro: quote.amount.as_micros().saturating_neg(),
-        balance_after: None,
         event_type: "commit",
-        pool: prep.reservation_pool,
+        ..payer(state, prep).settlement(&prep.canonical, prep.dimensions.clone())
     };
     match state.settle_success(input).await {
         Ok(true) => {}
@@ -683,6 +667,18 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
     .await;
 }
 
+/// 这条会话落账的身份字段（见 `admission::Payer`）。
+fn payer<'a>(state: &'a AppState, prep: &'a Prep) -> super::admission::Payer<'a> {
+    super::admission::Payer::new(
+        state,
+        &prep.key,
+        prep.request_id,
+        &prep.origin,
+        prep.reservation_pool,
+        prep.source_window.as_deref(),
+    )
+}
+
 /// 失败/零产出留痕（log_type 5，delta 0；退款金额语义由 refund Lua 保证）。
 async fn record_failure(
     state: &AppState,
@@ -693,41 +689,15 @@ async fn record_failure(
 ) {
     let book = state.pricebook.load();
     let input = SettlementInput {
-        source_window: prep.source_window.clone(),
-        dimensions: prep.dimensions.clone(),
-        request_id: prep.request_id,
-        log_type: 5,
-        user_id: prep.key.user_id,
-        api_key_id: prep.key.key_id,
-        group_code: &prep.key.group_code,
-        model_name: &prep.canonical,
         channel_id: Some(prep.channel.0),
         channel_key_id: Some(prep.channel.1),
-        state: BillingState::Failed,
         usage,
-        amount: Money::ZERO,
-        original: Money::ZERO,
-        discount: Money::ZERO,
-        list_price: Money::ZERO,
-        upstream_cost: None,
         pricing_epoch: Some(book.epoch()),
-        pricing_snapshot: None,
         latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),
-        ttft_ms: None,
         is_stream: true,
-        retry_count: 0,
-        failover_count: 0,
-        upstream_status: None,
         error_code,
-        upstream_request_id: None,
-        node: state.node.as_ref(),
-        sticky_layer: 0,
-        client_type: "realtime",
-        client_ip: prep.client_ip.as_deref(),
-        delta_micro: 0,
-        balance_after: None,
-        event_type: "refund",
         pool,
+        ..payer(state, prep).settlement(&prep.canonical, prep.dimensions.clone())
     };
     state.settle_write(input).await;
 }
