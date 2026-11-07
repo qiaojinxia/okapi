@@ -718,7 +718,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `rl:{<uid>}:k:<key_id>:rpd:<yyyymmdd>` | STRING | 48h | key 级每日请求数（RPD） |
 | `count:{<key_id>}:rpm:<分钟桶>` / `:rpd:<UTC日桶>` | STRING 计数 | 120s / 48h | Responses input_tokens 独立准入；RPM/RPD 取 key 正数配置，RPM 默认 60、RPD 默认不限；不写生成的余额/Token 计数。与 leases 使用相同 Cluster hash tag，Lua 原子校验后递增 |
 | `count:{<key_id>}:leases` | ZSET | 成员 90s / 键 120s | 计数在途租约，member 为请求 UUID；并发取 key 正数配置，否则 4。准入先删过期成员；正常返回或取得租约后的取消异步 ZREM。Redis 故障拒绝准入 |
-| `rl:{<uid>}:m:<model>:rpm:<分钟桶>` | STRING 计数 | 120s | 用户×模型级 RPM（settings.model_rpm_limits；INCR 固定分钟窗，尽力语义，Redis 故障放行） |
+| `rl:{<uid>}:m:<model>:rpm:<分钟桶>` | STRING 计数 | 120s | 用户×模型级 RPM（settings.model_rpm_limits；INCR 固定分钟窗，尽力语义，Redis 故障放行）。对话、count_tokens、媒体端点（realtime 按握手算）与图片批量共用这一个计数 |
 | `rl:{<uid>}:g:<group>:rpm:<分钟桶>` / `:rph:<小时桶>` | STRING 计数 | 120s / 7200s | 分组级限流（`price_groups.rpm_limit / rph_limit`，IMPLEMENTATION §11.32）：分组内**每用户**固定窗计数，全部计费端点在 reserve 前检查；超限 429 `rate_limited` param=group_rpm / group_rph；限额随鉴权缓存下发，未配置零往返 |
 | `ws:lease:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 6h 兜底 | Realtime WS per-key 连接租约：member=连接 id（request_id），score=到期毫秒；准入 Lua 先 ZREMRANGEBYSCORE 清过期再 ZCARD 比上限（settings.realtime_max_conns_per_key 缺省 4），崩溃连接不续期自然滚出（§14.4） |
 | `ws:responses:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 120s 兜底 | Responses WS 独立连接租约；member=连接 UUID，score=到期毫秒。准入/续期 Redis 故障拒绝连接，关闭后释放；默认每 key 4 个连接，与 Realtime 分开计数 |

@@ -65,6 +65,31 @@ pub(crate) fn limit_caps(key: &AuthedKey) -> LimitCaps {
     }
 }
 
+/// 用户×模型 RPM（`settings.model_rpm_limits`，全局按用户；§11.1）：没配或配了 0 就不限。
+/// 对话、count_tokens、各媒体端点与图片批量记在同一个计数上（同一用户、同一模型、每分钟），
+/// 放在预扣之前查，被拒的请求什么都不预扣。
+pub(crate) async fn check_model_rpm(
+    state: &AppState,
+    key: &AuthedKey,
+    model: &str,
+) -> Result<(), AppError> {
+    let limits = state.setting_cached("model_rpm_limits").await;
+    if let Some(limit) = limits
+        .as_ref()
+        .as_ref()
+        .and_then(|v| v.get(model))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|v| *v > 0)
+        && !state.sched.model_rate_ok(key.user_id, model, limit).await
+    {
+        return Err(
+            AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
+                .with_param("model_rpm"),
+        );
+    }
+    Ok(())
+}
+
 /// 预扣成功后的落点：所在池与订阅窗口（结算回到同一池）。
 pub(crate) struct Reserved {
     pub pool: Pool,

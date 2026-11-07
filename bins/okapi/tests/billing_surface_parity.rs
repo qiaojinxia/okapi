@@ -962,3 +962,129 @@ async fn wait_new_settlement(pg: &PgPool, user_id: i64, before: i64) -> (Uuid, i
     }
     panic!("8s 内没等到 realtime 的结算行");
 }
+
+/// 用户×模型 RPM（`settings.model_rpm_limits`）管到每个按模型计费的端点，不只是对话。
+///
+/// 每个模型限每分钟 1 次：第一笔放行；同一模型的第二笔回 429 `rate_limited`（param `model_rpm`），
+/// 换了端点也一样（embeddings 之后的 rerank、chat 之后的 realtime 握手）——计数只认
+/// 同一用户 × 同一模型 × 每分钟。被拒的请求在预扣之前就拦下，账本里一条事件都没有。
+/// custom_pass 不在内：它的请求里没有模型（计费模型是渠道配置的），不按模型限。
+#[tokio::test]
+async fn model_rpm_limits_every_model_billed_endpoint() {
+    let bed = setup().await;
+    let limits: serde_json::Map<String, Value> = [
+        &bed.model,
+        &bed.emb_model,
+        &bed.tts_model,
+        &bed.img_model,
+        &bed.vid_model,
+    ]
+    .into_iter()
+    .map(|model| (model.clone(), json!(1)))
+    .collect();
+    // 全局键：合并写入，保住并行用例的键值
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('model_rpm_limits', $1)
+         ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value",
+    )
+    .bind(Value::Object(limits))
+    .execute(&bed.pg)
+    .await
+    .unwrap();
+    // 计数按整分钟分桶：离下一分钟不到 20 秒就先等过去，免得后面几笔落进新窗口
+    let second = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        % 60;
+    if second >= 40 {
+        tokio::time::sleep(Duration::from_secs(61 - second)).await;
+    }
+
+    let chat = json!({"model": bed.model, "stream": false,
+                      "messages": [{"role": "user", "content": "hello"}]});
+    let embeddings = json!({"model": bed.emb_model, "input": "hello"});
+    let rerank = json!({"model": bed.emb_model, "query": "q", "documents": ["a", "b"]});
+    let images = json!({"model": bed.img_model, "prompt": "a cat"});
+    let speech = json!({"model": bed.tts_model, "input": "hello world", "voice": "alloy"});
+    let videos = json!({"model": bed.vid_model, "prompt": "a cat", "seconds": "8"});
+    let cases = [
+        ("chat", "/v1/chat/completions", &chat, 200),
+        ("chat again", "/v1/chat/completions", &chat, 429),
+        ("embeddings", "/v1/embeddings", &embeddings, 200),
+        ("rerank after embeddings", "/v1/rerank", &rerank, 429),
+        ("images", "/v1/images/generations", &images, 200),
+        ("images again", "/v1/images/generations", &images, 429),
+        ("audio.speech", "/v1/audio/speech", &speech, 200),
+        ("audio.speech again", "/v1/audio/speech", &speech, 429),
+        ("videos", "/v1/videos", &videos, 200),
+        ("videos again", "/v1/videos", &videos, 429),
+    ];
+    let client = reqwest::Client::new();
+    let mut rejected = Vec::new();
+    for (name, path, body, expected) in cases {
+        let resp = client
+            .post(format!("http://{}{path}", bed.gateway))
+            .bearer_auth(&bed.token)
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let request_id = resp
+            .headers()
+            .get("x-okapi-request-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| Uuid::parse_str(v).ok());
+        let text = resp.text().await.unwrap_or_default();
+        assert_eq!(status, expected, "{name} {path}：{text}");
+        if expected == 429 {
+            let error: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(error["error"]["code"], "rate_limited", "{name}：{text}");
+            assert_eq!(error["error"]["param"], "model_rpm", "{name}：{text}");
+            rejected.push((name, request_id.expect("429 也要带 x-okapi-request-id")));
+        }
+    }
+
+    // realtime：chat 已经用掉了这个模型这一分钟的额度，握手前就拦下（不升级）
+    rejected.push((
+        "realtime after chat",
+        realtime_rejected_by_model_rpm(&bed).await,
+    ));
+
+    for (name, request_id) in rejected {
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM billing_events WHERE request_id = $1")
+                .bind(request_id)
+                .fetch_one(&bed.pg)
+                .await
+                .unwrap();
+        assert_eq!(events, 0, "{name}：被拒的请求不该预扣");
+    }
+}
+
+/// realtime 握手被模型 RPM 拒掉（429 `model_rpm`，不升级），回这次握手的 request id。
+async fn realtime_rejected_by_model_rpm(bed: &Bed) -> Uuid {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let url = format!("ws://{}/v1/realtime?model={}", bed.gateway, bed.model);
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", bed.token).parse().unwrap(),
+    );
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 429);
+            let error: Value =
+                serde_json::from_slice(resp.body().as_deref().unwrap_or_default()).unwrap();
+            assert_eq!(error["error"]["param"], "model_rpm", "{error}");
+            resp.headers()
+                .get("x-okapi-request-id")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| Uuid::parse_str(v).ok())
+                .expect("握手被拒也要带 x-okapi-request-id")
+        }
+        other => panic!("realtime 握手应被 model_rpm 拒掉，实际：{other:?}"),
+    }
+}

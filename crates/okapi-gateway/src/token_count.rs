@@ -63,23 +63,7 @@ async fn count(state: &AppState, headers: &HeaderMap, body: Bytes) -> Result<Res
         ));
     }
     super::auth::check_group_rate(state, &key).await?;
-    let limits = state.setting_cached("model_rpm_limits").await;
-    if let Some(limit) = limits
-        .as_ref()
-        .as_ref()
-        .and_then(|v| v.get(&meta.canonical))
-        .and_then(Value::as_i64)
-        .filter(|v| *v > 0)
-        && !state
-            .sched
-            .model_rate_ok(key.user_id, &meta.canonical, limit)
-            .await
-    {
-        return Err(
-            AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
-                .with_param("model_rpm"),
-        );
-    }
+    super::admission::check_model_rpm(state, &key, &meta.canonical).await?;
     // 本地估算不能解析服务端历史，不先探测其是否存在。
     if mode == CountMode::Estimate
         && value

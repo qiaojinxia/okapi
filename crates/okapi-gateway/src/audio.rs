@@ -93,6 +93,7 @@ async fn handle_speech(
     let quote = calculate_characters(&book, &calc, chars)?;
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
+    super::admission::check_model_rpm(state, &key, &canonical).await?;
 
     let super::admission::Reserved {
         pool: reservation_pool,
@@ -296,6 +297,7 @@ async fn handle_transcriptions(
     }
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
+    super::admission::check_model_rpm(state, &key, &canonical).await?;
 
     let super::admission::Reserved {
         pool: reservation_pool,

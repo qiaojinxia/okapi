@@ -313,24 +313,7 @@ pub(super) async fn prepare_chat(
     super::super::auth::check_member_limit(state, &key).await?;
     // 分组级 [rpm, rph]（§11.32，限额随鉴权缓存下发）
     super::super::auth::check_group_rate(state, &key).await?;
-    // 用户×模型 RPM（settings.model_rpm_limits，全局按用户；§11.1）
-    let model_limits = state.setting_cached("model_rpm_limits").await;
-    if let Some(limit) = model_limits
-        .as_ref()
-        .as_ref()
-        .and_then(|v| v.get(&canonical))
-        .and_then(serde_json::Value::as_i64)
-        .filter(|v| *v > 0)
-        && !state
-            .sched
-            .model_rate_ok(key.user_id, &canonical, limit)
-            .await
-    {
-        return Err(
-            AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
-                .with_param("model_rpm"),
-        );
-    }
+    super::super::admission::check_model_rpm(state, &key, &canonical).await?;
 
     // 预扣（余额 + RPM/TPM/RPD + 并发，单 Lua 原子）
     let super::super::admission::Reserved {

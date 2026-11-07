@@ -116,6 +116,7 @@ async fn handle_create(
     }
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
+    super::admission::check_model_rpm(state, &key, &canonical).await?;
 
     let super::admission::Reserved {
         pool: reservation_pool,
