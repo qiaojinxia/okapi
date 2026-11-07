@@ -934,8 +934,8 @@ secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占
 RPM 与日消费闸仅在该 key 配了上限时才发起 Redis 调用。
 
 **【2026-10-20】按使用量 / 最少并发**（迁移 `0002_pool_load_strategies`）：池策略加 `least_usage`、
-`least_concurrency`，与 `least_latency` 一样只用于对话类入口（chat / messages / responses / gemini），
-只排层内先后，priority 分层与主池 / 降级池顺序照旧。
+`least_concurrency`，与 `least_latency` 一样只用于对话类入口（chat / messages / responses / gemini；2026-11-07 起媒体端点也按池策略排，
+见 §11.72），只排层内先后，priority 分层与主池 / 降级池顺序照旧。
 - `least_usage`：读数是 key 当日消费 `spend:ck:*`（日消费上限闸那份计数，UTC 零点清零）。多个订阅账号放同一池时
   用它把用量摊平，少撞单个账号的限额。
 - `least_concurrency`：读数是 key 未到期的在途租约数 `conc:ck:*`（并发上限那套租约）。此前只有配了上限的 key
@@ -3658,6 +3658,50 @@ realtime 放行订阅渠道，五个端点都放行 custom_pass 和注册表外�
 **验收**：注册表单测锁住上表；`candidates` 单测覆盖声明和开关（只有布尔 false 算关）；
 `gateway_embeddings::embeddings_skip_channels_that_do_not_serve_the_surface` 验证 gemini、custom_pass、`embeddings = false`
 三种渠道都不被选上，也不算 failover；`gateway_images::image_failure_refunds_and_records_a_failed_terminal` 新增断言，检查失败账的 IP 和客户端类型。
+
+### 11.72 模型 RPM 管到媒体端点；chat 方言矩阵穷举匹配；媒体按池策略选路（2026-11-07）
+
+起因：§11.71 之后评审剩下的几处。`model_rpm_limits` 只在对话和 count_tokens 上查，媒体端点不受限。chat 的三张矩阵
+（构造请求体、推理强度、分派）按方言字符串匹配、带 `_` 兜底，加一种操作时编译器不会指出漏掉的分支。账单上的上游端点
+标签和诊断里每次尝试记的端点是两张表，口径不同。媒体端点不看池的选路策略，一律加权随机。
+
+- **用户×模型 RPM 管到媒体端点**（`admission::check_model_rpm`，对话与 count_tokens 也改用它）：
+  - 新增检查的入口：embeddings、rerank；audio 的 speech / transcriptions / translations；images 的 generations / edits
+    （同步、流式；异步任务在执行时查，被拒时任务失败，和执行时被分组限流拒掉一样）；videos 只在创建时查，轮询和取片不算；
+    realtime 在握手时查，一条会话算一次。
+  - 查在成员月限、分组限流之后、预扣之前，超限回 429 `rate_limited`（param `model_rpm`），被拒的请求不预扣。
+  - 计数和对话、count_tokens、图片批量共用一个（`rl:{uid}:m:<model>:rpm:<分钟>`）。
+  - custom_pass 不在内：请求里没有模型，计费模型是渠道配的。
+- **chat 三张矩阵按「入口 × `plan.operation`」穷举匹配**（`chat/upstream.rs`）：不再出现方言字符串，也没有 `_` 兜底。
+  编计划时就排除的组合（Messages 入口配 Gemini 方言、Responses / Compact 操作配别的入口）单列一臂，回 `unsupported_endpoint`。
+  逐个组合核对过，每种组合用的转换器和传输都和原来一样。
+- **上游端点标签由计划推导**（`ExecutionPlan::endpoint`）：账单与日志的 `upstream_endpoint`（`chat::pump::upstream_endpoint`）
+  和诊断里每次尝试记的端点用同一个值；`infer_via` 改为接收调用方给的标签，此前它按 `inference::Surface` 另记一张表。
+  - 账单标签除 Vertex 外不变。Vertex 改记真实路径：Claude 是 `/publishers/anthropic/models/{model}:rawPredict`
+    （流式 `:streamRawPredict`），Gemini 是 `/publishers/google/models/{model}:generateContent`（流式
+    `:streamGenerateContent`）。此前一律记 `/publishers/{publisher}/models/{model}:predict` / `:stream`。
+  - 诊断里的端点因此变了的：bedrock 由 `/v1/messages` 变成 `/model/{model}/invoke…`；vertex、gemini（此前记 `generateContent`）、
+    azure（此前记 `/v1/chat/completions`）都改记各自的真实路径。其余不变。
+  - 编不出计划的候选发不到上游，标签记空串。
+- **媒体端点按池的选路策略排**（`candidates::media` 与对话共用 `candidates::queue`；额度排序同对话，`QuotaOrder::of`）：
+  - least_latency、least_usage、least_concurrency 池在同一优先级层内按读数排 failover 序。priority_weighted 和 soonest_reset
+    仍是加权随机：soonest_reset 读的额度观测只有订阅渠道才有，媒体渠道没有。
+  - least_latency 的时延样本仍只来自对话，媒体请求的耗时与对话不可比，不进样本；没有样本的 key 按层内中位数排。
+  - least_concurrency 池里媒体请求和对话一样登记在途（同一份 `conc:ck:*` 租约），对话读到的在途数包含媒体请求。
+    realtime 会话整段算一个在途：`ChannelPermit::acquire_parts` 加了 `count` 参数，custom_pass 按渠道直达、不登记。
+  - 出口轮换组每次请求重抽（经 `CandidateIter`）。此前媒体在候选缓存的 5 秒内一直用同一个出口。
+  - `AppState::candidates_for_model` 没有调用方了，删掉。
+
+2026-11-06 只读核对线上：没配 `model_rpm_limits`；没有 bedrock、vertex、gemini、azure 渠道；池策略只有 priority_weighted 和
+soonest_reset，也没有轮换组。以上几项对线上都没有影响。
+
+**验收**：
+- `billing_surface_parity::model_rpm_limits_every_model_billed_endpoint`：chat、images、audio.speech、videos 各打两笔，
+  embeddings 之后接一笔 rerank，第二笔都回 429 `model_rpm`；chat 之后的 realtime 握手也被拒；被拒的请求账本里没有事件。
+- `execution_plan` 单测拿原来那张标签表对照每种编得出计划的组合，只有 Vertex 不同；`pump` 单测检查编不出计划时记空串。
+- `gateway_embeddings` 两个端到端用例：least_usage 池里四笔都落到当日消费少的 key；least_concurrency 池里慢请求在途时
+  登记一份，结束后退回。
+- `gateway_realtime::a_least_concurrency_pool_counts_a_realtime_session_in_flight`：会话期间在途一直是 1，断开后归零。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
