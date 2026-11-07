@@ -26,8 +26,7 @@ async fn verify_capture(env: &Env, expected: &Value) {
     for field in ["amount_micro", "original_amount_micro", "discount_micro"] {
         assert_eq!(payload[field], receipt[field]);
     }
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     let mut rows = Vec::new();
     for _ in 0..100 {
         okapi::worker::chsink::process_once(&env.state.pg, ch)

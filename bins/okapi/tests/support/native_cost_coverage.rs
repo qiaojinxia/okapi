@@ -139,8 +139,7 @@ async fn event(env: &Env, id: &str, topic: &str) -> Value {
     .unwrap()
 }
 async fn delivered(env: &Env, id: &str, kind: i16) -> Value {
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     for _ in 0..100 {
         okapi::worker::chsink::process_once(&env.state.pg, ch)
             .await

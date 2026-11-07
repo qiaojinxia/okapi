@@ -32,8 +32,7 @@ pub(super) async fn verify_published(
         serde_json::from_str::<Value>(event["ratio_snapshot"].as_str().unwrap()).unwrap(),
         *snapshot
     );
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     let mut records = Vec::new();
     for _ in 0..100 {
         okapi::worker::chsink::process_once(&env.state.pg, ch)

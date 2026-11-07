@@ -11,7 +11,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -157,6 +157,31 @@ pub(super) struct Env {
     pub(super) model: String,
     pub(super) calls: Arc<AtomicUsize>,
     pub(super) captured: Arc<tokio::sync::Mutex<Vec<(Value, i64)>>>,
+    /// ClickHouse is the suite's shared database rather than one made for this case.
+    shared_clickhouse: bool,
+}
+
+impl Env {
+    /// This case's ClickHouse client, with the statistics schema in place.
+    ///
+    /// `ensure_schema` is idempotent, but every call re-sends about 130 DDL statements that ClickHouse analyzes again
+    /// (about half a second here, more on CI runners), and the cases ask for it after each ingress and stream. The
+    /// shared database gets it once per test process: nothing drops that database while a suite runs.
+    pub(super) async fn clickhouse(&self) -> &okapi_store::ChClient {
+        static SHARED_APPLIED: AtomicBool = AtomicBool::new(false);
+        let ch = self
+            .state
+            .ch
+            .as_ref()
+            .expect("isolated ClickHouse is required");
+        if !self.shared_clickhouse || !SHARED_APPLIED.load(Ordering::Acquire) {
+            ch.ensure_schema().await.unwrap();
+            if self.shared_clickhouse {
+                SHARED_APPLIED.store(true, Ordering::Release);
+            }
+        }
+        ch
+    }
 }
 
 pub(super) async fn setup(protocol: Protocol, usage: Value) -> Env {
@@ -184,13 +209,16 @@ pub(super) async fn setup_with_ch_database(usage: Value, database: &str) -> Env 
     setup_inner(Protocol::Anthropic, usage, None, None, Some(database)).await
 }
 
+/// Builds on the pool `setup_inner` already migrated and seeded, like the worker does, instead of opening and
+/// migrating a second one.
 async fn fixture_state(
-    pg_url: &str,
+    pg: sqlx::PgPool,
     redis_url: &str,
     ch_url: Option<&str>,
     database: Option<&str>,
 ) -> gateway::state::AppState {
-    let mut state = gateway::build_state(pg_url, redis_url, "modal-test", ch_url, None)
+    let redis = okapi_store::connect_redis(redis_url).await.unwrap();
+    let mut state = gateway::build_state_with_resources(pg, redis, "modal-test", ch_url, None)
         .await
         .unwrap();
     if let Some(database) = database {
@@ -282,7 +310,7 @@ async fn setup_inner(
         .await
         .unwrap();
     super::published_pricing::publish(&pg, user).await;
-    let state = fixture_state(&pg_url, &redis_url, ch_url.as_deref(), database).await;
+    let state = fixture_state(pg, &redis_url, ch_url.as_deref(), database).await;
     state
         .ledger
         .credit(user, Money::from_micros(50_000_000))
@@ -299,6 +327,7 @@ async fn setup_inner(
         model,
         calls,
         captured,
+        shared_clickhouse: database.is_none(),
     }
 }
 

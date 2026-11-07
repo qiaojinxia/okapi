@@ -31,8 +31,7 @@ fn integer(value: &Value) -> i64 {
         .unwrap_or_else(|| value.as_str().unwrap().parse().unwrap())
 }
 async fn ch_row(env: &Env, id: &str, kind: i16) -> Value {
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     for _ in 0..100 {
         okapi::worker::chsink::process_once(&env.state.pg, ch)
             .await

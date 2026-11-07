@@ -52,12 +52,7 @@ async fn verify_sources(env: &Env, row: &Value, upstream: Value, sources: (&str,
             .as_micros(),
         50_000_000 - row["amount_micro"].as_i64().unwrap()
     );
-    let ch = env
-        .state
-        .ch
-        .as_ref()
-        .expect("provenance requires isolated ClickHouse");
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     for _ in 0..100 {
         if okapi::worker::chsink::process_once(&env.state.pg, ch)
             .await
@@ -279,8 +274,7 @@ async fn legacy_records_and_outbox_without_provenance_remain_unknown() {
     assert_eq!(row["usage"]["prompt_source"], "unknown");
     assert_eq!(row["usage"]["completion_source"], "unknown");
     assert!(row["usage"]["upstream_usage"].is_null());
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     for _ in 0..100 {
         if okapi::worker::chsink::process_once(&env.state.pg, ch)
             .await

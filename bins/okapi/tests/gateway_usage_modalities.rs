@@ -126,8 +126,8 @@ async fn verify(env: &Env) {
     for name in ["amount_micro", "original_amount_micro", "discount_micro"] {
         assert_eq!(payload[name], row[name]);
     }
-    if let Some(ch) = &env.state.ch {
-        ch.ensure_schema().await.unwrap();
+    if env.state.ch.is_some() {
+        let ch = env.clickhouse().await;
         for _ in 0..100 {
             if okapi::worker::chsink::process_once(&env.state.pg, ch)
                 .await

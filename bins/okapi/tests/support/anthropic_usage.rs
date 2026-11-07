@@ -52,12 +52,7 @@ async fn verify_totals(env: &Env) {
     .unwrap();
     assert_eq!(payload["upstream_cost_micro"], json!(cost.unwrap_or(0)));
     assert_eq!(payload["upstream_cost_known"], json!(cost.is_some()));
-    let ch = env
-        .state
-        .ch
-        .as_ref()
-        .expect("Anthropic statistics require the isolated CH service");
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     for _ in 0..100 {
         if okapi::worker::chsink::process_once(&env.state.pg, ch)
             .await

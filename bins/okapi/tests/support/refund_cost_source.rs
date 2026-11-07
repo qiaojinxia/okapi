@@ -209,8 +209,7 @@ fn integer(value: &Value) -> i64 {
 }
 
 async fn verify_delivery(env: &Env, id: &str, event: &Value, snapshot: &Value) {
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     let mut rows = Vec::new();
     for _ in 0..100 {
         okapi::worker::chsink::process_once(&env.state.pg, ch)

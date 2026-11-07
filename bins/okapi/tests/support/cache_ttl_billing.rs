@@ -144,8 +144,7 @@ async fn verify_delivery(env: &Env, payload: &Value, snapshot: &Value, ttl: Opti
     let (short, long) = ttl.map_or((Value::Null, Value::Null), |(short, long)| {
         (json!(short), json!(long))
     });
-    let ch = env.state.ch.as_ref().expect("isolated CH is required");
-    ch.ensure_schema().await.unwrap();
+    let ch = env.clickhouse().await;
     for _ in 0..100 {
         if okapi::worker::chsink::process_once(&env.state.pg, ch)
             .await
