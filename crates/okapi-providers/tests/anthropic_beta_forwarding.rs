@@ -4,6 +4,7 @@
 use bytes::Bytes;
 use okapi_providers::profiles::RequestContext;
 use okapi_providers::{AnthropicUpstream, Outbound, UpstreamError, anthropic::MessagesResponse};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -301,5 +302,34 @@ async fn a_beta_the_operator_configured_is_never_dropped_and_other_400s_pass_thr
         heads.lock().unwrap().len(),
         2,
         "a 400 that names no beta is not retried"
+    );
+}
+
+/// 客户端画像（模拟 Claude Code）接管时，beta 由画像自己管：客户端那行 beta 不会再另发一行，画像的也不被改动。
+#[tokio::test]
+async fn a_client_profile_keeps_its_own_beta_header_and_the_clients_is_not_added_on_top() {
+    let (base, heads) = serve(vec![(200, MESSAGE.to_owned())]).await;
+    let upstream = AnthropicUpstream::new().unwrap();
+    let outbound = Outbound {
+        context: RequestContext {
+            extensions: json!({"client_profile": {"name": "claude-code", "revision": "2.1.319",
+                "mode": "mimic", "entrypoint": "cli", "request_class": "main"}}),
+            identity_seed: Some("beta-profile".into()),
+            client_headers: vec![(
+                "anthropic-beta".into(),
+                "custom-client-beta-2026-01-01".into(),
+            )],
+            ..RequestContext::default()
+        },
+        ..Outbound::default()
+    };
+    send_message(&upstream, &base, "key-profile", &outbound)
+        .await
+        .unwrap();
+    let sent = betas_of(&heads.lock().unwrap()[0]);
+    assert_eq!(sent.len(), 1, "one header line only: {sent:?}");
+    assert!(
+        !sent[0].contains("custom-client-beta-2026-01-01"),
+        "the profile's own set is sent as it is: {sent:?}"
     );
 }

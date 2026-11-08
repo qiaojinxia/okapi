@@ -3761,7 +3761,7 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
     `gateway_embeddings`、`gateway_messages` 各一条（WebSocket 请求、向量请求、count_tokens 也受 `max_attempts` 约束）；`console_manage` 写入校验。端到端用例只填**自己网关状态**的
     设置缓存、不写共享的 `settings` 表——同库并行的其它用例读到的仍是缺省策略，不会被 `max_attempts: 1` 误伤。
   - 变异检查（把一个决策点改坏，看对应的测试红不红）：重试上限（chat、向量）、WebSocket 请求取策略、中间件、缓存失效、状态码 / 关键词判定与优先级、
-    关键词大小写与只扫正文开头、取值域、控制台写入校验，共 14 处改坏全被抓住。**图片、视频两处的上限没被抓住**（`count_tokens` 随后补了端到端用例，已能抓住）：它们和其它端点调同一个
+    关键词大小写与只扫正文开头、取值域、控制台写入校验，共 18 处改坏，16 处被抓住（`count_tokens` 的上限是补了端到端用例之后才抓住的）。**图片、视频两处的上限没被抓住**：它们和其它端点调同一个
     `request_policy::max_attempts()`，但这两个套件里原本就没有「第一个渠道失败、改投第二个」的夹具，端到端没有专门用例；改这两处循环时要自己留意这个旋钮。
 - **渠道上游余额定时刷新、低余额通知与停调**：控制台「查询余额」（§11.33）只在人点的时候查一次，列表上的余额很快过时，渠道用光了要等客户端开始
   4xx 才知道。new-api 有「更新所有渠道余额」和「余额不足自动禁用」；这里补上定时的那一半，**缺省关**（`settings.channel_balance_policy.enabled`）。
@@ -3789,6 +3789,8 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
     人停的不启用 / 管理员重新启用后再停）；`channel_balance` 集成九条（进程内 dashboard 替身 + webhook 接收端）——定时回填列表且间隔内不重查、notify 只通知一次并在 24
     小时后提醒、渠道自己的动作压过全局缺省、stop 停用 + 审计 + 充值后自动启用且启用无通知、人停的不启用、读不到不动、坏规则忽略、退出 / 非 openai 协议 / 已删除
     的渠道不查、出口不可用的渠道不直连、停用 / 启用的条件更新；控制台写入校验（全局策略与渠道设置各一组）；控制台原有的余额接口用例原样通过。
+  - 变异检查（读哪些渠道、读数怎么留痕、通知 / 停用 / 启用的每个判断、阈值与动作的读法、控制台校验）共 23 处，全部被抓住——其中「把非 openai 协议的渠道也选进来」第一次没被抓住
+    （任务本来就会跳过它，只有跳过的计数不同），补了「候选里根本没有它」的断言。
 - **Gemini 工具 schema 清洗**：Gemini 的 `functionDeclarations[].parameters` 只认一小撮 OpenAPI 字段，多一个整条请求 400（`Unknown name "additionalProperties"`）。
   OpenAI 侧客户端导出的工具参数几乎每个对象都带 `additionalProperties` / `$schema`，pydantic / zod 的还有 `$ref` / `$defs`、`anyOf: [{…}, {type: null}]`、
   `type: ["string", "null"]`、整数 enum、`format: uri`、不在 `properties` 里的 `required`——原先 `convert_tools` 把 `parameters` 原样塞进去，这些请求在 Gemini
@@ -3813,8 +3815,10 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
     点名的值这次请求里没发，都原样交回。渠道自己配的 beta 永远不被自愈丢掉（站长明说要发的，被拒就是错误）。
   - 实现上把订阅路径里的「拒收闩锁」（`REFUSED_BETAS`、解析 400、去掉点名值重发一次）挪到共用的 `beta_latch` 模块，订阅路径（记录归属是账号）和 API key 路径（归属是 key 的哈希，
     不存凭证本身）共用同一份；订阅路径的行为不变（必备的三个 beta 仍不丢）。
-  - 验收：`anthropic_beta_forwarding` 七条（messages 与 count_tokens 转发、没带就不发、渠道配的与客户端的合成一行、形状不对的不转、最多 32 个、拒收后去掉 / 按 key 记 / 别的 key 照带、
-    count_tokens 同样自愈、渠道配的不被丢且别的 400 不重发）；`gateway_messages` 一条端到端（客户端头经网关到 key 渠道，messages 与 count_tokens 各一次）；订阅路径原有的 `anthropic_beta_refusal` 两条不变。
+  - 验收：`anthropic_beta_forwarding` 八条（messages 与 count_tokens 转发、没带就不发、渠道配的与客户端的合成一行、形状不对的不转、最多 32 个、拒收后去掉 / 按 key 记 / 别的 key 照带、
+    count_tokens 同样自愈、渠道配的不被丢且别的 400 不重发、客户端画像接管时 beta 一行不多）；`gateway_messages` 一条端到端（客户端头经网关到 key 渠道，messages 与 count_tokens 各一次）；订阅路径原有的 `anthropic_beta_refusal` 两条不变。
+  - 变异检查共 31 处（Gemini 清洗的每条规则、转发的每个判断、共用闩锁的几处），30 处被抓住；「画像接管时不碰 beta」第一次没被抓住，补了画像用例；唯一没被抓住的是
+    `unknown-keys-kept`，它是等价改动——白名单在构造节点时就只复制认得的字段，收尾的 `retain` 只是第二道保险，去掉它输出不变。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
