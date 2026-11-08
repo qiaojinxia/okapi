@@ -884,7 +884,8 @@ for (const language of ['zh-CN', 'en']) test(`Dashboard 实时平均 QPS 与一�
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(status).toBeVisible()
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  // 视口缩小后版面要再排一帧；立刻量会偶发赶在重排之前（包体字节数一变，概率跟着变）
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test('Dashboard 最近一分钟无调用不显示 0% 错误率，更新频率与数据时间可查', async ({ page }) => {
