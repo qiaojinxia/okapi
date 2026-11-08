@@ -605,7 +605,8 @@ async fn only_channels_with_a_balance_interface_and_no_opt_out_are_queried() {
         .unwrap();
 
     let report = env.round(&policy()).await;
-    assert_eq!(report.refreshed, 1, "{report:?}");
+    // 非 openai 协议的渠道连候选都不是（不是「挑出来再跳过」），所以 skipped 是 0
+    assert_eq!((report.refreshed, report.skipped), (1, 0), "{report:?}");
     assert_eq!(env.calls_for(&queried), 1);
     for other in [&opted_out, &anthropic, &deleted] {
         assert_eq!(
