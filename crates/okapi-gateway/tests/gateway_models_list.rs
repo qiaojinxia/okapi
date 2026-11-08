@@ -33,6 +33,17 @@ async fn lists_enabled_models_and_hides_disabled_ones() {
         .execute(&pg)
         .await
         .unwrap();
+    // 管理员填过的规格会出现在列表里；没填的字段不出现（见下面的 `plain` 对照）
+    sqlx::query(
+        "UPDATE models SET display_name = 'Enabled Model', vendor = 'acme', context_window = 200000, max_output = 64000, \
+         capabilities = '{\"vision\":true,\"tools\":true,\"audio\":false}', \
+         catalog_config = '{\"kind\":\"chat\",\"description\":\"Fast one\",\"input_modalities\":[\"text\",\"image\"],\"output_modalities\":[\"text\"]}' \
+         WHERE model_name = $1",
+    )
+    .bind(&enabled)
+    .execute(&pg)
+    .await
+    .unwrap();
 
     let uid = okapi_store::provision::create_user(&pg, &format!("models-{suffix}"))
         .await
@@ -81,6 +92,7 @@ async fn lists_enabled_models_and_hides_disabled_ones() {
         !data.iter().any(|m| m["id"] == disabled.as_str()),
         "停用的模型不得出现在 /v1/models"
     );
+    assert_card_serves_both_readers(&body, mine);
     let client = reqwest::Client::new();
     let response = client
         .get(format!("http://{addr}/v1beta/models?key={token}"))
@@ -103,4 +115,37 @@ async fn lists_enabled_models_and_hides_disabled_ones() {
         .await
         .unwrap();
     assert_eq!(response.status(), 401);
+}
+
+/// 同一个响应，Anthropic 读者（SDK、Claude Code 的网关发现）要的字段也在；
+/// 管理员填过的规格出现在条目里，厂商 / 模态 / 能力放进 `okapi` 扩展对象。
+fn assert_card_serves_both_readers(body: &Value, mine: &Value) {
+    let data = body["data"].as_array().expect("data 应为数组");
+    assert_eq!(mine["type"], "model");
+    assert_eq!(mine["display_name"], "Enabled Model");
+    assert_eq!(mine["description"], "Fast one");
+    assert!(
+        mine["created_at"]
+            .as_str()
+            .is_some_and(|s| s.ends_with('Z')),
+        "created_at 是 RFC 3339 UTC：{mine}"
+    );
+    assert!(mine["created"].as_i64().is_some_and(|t| t > 0), "{mine}");
+    assert_eq!(mine["context_window"], 200_000);
+    assert_eq!(mine["max_input_tokens"], 200_000);
+    assert_eq!(mine["max_output_tokens"], 64_000);
+    assert_eq!(mine["max_tokens"], 64_000);
+    assert_eq!(
+        mine["okapi"],
+        serde_json::json!({
+            "vendor": "acme",
+            "kind": "chat",
+            "input_modalities": ["text", "image"],
+            "output_modalities": ["text"],
+            "capabilities": ["tools", "vision"],
+        })
+    );
+    assert_eq!(body["has_more"], false);
+    assert_eq!(body["first_id"], data[0]["id"], "{body}");
+    assert_eq!(body["last_id"], data[data.len() - 1]["id"], "{body}");
 }

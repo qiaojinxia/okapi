@@ -111,7 +111,7 @@ pub async fn published_pricing(
     })
 }
 
-/// 启用中的模型名列表（/v1/models）。
+/// 启用中的模型名列表（Gemini `models.list`、图片批次的模型校验用）。
 pub async fn list_active_models(pool: &PgPool) -> Result<Vec<String>, StoreError> {
     let names = sqlx::query_scalar!(
         r#"SELECT model_name FROM models WHERE status = 1 ORDER BY sort_order, model_name"#
@@ -119,6 +119,31 @@ pub async fn list_active_models(pool: &PgPool) -> Result<Vec<String>, StoreError
     .fetch_all(pool)
     .await?;
     Ok(names)
+}
+
+/// 启用中模型的公开卡片（`/v1/models` 的一行）：只取模型配置里管理员明确填过的字段，
+/// 不带价格、渠道和成本。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ActiveModelCard {
+    pub model_name: String,
+    pub display_name: Option<String>,
+    pub vendor: Option<String>,
+    pub capabilities: serde_json::Value,
+    pub context_window: Option<i32>,
+    pub max_output: Option<i32>,
+    pub catalog_config: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 启用中的模型卡片，顺序同 [`list_active_models`]。
+pub async fn list_active_model_cards(pool: &PgPool) -> Result<Vec<ActiveModelCard>, StoreError> {
+    let cards = sqlx::query_as::<_, ActiveModelCard>(
+        "SELECT model_name, display_name, vendor, capabilities, context_window, max_output, catalog_config, created_at \
+         FROM models WHERE status = 1 ORDER BY sort_order, model_name",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(cards)
 }
 
 /// 装载草稿配置，供管理员预览和显式发布；运行时使用 published_pricing。

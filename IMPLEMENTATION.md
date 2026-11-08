@@ -3703,6 +3703,29 @@ soonest_reset，也没有轮换组。以上几项对线上都没有影响。
   登记一份，结束后退回。
 - `gateway_realtime::a_least_concurrency_pool_counts_a_realtime_session_in_flight`：会话期间在途一直是 1，断开后归零。
 
+### 11.73 对照 new-api 补差距（2026-11-07）
+
+用户问「我们中转站和 new-api 的差距还有哪些」，对照 new-api rc.48 源码与 rc.49 发布说明（我们这边按 dd3162f 查代码），
+挑出五项先做：`/v1/models` 带规格、渠道主动探测与自动恢复、重试 / 禁用策略可配、渠道上游余额定时刷新、Gemini 工具 schema 清洗与
+Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应商专属渠道、订阅账号池转售、后台一键自升级、沙盒插件运行时、
+内置敏感词中间件）不在其内。
+
+- **`/v1/models` 一个响应两边都能读**：原先每个模型只有 `id` / `object` / `owned_by`。现在同一条还带 Anthropic `models.list` 的
+  `type` / `display_name` / `created_at`（RFC 3339）/ `max_input_tokens` / `max_tokens`，OpenAI 的 `created`，管理员在模型配置里填过的
+  `context_window` / `max_output_tokens` / `description`，以及放进 `okapi` 扩展对象的厂商、类型、模态和能力白名单；列表本身带
+  `has_more` / `first_id` / `last_id`。没填的字段不出现，不按名字猜。`capabilities` 这个名字没占：Anthropic 的是对象、我们的是布尔表，
+  混用会让严格的解析失败，所以放在 `okapi.capabilities`（只列明确为 true 的）。
+  - 实测依据：本机 Claude Code 2.1.311 在设了 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` 时请求 `GET {base}/v1/models?limit=1000`，用
+    zod 校验 `{data:[…]}`，只保留 id 含 claude / anthropic 的条目，`/model` 选单的标签取 `display_name`、说明取 `description`（缺了就显示 id 与
+    "From gateway"）。旧响应能过校验，只是没有显示名；新响应经同一个二进制验证，缓存里是 `{id, display_name, description}`。
+  - **没做 Codex 目录**：Codex 0.166 只有两种情况会向端点拉 `/models`——ChatGPT 登录，或自定义提供方设了 `model_catalog_url`
+    （内置 openai 提供方改 `openai_base_url` 也不拉，请求日志里没有）。拉的是 Codex 自己的 `ModelInfo` 目录（`{"models":[…]}`，四十多个字段），
+    OpenAI 形状解析不了，退回「Model metadata not found，用兜底元数据」。要支持得照上游目录原样透传，没有真实 Codex 账号无法验证，
+    且只有设了 `model_catalog_url` 的用户受益。new-api 同样不对下游提供这个目录（只用它发现模型名）。
+
+**验收**：`models::tests` 两条（一条条目同时满足 OpenAI 与 Anthropic 读者、能力只列明确为 true 的且排序；一条没填的字段不出现）、
+`gateway_models_list` 补了字段断言；三处变异（去掉 `type`、`capabilities` 与 Anthropic 撞名、缺省窗口按猜的补）各被单测抓住。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
