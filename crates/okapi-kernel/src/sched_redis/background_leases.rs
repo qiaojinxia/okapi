@@ -85,4 +85,25 @@ impl SchedulerRedis {
             .await;
         !matches!(claimed, Ok(None))
     }
+
+    /// 渠道上游余额刷新的占位（`channel_balance`）：同一个渠道在 `ttl_secs` 内只有一个副本去查（SET NX EX），
+    /// 占位本身就是「最近查过」的标记。Redis 不可用时放行——最坏重复查一次余额接口。
+    pub async fn channel_balance_claim(
+        &self,
+        channel_id: i64,
+        holder: &str,
+        ttl_secs: i64,
+    ) -> bool {
+        let claimed: Result<Option<String>, _> = self
+            .client
+            .set(
+                format!("balance:ch:{channel_id}"),
+                holder,
+                Some(Expiration::EX(ttl_secs.max(1))),
+                Some(SetOptions::NX),
+                false,
+            )
+            .await;
+        !matches!(claimed, Ok(None))
+    }
 }

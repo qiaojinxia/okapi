@@ -71,6 +71,22 @@ pub(super) fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), A
     Ok(())
 }
 
+/// `settings.low_balance`（余额低于阈值的处置，形状见 `okapi_kernel::policies::LowBalance`）与
+/// `settings.balance_refresh`（`"off"` = 退出定时余额刷新，`"on"` = 缺省）的写入校验。
+pub(super) fn ensure_settings_balance(settings: Option<&Value>) -> Result<(), AppError> {
+    let Some(settings) = settings else {
+        return Ok(());
+    };
+    okapi_kernel::policies::LowBalance::from_channel_settings(settings)
+        .map_err(|param| AppError::bad_request().with_param(param))?;
+    if let Some(value) = settings.get("balance_refresh")
+        && !matches!(value.as_str(), Some("off" | "on"))
+    {
+        return Err(AppError::bad_request().with_param("balance_refresh"));
+    }
+    Ok(())
+}
+
 /// 已退役的 Claude Code 伪装开关（2026-10-05 起由 `extensions.client_profile` 取代）：
 /// 旧前端写进来只会被静默忽略，所以直接拒绝。
 pub(super) fn ensure_settings_mimic(settings: Option<&Value>) -> Result<(), AppError> {
@@ -131,6 +147,7 @@ pub(crate) async fn validate_channel_settings(
     ensure_settings_oauth_token_url(state, settings).await?;
     ensure_settings_mimic(settings)?;
     ensure_settings_tool_loss_policy(settings)?;
+    ensure_settings_balance(settings)?;
     ensure_request_extensions(provider, settings)?;
     ensure_account_control(settings)
 }

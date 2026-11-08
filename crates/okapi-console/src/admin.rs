@@ -43,8 +43,9 @@ pub(super) use self::channel_settings::{
     ensure_account_control, ensure_azure_api_base, validate_channel_settings,
 };
 use self::channel_settings::{
-    ensure_request_extensions, ensure_settings_api_version, ensure_settings_mimic,
-    ensure_settings_oauth_token_url, ensure_settings_outbound, ensure_settings_tool_loss_policy,
+    ensure_request_extensions, ensure_settings_api_version, ensure_settings_balance,
+    ensure_settings_mimic, ensure_settings_oauth_token_url, ensure_settings_outbound,
+    ensure_settings_tool_loss_policy,
 };
 pub use self::channels::{
     ChannelUsageQuery, CreateChannelReq, PatchChannelKeyReq, PatchChannelReq, PoolMemberReq,

@@ -784,6 +784,76 @@ pub async fn restore_key_after_probe(
     Ok(restored.rows_affected() > 0)
 }
 
+/// 定时刷新上游余额的一个目标：渠道里第一把静态 key 的凭证（和控制台「查询余额」同口径）加上查询所需的渠道信息。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BalanceTarget {
+    pub channel_id: i64,
+    pub name: String,
+    /// `channels.status`：1 启用 / 2 手动停用。
+    pub status: i16,
+    pub provider: String,
+    pub api_base: Option<String>,
+    pub settings: serde_json::Value,
+    pub key_id: i64,
+    pub credential_ciphertext: Vec<u8>,
+}
+
+/// 给余额刷新挑渠道：没删除、有 `api_base`、协议在 `providers` 里、渠道没把 `settings.balance_refresh` 设成 `"off"`，
+/// 取渠道里 id 最小的**静态**（`credential_kind = 0`）key。启用（1）和手动停用（2）的都取——停用的渠道也要刷新，
+/// 才看得出「因余额低停掉的」何时可以回来。按渠道 id 升序，从 `after_id` 之后取 `limit` 个，让游标能分页走完整个舰队。
+pub async fn balance_targets(
+    pool: &PgPool,
+    providers: &[&str],
+    after_id: i64,
+    limit: i64,
+) -> Result<Vec<BalanceTarget>, StoreError> {
+    let providers: Vec<String> = providers.iter().map(|p| (*p).to_owned()).collect();
+    let rows = sqlx::query_as::<_, BalanceTarget>(
+        r"SELECT c.id AS channel_id, c.name, c.status, c.provider, c.api_base, c.settings,
+                 ck.id AS key_id, ck.credential_ciphertext
+          FROM channels c
+          CROSS JOIN LATERAL (
+              SELECT id, credential_ciphertext FROM channel_keys
+              WHERE channel_id = c.id AND credential_kind = 0
+              ORDER BY id
+              LIMIT 1
+          ) ck
+          WHERE c.deleted_at IS NULL AND c.status IN (1, 2)
+            AND c.provider = ANY($1::varchar[])
+            AND COALESCE(c.api_base, '') <> ''
+            AND COALESCE(c.settings ->> 'balance_refresh', '') <> 'off'
+            AND c.id > $2
+          ORDER BY c.id
+          LIMIT $3",
+    )
+    .bind(&providers)
+    .bind(after_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 渠道状态只在**当前确实是 `from`** 时才改成 `to`（1 启用 / 2 手动停用）：后台任务据余额停用 / 恢复渠道时，
+/// 读状态到写状态之间管理员可能已经动过它，条件更新保证不把人的决定覆盖掉。返回是否真的改了。
+pub async fn transition_channel_status(
+    pool: &PgPool,
+    channel_id: i64,
+    from: i16,
+    to: i16,
+) -> Result<bool, StoreError> {
+    let result = sqlx::query(
+        "UPDATE channels SET status = $3, updated_at = now() \
+         WHERE id = $1 AND status = $2 AND deleted_at IS NULL",
+    )
+    .bind(channel_id)
+    .bind(from)
+    .bind(to)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// 池链里能服务该模型、正在冷却（cooling / 限流 / 配额，worker 到点恢复）的 key 最早何时回来；
 /// 没有冷却中的 key 时为 None。候选全空时据此给客户端 `Retry-After`。
 /// 条件与 [`candidates_for_model`] 的渠道 / key 过滤一致，只把「已冷却完」换成「冷却中」。

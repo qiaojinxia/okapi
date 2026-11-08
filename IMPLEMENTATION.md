@@ -3760,6 +3760,35 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
     内置认不出的账号级 400 靠关键词点名后改投并把 key 登记成失效 / 配额耗尽、写设置后策略缓存随路由缓存一起失效；`gateway_responses_ws` 与
     `gateway_embeddings` 各一条（WebSocket 请求、向量请求也受 `max_attempts` 约束）；`console_manage` 写入校验。端到端用例只填**自己网关状态**的
     设置缓存、不写共享的 `settings` 表——同库并行的其它用例读到的仍是缺省策略，不会被 `max_attempts: 1` 误伤。
+  - 变异检查（把一个决策点改坏，看对应的测试红不红）：重试上限（chat、向量）、WebSocket 请求取策略、中间件、缓存失效、状态码 / 关键词判定与优先级、
+    关键词大小写与只扫正文开头、取值域、控制台写入校验，共 14 处改坏全被抓住。**图片、视频、`count_tokens` 三处的上限没被抓住**：它们和其它端点调同一个
+    `request_policy::max_attempts()`，但这三个套件里原本就没有「第一个渠道失败、改投第二个」的夹具，端到端没有专门用例；改这三处循环时要自己留意这个旋钮。
+- **渠道上游余额定时刷新、低余额通知与停调**：控制台「查询余额」（§11.33）只在人点的时候查一次，列表上的余额很快过时，渠道用光了要等客户端开始
+  4xx 才知道。new-api 有「更新所有渠道余额」和「余额不足自动禁用」；这里补上定时的那一半，**缺省关**（`settings.channel_balance_policy.enabled`）。
+  - 刷新：worker 任务 `channel_balance`（和 `channel_probe` 同一套骨架）对 openai / openai_compat 渠道的**第一把静态 key**（同按钮口径，探针按主机选：
+    new-api dashboard、DeepSeek、SiliconFlow、OpenRouter、Moonshot）查一次余额，写进和按钮同一处留痕（`ch:balance:<id>`，列表的 `last_balance` 自动更新，
+    多一个 `auto: true`）。`interval_secs`（300–86400，缺省 3600）是同一渠道两次刷新的最小间隔，`concurrency`（1–4）、`batch_size`（1–200）限每轮的量。
+    渠道 `settings.balance_refresh = "off"` 退出；官方 `api.openai.com` 没有给 API key 用的余额接口，不查；已停用（手动）的渠道也刷新——才看得出因余额低停掉的何时可以回来。出口不可用的 key 不查，绝不退回直连。
+    查不到（上游报错、形状认不出）时留痕和渠道状态原样不动。
+  - 低余额规则在**渠道**上：`settings.low_balance = {"threshold_micro": N, "action": "notify" | "stop"}`。金额是上游余额接口报的那个货币的 micro 整数
+    （列表里 `balance_micro` 同一个单位，美元和人民币各算各的）；余额**小于等于**阈值算低。`action` 缺省取全局 `low_action`（缺省 notify）。没写
+    `low_balance` 的渠道只刷新、不通知、不停。写入渠道设置时控制台校验形状（阈值 0 ~ 10^15、动作只认两个值、不认识的字段拒绝）。
+  - 低了以后：发 `channel_balance_low` 通知（通知多路里新增的事件，设置页的事件清单和文案同步加了；载荷是 `channels: [{channel_id, name, currency,
+    balance_micro, threshold_micro, action, stopped}]`）。只在**转入低**时发一次，仍低则每 24 小时提醒一次——靠 Redis 里的「低」标记
+    （`ch:lowbal:<id>`，90 天 TTL，仍低时续期）判断；通知多路自己的频率闸（`min_interval_secs`）若恰好压住了它，最迟 24 小时后补一次提醒。
+    动作是 `stop` 时，同时把渠道停用（状态 2），清路由缓存（NATS 广播），留一条审计 `channel.low_balance_stop`。
+  - 余额回到阈值之上：渠道**还停着、且标记上记着是这里停的**，才自动再启用（审计 `channel.low_balance_resume`，不发通知）；标记清掉。管理员自己停的渠道
+    没有这个标记，余额再多也不动；低的时候管理员又自己启用的渠道，`stop` 动作下下一轮会再停一次（要留着就改成 notify 或去掉阈值）。停 / 启用都是
+    条件更新（`WHERE status = 旧值`），读状态到写状态之间管理员动过它就让位给人。Redis 丢了标记的最坏后果是停掉的渠道要人工启用，不会误启用别人停的。
+  - 取舍：只用一次读数就停，不等第二次确认——余额是预付费口径，晚一个间隔多花的钱比误判一次更实在；但开 `stop` 前要先在列表里确认该渠道显示的余额对得上
+    （有的中转站对不限额的 token 报 `hard_limit_usd: 0`，阈值设 0 就会把它停掉）。只查第一把 key，多 key 渠道各 key 额度不同时看的是第一把。
+  - 实现上：余额的探针、解析和请求从控制台挪到 `okapi_gateway::channel_balance`（控制台按钮和 worker 共用，错误归因 `BalanceError` 由控制台映射回原来的
+    响应码）；`ChannelBalancePolicy` / `LowBalance` 在 kernel 的 `policies`（控制台写入校验、worker 读取共用）；多副本靠每个渠道一个 Redis 占位
+    （SET NX EX，TTL = 间隔）；商店查询 `balance_targets` 用运行时 `query_as`，不动 `.sqlx`。
+  - 验收：kernel 单测三条（缺省关且不停、取值域、渠道规则的读法与边界）；worker 单测七条（官方 OpenAI 不查 + 判断表：健康不动 / 转入低只通知一次 / 提醒到期 / 已停不重复停 /
+    人停的不启用 / 管理员重新启用后再停）；`channel_balance` 集成九条（进程内 dashboard 替身 + webhook 接收端）——定时回填列表且间隔内不重查、notify 只通知一次并在 24
+    小时后提醒、渠道自己的动作压过全局缺省、stop 停用 + 审计 + 充值后自动启用且启用无通知、人停的不启用、读不到不动、坏规则忽略、退出 / 非 openai 协议 / 已删除
+    的渠道不查、出口不可用的渠道不直连、停用 / 启用的条件更新；控制台写入校验（全局策略与渠道设置各一组）；控制台原有的余额接口用例原样通过。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

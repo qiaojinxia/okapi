@@ -2,9 +2,9 @@
 use super::super::query::{PageQuery, Query};
 use super::{
     audit, ensure_account_control, ensure_azure_api_base, ensure_channel_owner,
-    ensure_request_extensions, ensure_settings_api_version, ensure_settings_mimic,
-    ensure_settings_oauth_token_url, ensure_settings_outbound, ensure_settings_tool_loss_policy,
-    guard_scoped,
+    ensure_request_extensions, ensure_settings_api_version, ensure_settings_balance,
+    ensure_settings_mimic, ensure_settings_oauth_token_url, ensure_settings_outbound,
+    ensure_settings_tool_loss_policy, guard_scoped,
 };
 use axum::Json;
 use axum::extract::State;
@@ -513,6 +513,7 @@ pub async fn update_channel(
     ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
     ensure_settings_mimic(req.settings.as_ref())?;
     ensure_settings_tool_loss_policy(req.settings.as_ref())?;
+    ensure_settings_balance(req.settings.as_ref())?;
     ensure_account_control(req.settings.as_ref())?;
     if req.provider.is_some() || req.settings.is_some() {
         let (current_provider, current_settings): (String, Value) = sqlx::query_as(

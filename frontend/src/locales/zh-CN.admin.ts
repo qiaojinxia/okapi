@@ -415,6 +415,7 @@ export default {
   notifyEventDrift: '对账漂移',
   notifyEventCooldown: '渠道冷却',
   notifyEventBalanceLow: '余额不足',
+  notifyEventChannelBalanceLow: '渠道上游余额低',
   notifyEventMarginBreaker: '负毛利熔断触发',
   settingPlaygroundPresets: '试用台预设',
   settingPlaygroundPresetsDesc:
@@ -1144,6 +1145,8 @@ export default {
   settingEgressProbeDesc: '代理出口 IP 的后台探测：开关、间隔与探测地址。',
   channelProbeTitle: '渠道后台探测与自动恢复',
   requestPolicyTitle: '请求重试与失效判定',
+  channelBalanceTitle: '渠道上游余额定时刷新',
+  settingChannelBalanceDesc: '定时查询渠道的上游余额（openai / openai_compat 渠道，口径同渠道列表里的「查询余额」），结果回填到列表。缺省关闭。渠道设置里写 low_balance: {"threshold_micro": 5000000, "action": "stop"}（金额是上游货币的 micro，余额小于等于它算低）：低时发 channel_balance_low 通知，动作为 stop 时同时停用渠道，余额回到阈值之上且渠道仍停着时自动再启用（只启用这里停的，管理员自己停的不动）。interval_secs 是同一渠道两次查询的最小间隔（300–86400），low_action 是渠道没写动作时的缺省（notify 或 stop）；渠道设置 balance_refresh: "off" 可单独退出。上线前先确认列表里显示的余额对得上，再开 stop。',
   settingRequestPolicyDesc: '上游请求失败后怎么重试、怎么判 key 的状态。max_attempts（1–10，缺省 3）是一个请求最多试几个渠道 key；retry_statuses 在内置重试矩阵之外追加要换渠道重试的状态码（如 ["404", "520-529"]，对话 / 向量 / 计数；图片、视频、语音不重试）；invalid_statuses、invalid_keywords 把对应的状态码 / 错误正文关键词判为凭证失效，quota_keywords 判为配额耗尽（冷却到次日 0 点）。都是追加规则，缺省保持现行行为。',
   settingChannelProbeDesc: '定时对渠道 key 发一次 16 token 的最小补全：被摘出轮转的 key（冷却、配额耗尽、凭证失效）探通就放回；模式 all 时正常的 key 也探，探不通按真实失败登记。缺省关闭；只探静态 key 的直连渠道，订阅账号、云厂商和透传渠道不在其内；渠道设置里写 health_probe: "off" 可单独退出。',
   settingRegistrationDesc: '管理注册方式、邮箱限制与注册奖励。',

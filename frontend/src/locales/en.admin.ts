@@ -415,6 +415,7 @@ export default {
   notifyEventDrift: 'Reconciliation drift',
   notifyEventCooldown: 'Channel cooldown',
   notifyEventBalanceLow: 'Low balance',
+  notifyEventChannelBalanceLow: 'Channel upstream balance low',
   notifyEventMarginBreaker: 'Margin breaker tripped',
   settingPlaygroundPresets: 'Playground presets',
   settingPlaygroundPresetsDesc:
@@ -1227,6 +1228,8 @@ export default {
   settingEgressProbeDesc: 'Background probing of proxy exit IPs: on/off, interval and probe URL.',
   channelProbeTitle: 'Channel key probing and auto-recovery',
   requestPolicyTitle: 'Request retries and failure classification',
+  channelBalanceTitle: 'Scheduled channel upstream balance refresh',
+  settingChannelBalanceDesc: 'Queries the upstream balance of channels on a schedule (openai / openai_compat channels, the same lookup as Check balance in the channel list) and fills the list. Off by default. Put low_balance: {"threshold_micro": 5000000, "action": "stop"} in a channel\'s settings (the amount is in micro of the upstream\'s currency; a balance at or below it is low): a low balance sends a channel_balance_low notification, with action stop the channel is also stopped, and once the balance is back above the threshold a channel that is still stopped is re-enabled (only the ones stopped here, never ones an operator stopped). interval_secs is the minimum gap between two lookups of one channel (300-86400), low_action is the default when a channel names none (notify or stop); balance_refresh: "off" in a channel\'s settings opts it out. Check that the balance shown in the list is meaningful before turning stop on.',
   settingRequestPolicyDesc: 'How a failed upstream request is retried and how a key\'s state is decided. max_attempts (1-10, default 3) is how many channel keys one request may try; retry_statuses adds status codes that also move to the next channel beyond the built-in retry matrix (for example ["404", "520-529"]; chat, embeddings and token counting only, not images, video or speech); invalid_statuses and invalid_keywords classify matching statuses / error-body keywords as an invalid credential, quota_keywords as exhausted quota (cooldown until the next UTC midnight). All additive; the defaults keep today\'s behaviour.',
   settingChannelProbeDesc: 'Sends one 16-token completion per channel key on a schedule: keys taken out of rotation (cooling, quota exhausted, credential invalid) go back when the probe passes; in mode all, healthy keys are probed too and a failed probe is recorded like a real failure. Off by default; covers direct static-key channels only (not subscription accounts, cloud providers or pass-through); set health_probe: "off" in a channel\'s settings to opt out.',
   settingRegistrationDesc: 'Manage sign-up rules, allowed email domains and registration rewards.',

@@ -1612,14 +1612,14 @@ test('设置通知多路：Webhook 与邮件分行提交，事件从清单勾选
       {
         type: 'webhook',
         url: 'https://hooks.example.com/okapi',
-        events: ['drift', 'channel_cooldown', 'balance_low', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine'],
+        events: ['drift', 'channel_cooldown', 'balance_low', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine', 'channel_balance_low'],
         min_interval_secs: 120,
       },
       {
         type: 'email',
         to: ['ops@example.com'],
         lang: 'zh-CN',
-        events: ['drift', 'channel_cooldown', 'balance_low', 'margin_breaker', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine'],
+        events: ['drift', 'channel_cooldown', 'balance_low', 'margin_breaker', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine', 'channel_balance_low'],
         min_interval_secs: 300,
       },
     ],
@@ -1653,7 +1653,7 @@ test('设置通知多路：Webhook 与邮件分行提交，事件从清单勾选
       {
         type: 'webhook',
         url: 'https://hooks.example.com/okapi',
-        events: ['drift', 'channel_cooldown', 'balance_low', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine'],
+        events: ['drift', 'channel_cooldown', 'balance_low', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine', 'channel_balance_low'],
         min_interval_secs: 120,
       },
     ],

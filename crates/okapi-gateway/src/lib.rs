@@ -6,6 +6,7 @@ pub mod audio;
 pub mod auth;
 pub mod bootstrap;
 pub(crate) mod candidates;
+pub mod channel_balance;
 pub mod channel_probe;
 pub mod channel_test;
 pub mod chat;

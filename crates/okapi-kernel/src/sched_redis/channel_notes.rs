@@ -52,6 +52,39 @@ impl SchedulerRedis {
         self.channel_note_get_many("ch:balance", channel_ids).await
     }
 
+    /// 渠道当前处于「余额低」的标记（`ch:lowbal:<channel_id>`，§11.73）：记着是哪时候、读到多少、是不是这里把渠道停掉的。
+    /// 它是后台刷新的**状态**，不是提示信息：只在转入「低」时通知一次，也靠它认出「这个停用是我们停的，余额回来可以自动启用」。
+    /// TTL 90 天，每轮仍低时续期；Redis 丢了它，最坏是停用的渠道要人工启用，不会误启用别人停的。
+    pub async fn channel_low_balance_get(&self, channel_id: i64) -> Option<serde_json::Value> {
+        let key = format!("ch:lowbal:{channel_id}");
+        let raw: Option<String> = self.client.get(&key).await.ok().flatten();
+        raw.and_then(|text| serde_json::from_str(&text).ok())
+    }
+
+    pub async fn channel_low_balance_set(&self, channel_id: i64, state: &serde_json::Value) {
+        let key = format!("ch:lowbal:{channel_id}");
+        if let Err(err) = self
+            .client
+            .set::<(), _, _>(
+                &key,
+                state.to_string(),
+                Some(Expiration::EX(90 * 24 * 3600)),
+                None,
+                false,
+            )
+            .await
+        {
+            tracing::warn!(error = %err, key, "低余额标记写入失败");
+        }
+    }
+
+    pub async fn channel_low_balance_clear(&self, channel_id: i64) {
+        let key = format!("ch:lowbal:{channel_id}");
+        if let Err(err) = self.client.del::<i64, _>(&key).await {
+            tracing::warn!(error = %err, key, "低余额标记清除失败");
+        }
+    }
+
     async fn channel_note_get_many(
         &self,
         prefix: &str,

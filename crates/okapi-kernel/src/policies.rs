@@ -312,6 +312,103 @@ impl RequestPolicy {
 /// `settings` 里请求策略的键。
 pub const REQUEST_POLICY_SETTING: &str = "request_policy";
 
+/// 渠道余额低于阈值时怎么办。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LowBalanceAction {
+    /// 只发 `channel_balance_low` 通知，渠道照常调度。
+    #[default]
+    Notify,
+    /// 通知，并把渠道停用（渠道状态 2）；余额回到阈值之上、且是这里停的，自动再启用。
+    Stop,
+}
+
+/// `settings.channel_balance_policy`：渠道上游余额的定时刷新（worker `channel_balance`）。缺省**关**——
+/// 刷新会定时请求每个渠道的上游余额接口，要站长明确打开。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChannelBalancePolicy {
+    pub enabled: bool,
+    /// 同一个渠道两次刷新的最小间隔（秒）。
+    pub interval_secs: u64,
+    pub concurrency: u8,
+    /// 每一轮最多刷新几个渠道。
+    pub batch_size: u16,
+    /// 渠道自己的 `low_balance` 没写动作时用它。
+    pub low_action: LowBalanceAction,
+}
+
+impl Default for ChannelBalancePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 3600,
+            concurrency: 2,
+            batch_size: 50,
+            low_action: LowBalanceAction::Notify,
+        }
+    }
+}
+
+impl ChannelBalancePolicy {
+    /// 形状与取值域校验（设置写入与 worker 读取共用）。
+    pub fn parse(value: &Value) -> Option<Self> {
+        let policy = if value.is_null() {
+            Self::default()
+        } else {
+            serde_json::from_value::<Self>(value.clone()).ok()?
+        };
+        ((300..=86_400).contains(&policy.interval_secs)
+            && (1..=4).contains(&policy.concurrency)
+            && (1..=200).contains(&policy.batch_size))
+        .then_some(policy)
+    }
+}
+
+/// `settings` 里渠道余额刷新策略的键。
+pub const CHANNEL_BALANCE_SETTING: &str = "channel_balance_policy";
+
+/// 渠道 `settings.low_balance`：这个渠道的余额低到什么程度算「低」。金额是上游余额接口报的那个货币的 micro 整数
+/// （`channel_balance_policy` 刷新出来的 `balance_micro` 同一个单位）；余额小于等于阈值即为低。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LowBalance {
+    pub threshold_micro: i64,
+    /// 缺省用 `channel_balance_policy.low_action`。
+    #[serde(default)]
+    pub action: Option<LowBalanceAction>,
+}
+
+/// 阈值的上限（10^15 micro = 10^9 个货币单位）：只为拦住手滑写的天文数字。
+const MAX_LOW_BALANCE_MICRO: i64 = 1_000_000_000_000_000;
+
+impl LowBalance {
+    /// 从渠道 `settings` 读：没写（或写 null）= `Ok(None)`；写了但形状 / 取值不对 = `Err("low_balance")`（写入校验当 param 用）。
+    pub fn from_channel_settings(settings: &Value) -> Result<Option<Self>, &'static str> {
+        let Some(value) = settings.get("low_balance").filter(|v| !v.is_null()) else {
+            return Ok(None);
+        };
+        let parsed = serde_json::from_value::<Self>(value.clone()).map_err(|_| "low_balance")?;
+        if (0..=MAX_LOW_BALANCE_MICRO).contains(&parsed.threshold_micro) {
+            Ok(Some(parsed))
+        } else {
+            Err("low_balance")
+        }
+    }
+
+    /// 这个渠道实际用的动作：渠道自己写的优先，没写用全局缺省。
+    #[must_use]
+    pub fn action_under(&self, policy: &ChannelBalancePolicy) -> LowBalanceAction {
+        self.action.unwrap_or(policy.low_action)
+    }
+
+    /// 余额算不算低。
+    #[must_use]
+    pub fn is_low(&self, balance_micro: i64) -> bool {
+        balance_micro <= self.threshold_micro
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +551,93 @@ mod tests {
             vec!["foo".to_owned(), "bar".to_owned()],
             "trimmed, lower-cased, deduplicated"
         );
+    }
+
+    #[test]
+    fn balance_refresh_is_off_until_the_operator_turns_it_on() {
+        let policy = ChannelBalancePolicy::parse(&Value::Null).unwrap();
+        assert!(!policy.enabled);
+        assert_eq!(policy, ChannelBalancePolicy::default());
+        assert_eq!(
+            policy.low_action,
+            LowBalanceAction::Notify,
+            "never stops a channel unless told to"
+        );
+        let on =
+            ChannelBalancePolicy::parse(&json!({"enabled": true, "low_action": "stop"})).unwrap();
+        assert!(on.enabled);
+        assert_eq!(on.low_action, LowBalanceAction::Stop);
+    }
+
+    #[test]
+    fn balance_policy_rejects_unknown_fields_and_out_of_range_values() {
+        for bad in [
+            json!({"interval_secs": 299}),
+            json!({"interval_secs": 86_401}),
+            json!({"concurrency": 0}),
+            json!({"concurrency": 5}),
+            json!({"batch_size": 0}),
+            json!({"batch_size": 201}),
+            json!({"low_action": "disable"}),
+            json!({"enable": true}),
+            json!("on"),
+        ] {
+            assert!(ChannelBalancePolicy::parse(&bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_channels_low_balance_rule_is_read_from_its_settings() {
+        let none = json!({"health_probe": "off"});
+        assert_eq!(LowBalance::from_channel_settings(&none), Ok(None));
+        assert_eq!(
+            LowBalance::from_channel_settings(&json!({"low_balance": null})),
+            Ok(None)
+        );
+        let rule = LowBalance::from_channel_settings(
+            &json!({"low_balance": {"threshold_micro": 5_000_000}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            rule.is_low(5_000_000),
+            "equal to the threshold counts as low"
+        );
+        assert!(rule.is_low(-1));
+        assert!(!rule.is_low(5_000_001));
+        let global = ChannelBalancePolicy {
+            low_action: LowBalanceAction::Stop,
+            ..Default::default()
+        };
+        assert_eq!(
+            rule.action_under(&global),
+            LowBalanceAction::Stop,
+            "falls back to the global action"
+        );
+        let own = LowBalance::from_channel_settings(
+            &json!({"low_balance": {"threshold_micro": 0, "action": "notify"}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            own.action_under(&global),
+            LowBalanceAction::Notify,
+            "the channel's own action wins"
+        );
+        for bad in [
+            json!({"low_balance": {"threshold_micro": -1}}),
+            json!({"low_balance": {"threshold_micro": 1_000_000_000_000_001_i64}}),
+            json!({"low_balance": {"threshold_micro": "5"}}),
+            json!({"low_balance": {"threshold": 5}}),
+            json!({"low_balance": {"threshold_micro": 1, "action": "pause"}}),
+            json!({"low_balance": {}}),
+            json!({"low_balance": 5}),
+        ] {
+            assert_eq!(
+                LowBalance::from_channel_settings(&bad),
+                Err("low_balance"),
+                "{bad}"
+            );
+        }
     }
 }

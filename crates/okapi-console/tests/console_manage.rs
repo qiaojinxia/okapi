@@ -463,6 +463,33 @@ async fn outbound_settings_write_validation() {
     .await;
     assert_eq!(status, 400);
     assert_eq!(body["error"]["param"], "inject_request_fields");
+    // settings.low_balance / balance_refresh：写错在保存时就拦（worker 读到坏规则只会忽略，站长以为配上了其实没有）
+    for (settings, param) in [
+        (
+            json!({"low_balance": {"threshold_micro": -1}}),
+            "low_balance",
+        ),
+        (
+            json!({"low_balance": {"threshold_micro": 5, "action": "pause"}}),
+            "low_balance",
+        ),
+        (json!({"low_balance": {"threshold": 5}}), "low_balance"),
+        (json!({"low_balance": {}}), "low_balance"),
+        (json!({"balance_refresh": "never"}), "balance_refresh"),
+    ] {
+        let (status, body) = post(with(json!({ "settings": settings }))).await;
+        assert_eq!(status, 400, "{settings}: {body}");
+        assert_eq!(body["error"]["param"], param, "{settings}");
+    }
+    let (status, body) = post(with(json!({
+        "name": format!("ob-lowbal-{}", env.suffix),
+        "settings": {
+            "low_balance": {"threshold_micro": 5_000_000, "action": "stop"},
+            "balance_refresh": "on"
+        }
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
     let (status, body) = post(with(json!({
         "name": format!("ob-inj-{}", env.suffix),
         "settings": {"inject_request_fields": {"temperature": 0.2}}
@@ -842,6 +869,39 @@ async fn admin_list_surface_covers_every_resource() {
     .await;
     assert_eq!(status, 200);
     sqlx::query("DELETE FROM settings WHERE key = 'request_policy'")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
+    // ---- 渠道余额刷新策略：同样在写入时拦坏值 ----
+    for bad in [
+        json!({"interval_secs": 299}),
+        json!({"concurrency": 5}),
+        json!({"batch_size": 0}),
+        json!({"low_action": "disable"}),
+        json!({"enable": true}),
+        json!("on"),
+    ] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/settings",
+            t,
+            Some(json!({"key":"channel_balance_policy","value":bad})),
+        )
+        .await;
+        assert_eq!(status, 400, "channel_balance_policy={bad} 必须拒绝");
+    }
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"channel_balance_policy","value":{"enabled":true,"interval_secs":600,"low_action":"stop"}})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    sqlx::query("DELETE FROM settings WHERE key = 'channel_balance_policy'")
         .execute(&env.pg)
         .await
         .unwrap();
