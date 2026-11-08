@@ -142,8 +142,20 @@ async fn mock_count_tokens(
     axum::Json(json!({ "input_tokens": 42 })).into_response()
 }
 
+async fn mock_count_tokens_unavailable() -> axum::response::Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(json!({"type":"error","error":{"type":"api_error","message":"overloaded"}})),
+    )
+        .into_response()
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
+        .route(
+            "/anthropic-bad/v1/messages/count_tokens",
+            post(mock_count_tokens_unavailable),
+        )
         .route(
             "/anthropic/v1/messages/count_tokens",
             post(mock_count_tokens),
@@ -161,6 +173,7 @@ async fn spawn_mock() -> SocketAddr {
 // ---- 环境 ----
 
 struct TestEnv {
+    state: gateway::state::AppState,
     pg: PgPool,
     gateway: SocketAddr,
     token: String,
@@ -219,7 +232,7 @@ async fn setup(provider: &str) -> TestEnv {
         .await
         .unwrap();
 
-    let app = gateway::router(state);
+    let app = gateway::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -227,6 +240,7 @@ async fn setup(provider: &str) -> TestEnv {
     });
 
     TestEnv {
+        state,
         pg,
         gateway: addr,
         token,
@@ -517,6 +531,50 @@ async fn count_tokens_moves_past_a_key_at_its_channel_rpm() {
         post_count(&env).await.status(),
         429,
         "两把 key 的当分钟额度都用完了"
+    );
+}
+
+/// 请求策略的 `max_attempts` 对 count_tokens 同样生效：第一个渠道回 500 时，缺省会改投第二个并成功；调成 1 后就不再改投。
+#[tokio::test]
+async fn count_tokens_attempts_follow_the_request_policy() {
+    let env = setup("anthropic").await;
+    let mock = spawn_mock().await;
+    let (broken, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("anthropic-broken-{}", Uuid::new_v4().simple()),
+        "anthropic",
+        &format!("http://{mock}/anthropic-bad/v1"),
+        "mock-credential",
+        &[env.model.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    // 优先级高的先试：先撞上回 500 的这个
+    sqlx::query("UPDATE channels SET priority = 10 WHERE id = $1")
+        .bind(broken)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
+    let resp = post_count(&env).await;
+    assert_eq!(resp.status(), 200, "default: the second channel answers");
+
+    // 只填这个用例自己的网关状态的设置缓存，不写共享的 settings 表：同库并行的其它用例读到的仍是缺省策略
+    env.state.invalidate_routing_caches_local();
+    env.state
+        .settings_cache
+        .insert(
+            "request_policy".to_owned(),
+            std::sync::Arc::new(Some(json!({"max_attempts": 1}))),
+        )
+        .await;
+    let resp = post_count(&env).await;
+    assert_eq!(
+        resp.status(),
+        502,
+        "one attempt only: the working channel is never tried"
     );
 }
 

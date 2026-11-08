@@ -755,6 +755,9 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `ch:cool:<channel_key_id>` | STRING | =冷却时长 | 【未实现】状态机冷却镜像（冷却现由 PG `channel_keys.cooldown_until` 承载） |
 | `ch:test:<channel_id>` | STRING(JSON) | 30d | 最近一次测活结果（ok/latency_ms/http_status/error_code/at），渠道列表"最近测试"列回填（IMPLEMENTATION §11.12）。提示性信息不进 PG，过期即消失 |
 | `ch:balance:<channel_id>` | STRING(JSON) | 30d | 最近一次上游余额查询结果（probe/currency/balance_micro/at，IMPLEMENTATION §11.33），列表 `last_balance` 回填；与 `ch:test` 同一取舍 |
+| `ch:lowbal:<channel_id>` | STRING(JSON) | 90d（仍低时每轮续期） | 渠道「上游余额低」的标记（IMPLEMENTATION §11.73）：`{at, announced_at, balance_micro, threshold_micro, currency, stopped}`。后台余额刷新据此只在转入低时通知一次、每 24 小时提醒（`announced_at`），并认出「这个停用是这里停的」（`stopped`，余额回到阈值之上才自动启用）。是后台任务的**状态**不是提示信息；丢了的最坏后果是停掉的渠道要人工启用，不会误启用别人停的 |
+| `balance:ch:<channel_id>` | STRING NX | = 刷新间隔（`channel_balance_policy.interval_secs`） | 渠道余额后台刷新的占位：多副本时同一渠道一个间隔内只有一个副本去查，占位本身就是「最近查过」的标记；Redis 故障放行（最坏重复查一次） |
+| `probe:ck:<channel_key_id>` | STRING NX | = 探测间隔（`channel_probe_policy.interval_secs`） | 渠道 key 后台探测的占位（IMPLEMENTATION §11.73），语义同上 |
 | `ch:stat:<channel_id>` | HASH | 5min | 【未实现】错误率/TTFT EMA（打分输入；现有时延 EWMA 在 `lat:ck:<channel_key_id>`） |
 | `lock:cred:<channel_key_id>` | STRING NX | 90s | OAuth 刷新租约，值为随机持有者；释放时比较持有者。请求/后台/手动刷新共用；Redis 故障不无锁刷新，PG 按原密文字节条件回写 |
 | `oauth:refresh:<channel_key_id>` | STRING JSON | 30 天 | 脱敏刷新观测：尝试/成功时间、连续失败数、下次重试、错误码。瞬态失败退避 30 秒至 15 分钟；不存任何凭证或上游错误原文 |

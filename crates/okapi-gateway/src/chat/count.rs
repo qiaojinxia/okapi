@@ -88,7 +88,7 @@ pub(super) async fn count_tokens_inner(
     // 换下一个——不计费的旁路同样占用账号，同模型下别的 key 空闲时不该整体 429；
     // 能用的候选都挡在限速上才报限速，全被账号准入挡住（或根本没有 anthropic 候选）就退本地估算
     let mut limited = None;
-    // 上游拒绝（账号所在组织不许 OAuth 的 403、beta 被拒的 400……）就换下一个候选，最多试三个；
+    // 上游拒绝（账号所在组织不许 OAuth 的 403、beta 被拒的 400……）就换下一个候选，最多试 `max_attempts` 个（请求策略，缺省三个）；
     // 全部失败且都是「没有这个端点」（404 / 405 / 501）才回 501：真机 Claude Code 对网关的 501 会改用一次 1 token 的采样来数
     let mut failed = false;
     let mut unsupported = true;
