@@ -12,6 +12,7 @@
 //! reservations，定时对账的告警在 reconcile（对账与漂移修复本身在 `kernel::reconcile` / `kernel::repair`，网关与控制台也用），
 //! 分区、到期、订阅与冷却恢复在 housekeeping。
 
+pub mod channel_probe;
 pub mod chsink;
 mod delivery;
 pub mod egress_probe;
@@ -189,6 +190,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         move || egress_probe::run(state.clone(), notifier.clone(), stop.clone())
     }));
 
+    // 渠道 key 的后台探测与自动恢复（§11.73）：缺省关，站长在 channel_probe_policy 里打开
+    let channel_probe_worker =
+        tokio::spawn(supervision::run("channel_probe", image_stopped.clone(), {
+            let state = image_state.clone();
+            let stop = image_stopped.clone();
+            move || channel_probe::run(state.clone(), stop.clone())
+        }));
+
     // 运维监控趋势采样（§11.43）：每分钟一个点，保留 24 小时
     let ops_sampler = tokio::spawn(supervision::run("ops_sampler", image_stopped.clone(), {
         let probes = okapi_kernel::ops::probes::Probes {
@@ -222,6 +231,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         image_worker,
         credential_worker,
         egress_worker,
+        channel_probe_worker,
         ops_sampler,
     ]);
     for (job, interval) in [

@@ -1142,6 +1142,8 @@ export default {
   settingNotifyDesc: '管理通知接收地址、触发事件和发送间隔。',
   settingEgressDefaultDesc: '「跟随全局默认」的渠道使用的出口。',
   settingEgressProbeDesc: '代理出口 IP 的后台探测：开关、间隔与探测地址。',
+  channelProbeTitle: '渠道后台探测与自动恢复',
+  settingChannelProbeDesc: '定时对渠道 key 发一次 16 token 的最小补全：被摘出轮转的 key（冷却、配额耗尽、凭证失效）探通就放回；模式 all 时正常的 key 也探，探不通按真实失败登记。缺省关闭；只探静态 key 的直连渠道，订阅账号、云厂商和透传渠道不在其内；渠道设置里写 health_probe: "off" 可单独退出。',
   settingRegistrationDesc: '管理注册方式、邮箱限制与注册奖励。',
   settingNoticeDesc: '编辑站点公告、展示级别和发布状态。',
   settingModelLimits: '模型请求限流',

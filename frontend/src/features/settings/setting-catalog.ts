@@ -49,6 +49,7 @@ const CATALOG: Record<string, SettingMeta> = {
   // 全局默认出口只能经 PUT /admin/egress/default 写（要同事务重排固定分配），通用设置端点拒绝它
   egress_default: { label: 'admin:egressDefaultTitle', description: 'admin:settingEgressDefaultDesc', group: 'traffic', editor: 'auto', section: 'egress' },
   egress_probe_policy: { label: 'admin:egressProbeTitle', description: 'admin:settingEgressProbeDesc', group: 'traffic', editor: 'auto', section: 'egress' },
+  channel_probe_policy: { label: 'admin:channelProbeTitle', description: 'admin:settingChannelProbeDesc', group: 'traffic', editor: 'auto' },
   mcp_write_enabled: { label: 'admin:settingMcpWrite', description: 'admin:settingMcpWriteDesc', group: 'security', editor: 'auto' },
   web_session_limit: { label: 'admin:settingSessionLimit', description: 'admin:settingSessionLimitDesc', group: 'security', editor: 'number' },
   ssrf_policy: { label: 'admin:settingAccess', description: 'admin:settingAccessDesc', group: 'security', editor: 'ssrf' },

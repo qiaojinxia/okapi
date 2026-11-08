@@ -698,6 +698,92 @@ pub async fn mark_key_failure(
     Ok(())
 }
 
+/// 后台探测的一个目标：一把静态 key，加上探它所需的渠道信息和一个能探的模型。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ProbeKey {
+    pub channel_key_id: i64,
+    pub channel_id: i64,
+    /// `channel_keys.status`：1 正常 / 2 冷却（有冷却期）或人工停用（冷却期为空）/ 3 限流 / 4 配额耗尽 / 6 凭证失效。
+    pub key_status: i16,
+    pub provider: String,
+    pub api_base: Option<String>,
+    pub model_mapping: serde_json::Value,
+    pub settings: serde_json::Value,
+    pub credential_ciphertext: Vec<u8>,
+    /// 渠道里排第一个、此刻真能被调用的对话模型（模型表里启用、种类是 chat、在该 key 的 `model_subset` 内）。
+    pub probe_model: String,
+}
+
+/// 给后台探测挑 key：渠道启用且在某个池里（孤儿渠道谁都打不到，别白花上游额度）、key 是静态凭证（订阅 OAuth 另有刷新流程）、
+/// 协议在 `providers` 里、渠道没把 `settings.health_probe` 设成 `"off"`，且渠道里有能探的模型。
+///
+/// 状态：`healthy` 为真时连正常的 key（1）一起取；任何时候都取被系统摘出轮转的——限流（3）、配额耗尽（4）、凭证失效（6），
+/// 以及**带冷却期**的冷却（2）。控制面「停用」一把 key 也是写 2，但冷却期是空的（`patch_channel_key` 会清掉），
+/// 那是人工的决定，探测绝不碰。
+/// 按 id 升序，从 `after_id` 之后取 `limit` 把，让游标能分页走完整个舰队。
+pub async fn probe_keys(
+    pool: &PgPool,
+    healthy: bool,
+    providers: &[&str],
+    after_id: i64,
+    limit: i64,
+) -> Result<Vec<ProbeKey>, StoreError> {
+    let providers: Vec<String> = providers.iter().map(|p| (*p).to_owned()).collect();
+    let rows = sqlx::query_as::<_, ProbeKey>(
+        r"SELECT ck.id AS channel_key_id, ck.channel_id, ck.status AS key_status, c.provider, c.api_base,
+                 c.model_mapping, c.settings, ck.credential_ciphertext, pick.model_name AS probe_model
+          FROM channel_keys ck
+          JOIN channels c ON c.id = ck.channel_id
+          CROSS JOIN LATERAL (
+              SELECT m.model_name
+              FROM jsonb_array_elements_text(c.models) WITH ORDINALITY AS served(name, ord)
+              JOIN models m ON m.model_name = served.name AND m.status = 1
+              WHERE COALESCE(NULLIF(m.catalog_config ->> 'kind', ''), 'chat') = 'chat'
+                AND (ck.model_subset IS NULL OR ck.model_subset @> to_jsonb(served.name))
+              ORDER BY served.ord
+              LIMIT 1
+          ) pick
+          WHERE c.status = 1 AND c.deleted_at IS NULL
+            AND EXISTS (SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id)
+            AND ck.credential_kind = 0
+            AND (ck.status IN (3, 4, 6)
+                 OR (ck.status = 2 AND ck.cooldown_until IS NOT NULL)
+                 OR ($1 AND ck.status = 1))
+            AND c.provider = ANY($2::varchar[])
+            AND COALESCE(c.settings ->> 'health_probe', '') <> 'off'
+            AND ck.id > $3
+          ORDER BY ck.id
+          LIMIT $4",
+    )
+    .bind(healthy)
+    .bind(&providers)
+    .bind(after_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 探通的 key 放回轮转，口径同「冷却到期自动恢复」：冷却（2）保留失败计数（半开——恢复后很快再失败，下一轮冷却照样翻倍，
+/// 不会因为被探测救回来一次就从头算），限流 / 配额 / 失效清零；失效的同时清掉最近错误，和控制面的「重新启用」一样。
+/// 条件与 [`probe_keys`] 的选取一致：人工停用（冷却期为空的 2）和已经正常的 key 不碰，探测期间管理员的手动操作优先。
+/// 返回是否真的改了。
+pub async fn restore_key_after_probe(
+    pool: &PgPool,
+    channel_key_id: i64,
+) -> Result<bool, StoreError> {
+    let restored = sqlx::query(
+        "UPDATE channel_keys SET status = 1, cooldown_until = NULL, \
+                failed_count = CASE WHEN status = 2 THEN failed_count ELSE 0 END, \
+                last_error = CASE WHEN status = 6 THEN NULL ELSE last_error END, updated_at = now() \
+         WHERE id = $1 AND (status IN (3, 4, 6) OR (status = 2 AND cooldown_until IS NOT NULL))",
+    )
+    .bind(channel_key_id)
+    .execute(pool)
+    .await?;
+    Ok(restored.rows_affected() > 0)
+}
+
 /// 池链里能服务该模型、正在冷却（cooling / 限流 / 配额，worker 到点恢复）的 key 最早何时回来；
 /// 没有冷却中的 key 时为 None。候选全空时据此给客户端 `Retry-After`。
 /// 条件与 [`candidates_for_model`] 的渠道 / key 过滤一致，只把「已冷却完」换成「冷却中」。

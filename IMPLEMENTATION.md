@@ -3722,9 +3722,27 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
     （内置 openai 提供方改 `openai_base_url` 也不拉，请求日志里没有）。拉的是 Codex 自己的 `ModelInfo` 目录（`{"models":[…]}`，四十多个字段），
     OpenAI 形状解析不了，退回「Model metadata not found，用兜底元数据」。要支持得照上游目录原样透传，没有真实 Codex 账号无法验证，
     且只有设了 `model_catalog_url` 的用户受益。new-api 同样不对下游提供这个目录（只用它发现模型名）。
-
-**验收**：`models::tests` 两条（一条条目同时满足 OpenAI 与 Anthropic 读者、能力只列明确为 true 的且排序；一条没填的字段不出现）、
-`gateway_models_list` 补了字段断言；三处变异（去掉 `type`、`capabilities` 与 Anthropic 撞名、缺省窗口按猜的补）各被单测抓住。
+  - 验收：`models::tests` 两条（一条条目同时满足 OpenAI 与 Anthropic 读者、能力只列明确为 true 的且排序；一条没填的字段不出现）、
+    `gateway_models_list` 补了字段断言；三处变异（去掉 `type`、`capabilities` 与 Anthropic 撞名、缺省窗口按猜的补）各被单测抓住。
+- **渠道 key 后台探测与自动恢复**（缺省关）：被动的 key 状态机只在真实请求踩到时才变——凭证失效（6）要人手动复活、配额耗尽（4）等到次日
+  0 点、长冷却（2）等到期。new-api 有定时测渠道 + 自动启用，我们补上同类能力，但按自己的状态机做：worker 新增 `channel_probe`，读
+  `settings.channel_probe_policy`（`enabled` 缺省 false；`mode` = `recover` 只探被摘出轮转的 key、`all` 连正常的也探；`interval_secs` 60–86400
+  缺省 900 是同一把 key 两次探测的最小间隔；`concurrency` 1–8；`batch_size` 1–200），对 key 发一次 16 token 的最小补全（挑渠道里排第一个
+  此刻真能被调用的**对话**模型：模型表里启用、种类是 chat、在该 key 的 `model_subset` 内；过 `model_mapping`；只探 `/models` 会对一个实际 403 的
+  模型报通，所以一律模型级）。探通：被摘出轮转的放回（冷却保留失败计数——半开，同「冷却到期自动恢复」；限流 / 配额 / 失效清零，失效同时清最近错误），
+  正常的清失败计数；探不通：被摘出去的原样不动，`all` 模式下正常的 key 按真实失败登记（同一张 `failure_kind_of` 表，401 + 凭证被拒的体直接判失效，
+  5xx 计瞬态，请求级和连接级失败不动 key）。2xx 的体不是 JSON 对象（站点的网页前端回 `200 text/html`）不算通。
+  - **不碰的**：控制面「停用」一把 key 也写 2，但冷却期是空的（`patch_channel_key` 清掉）——那是人工决定，探测只认**带冷却期**的 2；
+    停用 / 软删的渠道、不在任何池里的渠道（谁都打不到，别白花上游额度）、订阅 OAuth 与云厂商（bedrock / vertex）与 `custom_pass`
+    （凭证流程不同或没有通用的最小补全；`PROBEABLE_PROVIDERS` = openai / openai_compat / azure / anthropic / gemini）、`settings.health_probe = "off"`
+    的渠道（单渠道退出）、出口不可用的 key（探测绝不退回直连换 IP 去试）。
+  - 多副本：每把 key 的探测由 Redis `probe:ck:{id}`（SET NX EX，TTL = 间隔）选出一个副本，占位同时是「最近探过」的标记；Redis 不可用时放行。
+    结果写进渠道列表「最近测试」同一处（`ch:test:{channel}`，带 `auto: true` 与 `key_id`）。
+  - 实现上把控制台「测试」按钮的请求拼装（`probe_request` / `with_protocol_headers` / `probe_body_problem` / 凭证头）挪到 `okapi_gateway::channel_probe`，
+    控制台与 worker 共用；`admin/settings.rs` 写入 `channel_probe_policy` 时校验形状；设置页目录（`setting-catalog.ts`）给了条目，用通用 JSON 编辑。
+  - 验收：`policies` 单测两条（缺省关、取值域与未知字段）；worker `channel_probe` 集成用例五条——被摘出轮转的 key 探通放回且各状态的计数口径正确、
+    人工停用的不被探；仍探不通 / 200 网页不算通；`all` 模式下正常的 key 401 判失效、5xx 计瞬态，`recover` 模式不碰正常的 key；退出探测 / OAuth key /
+    非对话模型 / 不在池里的渠道都不探；同一把 key 在间隔内只探一次。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

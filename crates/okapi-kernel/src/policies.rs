@@ -94,3 +94,100 @@ impl ProbePolicy {
 
 /// `settings` 里探测策略的键。
 pub const EGRESS_PROBE_SETTING: &str = "egress_probe_policy";
+
+/// `settings.channel_probe_policy`：渠道 key 的后台探测与自动恢复（worker `channel_probe`）。缺省**关**——
+/// 探测会在上游真实产生请求（一次 16 token 的最小补全），要站长明确打开。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChannelProbePolicy {
+    pub enabled: bool,
+    pub mode: ChannelProbeMode,
+    /// 同一把 key 两次探测的最小间隔（秒）。
+    pub interval_secs: u64,
+    pub concurrency: u8,
+    /// 每一轮最多探几把 key。
+    pub batch_size: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelProbeMode {
+    /// 只探被摘出轮转的 key（冷却中 / 配额耗尽 / 凭证失效）：探通就放回去。
+    #[default]
+    Recover,
+    /// 连正常的 key 也定期探：探不通按真实失败登记（同一张状态机表），不用等客户端先踩一脚。
+    All,
+}
+
+impl Default for ChannelProbePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: ChannelProbeMode::Recover,
+            interval_secs: 900,
+            concurrency: 2,
+            batch_size: 50,
+        }
+    }
+}
+
+impl ChannelProbePolicy {
+    /// 形状与取值域校验（设置写入与 worker 读取共用）。
+    pub fn parse(value: &Value) -> Option<Self> {
+        let policy = if value.is_null() {
+            Self::default()
+        } else {
+            serde_json::from_value::<Self>(value.clone()).ok()?
+        };
+        ((60..=86_400).contains(&policy.interval_secs)
+            && (1..=8).contains(&policy.concurrency)
+            && (1..=200).contains(&policy.batch_size))
+        .then_some(policy)
+    }
+}
+
+/// `settings` 里渠道探测策略的键。
+pub const CHANNEL_PROBE_SETTING: &str = "channel_probe_policy";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn channel_probing_is_off_until_the_operator_turns_it_on() {
+        assert!(!ChannelProbePolicy::default().enabled);
+        assert_eq!(
+            ChannelProbePolicy::parse(&Value::Null),
+            Some(ChannelProbePolicy::default())
+        );
+        let on = ChannelProbePolicy::parse(&json!({"enabled": true})).unwrap();
+        assert!(on.enabled);
+        assert_eq!(
+            on.mode,
+            ChannelProbeMode::Recover,
+            "recover-only unless asked for more"
+        );
+    }
+
+    #[test]
+    fn channel_probe_policy_rejects_unknown_fields_and_out_of_range_values() {
+        for bad in [
+            json!({"mode": "everything"}),
+            json!({"interval_secs": 59}),
+            json!({"interval_secs": 86_401}),
+            json!({"concurrency": 0}),
+            json!({"concurrency": 9}),
+            json!({"batch_size": 0}),
+            json!({"batch_size": 201}),
+            json!({"enable": true}),
+            json!("on"),
+        ] {
+            assert!(ChannelProbePolicy::parse(&bad).is_none(), "{bad}");
+        }
+        let all = ChannelProbePolicy::parse(
+            &json!({"mode": "all", "interval_secs": 60, "concurrency": 8, "batch_size": 200}),
+        );
+        assert_eq!(all.map(|p| p.mode), Some(ChannelProbeMode::All));
+    }
+}

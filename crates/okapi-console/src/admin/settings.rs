@@ -48,6 +48,11 @@ pub async fn set_setting(
             okapi_kernel::ssrf::validate_api_base(&state.pg, target).await?;
         }
     }
+    if req.key == okapi_kernel::policies::CHANNEL_PROBE_SETTING
+        && okapi_kernel::policies::ChannelProbePolicy::parse(&req.value).is_none()
+    {
+        return Err(AppError::bad_request().with_param("channel_probe_policy"));
+    }
     // 清理任务按 `(value #>> '{}')::bigint` 读：null / 小数 / 字符串会让它每轮报错且永不清理
     if req.key == "retention_months" && req.value.as_u64().is_none_or(|months| months > 1200) {
         return Err(AppError::bad_request().with_param("retention_months"));

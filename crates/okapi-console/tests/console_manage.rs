@@ -779,6 +779,39 @@ async fn admin_list_surface_covers_every_resource() {
         assert_eq!(status, 400, "retention_months={bad} 必须拒绝");
     }
 
+    // ---- 渠道后台探测策略：形状与取值域写入时就拦（worker 读到坏值只会静默关掉探测）；合法值照常落库 ----
+    for bad in [
+        json!({"mode": "everything"}),
+        json!({"interval_secs": 30}),
+        json!({"concurrency": 9}),
+        json!({"batch_size": 0}),
+        json!({"enable": true}),
+        json!("on"),
+    ] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/settings",
+            t,
+            Some(json!({"key":"channel_probe_policy","value":bad})),
+        )
+        .await;
+        assert_eq!(status, 400, "channel_probe_policy={bad} 必须拒绝");
+    }
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"channel_probe_policy","value":{"enabled":true,"mode":"all","interval_secs":300}})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    sqlx::query("DELETE FROM settings WHERE key = 'channel_probe_policy'")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
     // ---- 权限分级：普通用户对管理面一律 403 ----
     for path in [
         "/admin/models",

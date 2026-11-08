@@ -1225,6 +1225,8 @@ export default {
   settingNotifyDesc: 'Manage delivery addresses, event triggers and notification intervals.',
   settingEgressDefaultDesc: 'Egress used by channels that follow the global default.',
   settingEgressProbeDesc: 'Background probing of proxy exit IPs: on/off, interval and probe URL.',
+  channelProbeTitle: 'Channel key probing and auto-recovery',
+  settingChannelProbeDesc: 'Sends one 16-token completion per channel key on a schedule: keys taken out of rotation (cooling, quota exhausted, credential invalid) go back when the probe passes; in mode all, healthy keys are probed too and a failed probe is recorded like a real failure. Off by default; covers direct static-key channels only (not subscription accounts, cloud providers or pass-through); set health_probe: "off" in a channel\'s settings to opt out.',
   settingRegistrationDesc: 'Manage sign-up rules, allowed email domains and registration rewards.',
   settingNoticeDesc: 'Edit the site notice, severity and publication status.',
   settingModelLimits: 'Model request limits',

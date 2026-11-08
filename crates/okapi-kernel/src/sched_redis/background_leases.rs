@@ -63,4 +63,26 @@ impl SchedulerRedis {
             .await;
         !matches!(claimed, Ok(None))
     }
+
+    /// 渠道 key 后台探测的占位（`channel_probe`）：同一把 key 在 `ttl_secs` 内只有一个副本去探（SET NX EX）。
+    /// 占位本身就是「最近探过」的标记，探测间隔由它的 TTL 决定。Redis 不可用时放行——最坏重复探一次，
+    /// 不能因为 Redis 抖一下让恢复停摆。
+    pub async fn channel_probe_claim(
+        &self,
+        channel_key_id: i64,
+        holder: &str,
+        ttl_secs: i64,
+    ) -> bool {
+        let claimed: Result<Option<String>, _> = self
+            .client
+            .set(
+                format!("probe:ck:{channel_key_id}"),
+                holder,
+                Some(Expiration::EX(ttl_secs.max(1))),
+                Some(SetOptions::NX),
+                false,
+            )
+            .await;
+        !matches!(claimed, Ok(None))
+    }
 }
