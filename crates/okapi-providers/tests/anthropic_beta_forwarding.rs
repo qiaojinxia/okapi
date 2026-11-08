@@ -312,8 +312,7 @@ async fn a_client_profile_keeps_its_own_beta_header_and_the_clients_is_not_added
     let upstream = AnthropicUpstream::new().unwrap();
     let outbound = Outbound {
         context: RequestContext {
-            extensions: json!({"client_profile": {"name": "claude-code", "revision": "2.1.319",
-                "mode": "mimic", "entrypoint": "cli", "request_class": "main"}}),
+            extensions: json!({"client_profile": {"name": "claude-code", "mode": "mimic"}}),
             identity_seed: Some("beta-profile".into()),
             client_headers: vec![(
                 "anthropic-beta".into(),
