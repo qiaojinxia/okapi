@@ -1,8 +1,8 @@
 use super::super::{
-    AppError, AttemptError, Bytes, CandInfo, ChannelCandidate, ForwardFailure, Ingress,
-    MAX_ATTEMPTS, ProbeInfo, RequestBilling, ResponseBinding, ResponseWriter, StatusCode,
-    StreamHandle, UpstreamError, build_upstream_body, cand_info, classify_fatal, codes,
-    eligible_candidates, first_output_window, shape_upstream_body,
+    AppError, AttemptError, Bytes, CandInfo, ChannelCandidate, ForwardFailure, Ingress, ProbeInfo,
+    RequestBilling, ResponseBinding, ResponseWriter, StatusCode, StreamHandle, UpstreamError,
+    build_upstream_body, cand_info, classify_fatal, codes, eligible_candidates,
+    first_output_window, max_attempts, retriable, shape_upstream_body,
 };
 use super::{
     Session, Work, bridge, history,
@@ -158,7 +158,7 @@ pub(super) async fn route(
     let mut last = unavailable("responses_websocket");
     let mut attempted: i16 = 0;
     for mut cand in candidates {
-        if usize::try_from(attempted).unwrap_or(MAX_ATTEMPTS) >= MAX_ATTEMPTS {
+        if usize::try_from(attempted).unwrap_or(max_attempts()) >= max_attempts() {
             break;
         }
         if session.output.is_closed() {
@@ -233,7 +233,7 @@ pub(super) async fn route(
                     Transport::Http
                 }
                 Err(error) => {
-                    let retry = error.retriable_before_first_token();
+                    let retry = retriable(&error);
                     let mut kind = super::super::failure_kind_of(&error);
                     if cand.provider == "codex" {
                         match &error {

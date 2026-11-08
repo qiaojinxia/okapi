@@ -27,6 +27,7 @@ pub mod models;
 pub mod oauth_cred;
 pub mod openai_dialect;
 pub mod realtime;
+pub mod request_policy;
 pub(crate) mod reservation;
 pub mod routing_prefs;
 pub mod rule_inputs;
@@ -164,6 +165,10 @@ pub async fn build_state_with_resources(
                 .time_to_live(Duration::from_secs(5))
                 .build(),
             margin_cache: moka::future::Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(10))
+                .build(),
+            request_policy: moka::future::Cache::builder()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(10))
                 .build(),
@@ -489,6 +494,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(models::list_models))
         .route("/healthz", get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            request_policy::scope,
+        ))
         .layer(axum::middleware::from_fn(diagnostics::scope))
         .layer(axum::middleware::from_fn(
             okapi_kernel::security_headers::apply,

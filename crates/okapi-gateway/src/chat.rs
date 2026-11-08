@@ -11,7 +11,7 @@
 use super::candidates::{cached_candidates, resolve_model_cached};
 use super::estimate::estimate_prompt_tokens;
 use super::state::AppState;
-use super::upstream_failure::{failure_kind_of, non_json_failure, non_json_kind};
+use super::upstream_failure::{failure_kind_of, non_json_failure, non_json_kind, retriable};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
@@ -90,8 +90,10 @@ const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
 const FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 上游已回过事件后的首字空闲窗口（见 `attempt_stream`）。
 const STARTED_IDLE_WINDOW: Duration = Duration::from_mins(5);
-/// 单请求最多尝试的渠道 key 数。
-const MAX_ATTEMPTS: usize = 3;
+/// 单请求最多尝试的渠道 key 数：请求策略里的 `max_attempts`（缺省 3）。
+fn max_attempts() -> usize {
+    super::request_policy::max_attempts()
+}
 /// 预扣补全上限的兜底值与硬顶。
 const DEFAULT_COMPLETION_CAP: u32 = 2048;
 const MAX_COMPLETION_CAP: u32 = 32_768;

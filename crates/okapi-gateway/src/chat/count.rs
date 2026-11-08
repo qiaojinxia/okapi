@@ -98,7 +98,7 @@ pub(super) async fn count_tokens_inner(
         .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"))
         .filter(|c| counts_for(c, headers));
     for cand in candidates {
-        if attempts == MAX_COUNT_ATTEMPTS {
+        if attempts >= super::max_attempts() {
             break;
         }
         if super::super::account_control::admit(state, cand.channel_id, Some(cand.channel_key_id))
@@ -155,9 +155,6 @@ pub(super) enum CountFailure {
     Request(AppError),
     Upstream { unsupported: bool },
 }
-
-/// 一次 count_tokens 最多试几个候选。
-const MAX_COUNT_ATTEMPTS: usize = 3;
 
 /// 用选中的 anthropic 候选的凭证打上游 tokenizer（调用方持有渠道并发许可）。
 pub(super) async fn count_via_upstream(

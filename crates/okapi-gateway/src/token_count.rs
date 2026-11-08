@@ -228,7 +228,7 @@ async fn count_authorized(
                 last_error = count_error(&error, is_unsupported);
                 if !prefs.allow_fallbacks
                     || parent.is_some()
-                    || (!is_unsupported && !error.retriable_before_first_token())
+                    || (!is_unsupported && !super::upstream_failure::retriable(&error))
                 {
                     return Err(last_error);
                 }

@@ -28,7 +28,9 @@ use std::time::Instant;
 use uuid::Uuid;
 
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
-const MAX_ATTEMPTS: usize = 3;
+fn max_attempts() -> usize {
+    super::request_policy::max_attempts()
+}
 const DEFAULT_SECONDS: u32 = 4;
 const MAX_SECONDS: u32 = 60;
 
@@ -151,7 +153,7 @@ async fn handle_create(
     let mut last_err: Option<AppError> = None;
     let mut attempted = 0;
     for cand in candidates {
-        if attempted >= MAX_ATTEMPTS {
+        if attempted >= max_attempts() {
             break;
         }
         // key 级 RPM / 当日消费闸挡下的候选不算一次尝试（与 chat 同一套闸）

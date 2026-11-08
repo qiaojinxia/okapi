@@ -92,6 +92,8 @@ pub struct RoutingCaches {
     /// 负毛利熔断表进程缓存（§11.34）：单键 → 此刻生效的 `<group>|<channel_id>` 集合，10s；
     /// 一次 HGETALL 供所有请求共用，HASH 为空时只是一次空往返。
     pub margin_cache: Cache<u8, Arc<std::collections::HashSet<String>>>,
+    /// 请求策略（`settings.request_policy`）的解析结果，10s；写设置时随路由缓存一起失效。
+    pub request_policy: Cache<u8, Arc<okapi_kernel::policies::RequestPolicy>>,
 }
 
 /// 渠道 key 与出口代理的健康标记：只记本进程见过的失败，成功时才回 PG 清零。
@@ -342,6 +344,28 @@ impl AppState {
         Some(value)
     }
 
+    /// 此刻生效的请求策略（10s 进程缓存）：没配 = 缺省（现行行为）；配坏了 = 缺省并留日志，不让一个写坏的值把重试行为悄悄变掉。
+    pub async fn request_policy(&self) -> Arc<okapi_kernel::policies::RequestPolicy> {
+        use okapi_kernel::policies::{REQUEST_POLICY_SETTING, RequestPolicy};
+        if let Some(hit) = self.routing.request_policy.get(&0).await {
+            return hit;
+        }
+        let setting = self.setting_cached(REQUEST_POLICY_SETTING).await;
+        let policy = match setting.as_ref() {
+            None => RequestPolicy::default(),
+            Some(value) => RequestPolicy::parse(value).unwrap_or_else(|| {
+                tracing::warn!("invalid request_policy setting; defaults in effect");
+                RequestPolicy::default()
+            }),
+        };
+        let policy = Arc::new(policy);
+        self.routing
+            .request_policy
+            .insert(0, Arc::clone(&policy))
+            .await;
+        policy
+    }
+
     /// 此刻生效的负毛利熔断对（`<group>|<channel_id>`，10s 进程缓存；§11.34）。
     /// Redis 故障按空集处理（fail-open：熔断是止损手段，不该因缓存抖动把请求拒掉）。
     pub async fn margin_blocked_fields(&self) -> Arc<std::collections::HashSet<String>> {
@@ -434,6 +458,7 @@ impl AppState {
         self.routing.cand_cache.invalidate_all();
         self.routing.channel_cost_cache.invalidate_all();
         self.routing.channel_control_cache.invalidate_all();
+        self.routing.request_policy.invalidate_all();
         self.settings_cache.invalidate_all();
     }
 }

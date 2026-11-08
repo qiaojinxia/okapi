@@ -1226,6 +1226,8 @@ export default {
   settingEgressDefaultDesc: 'Egress used by channels that follow the global default.',
   settingEgressProbeDesc: 'Background probing of proxy exit IPs: on/off, interval and probe URL.',
   channelProbeTitle: 'Channel key probing and auto-recovery',
+  requestPolicyTitle: 'Request retries and failure classification',
+  settingRequestPolicyDesc: 'How a failed upstream request is retried and how a key\'s state is decided. max_attempts (1-10, default 3) is how many channel keys one request may try; retry_statuses adds status codes that also move to the next channel beyond the built-in retry matrix (for example ["404", "520-529"]; chat, embeddings and token counting only, not images, video or speech); invalid_statuses and invalid_keywords classify matching statuses / error-body keywords as an invalid credential, quota_keywords as exhausted quota (cooldown until the next UTC midnight). All additive; the defaults keep today\'s behaviour.',
   settingChannelProbeDesc: 'Sends one 16-token completion per channel key on a schedule: keys taken out of rotation (cooling, quota exhausted, credential invalid) go back when the probe passes; in mode all, healthy keys are probed too and a failed probe is recorded like a real failure. Off by default; covers direct static-key channels only (not subscription accounts, cloud providers or pass-through); set health_probe: "off" in a channel\'s settings to opt out.',
   settingRegistrationDesc: 'Manage sign-up rules, allowed email domains and registration rewards.',
   settingNoticeDesc: 'Edit the site notice, severity and publication status.',

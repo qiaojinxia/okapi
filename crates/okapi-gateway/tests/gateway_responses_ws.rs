@@ -625,6 +625,30 @@ async fn handshake_failover_is_allowed_before_create_and_stops_after_create() {
     assert!(env.accepted.try_recv().is_err());
 }
 
+/// 请求策略的 `max_attempts` 对 WebSocket 请求同样生效：策略由每个请求在自己的任务里取（中间件放的任务本地带不过升级）。
+/// 调成 1 后，渠道 a 握手回 503 不再改投渠道 b，请求直接以失败收尾、不计费。
+#[tokio::test]
+async fn the_request_policy_caps_how_many_channels_a_websocket_request_tries() {
+    let mut env = setup().await;
+    // 只填这个用例自己的网关状态的设置缓存，不写共享的 settings 表：同库并行的其它用例读到的仍是缺省策略
+    env.state
+        .settings_cache
+        .insert(
+            "request_policy".to_owned(),
+            Arc::new(Some(json!({"max_attempts": 1}))),
+        )
+        .await;
+    env.handshake_failure.store(503, Ordering::SeqCst);
+    let mut client = env.client().await;
+    send(&mut client, env.body(None)).await;
+    let failure = read(&mut client).await;
+    assert_eq!(env.amount(&failure).await.0, 0);
+    assert!(
+        env.accepted.try_recv().is_err(),
+        "the second channel must not be tried"
+    );
+}
+
 /// 断线重连（新连接）回到上一条连接落的账号：会话中途换账号，历史里的加密推理项新账号验不过。
 #[tokio::test]
 async fn reconnect_with_same_session_returns_to_the_same_account() {

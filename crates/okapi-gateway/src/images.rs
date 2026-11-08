@@ -20,7 +20,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
-const MAX_ATTEMPTS: usize = 3;
+/// 单请求最多尝试的渠道 key 数：请求策略里的 `max_attempts`（缺省 3）。
+fn max_attempts() -> usize {
+    super::request_policy::max_attempts()
+}
 pub mod batches;
 mod request;
 mod stream;
@@ -262,7 +265,7 @@ async fn handle(
     let mut last_err: Option<AppError> = None;
     let mut attempted = 0;
     for cand in candidates {
-        if attempted >= MAX_ATTEMPTS {
+        if attempted >= max_attempts() {
             break;
         }
         // key 级 RPM / 当日消费闸挡下的候选不算一次尝试（与 chat 同一套闸）

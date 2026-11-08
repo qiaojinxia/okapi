@@ -2,9 +2,9 @@
 use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
 use super::{
-    AttemptError, FailureReply, ForwardFailure, MAX_ATTEMPTS, ProbeInfo, RequestBilling,
-    attempt_json, attempt_stream, build_upstream_body, eligible_candidates, failure_kind_of,
-    lost_tools, recovery_secs, upstream_endpoint,
+    AttemptError, FailureReply, ForwardFailure, ProbeInfo, RequestBilling, attempt_json,
+    attempt_stream, build_upstream_body, eligible_candidates, failure_kind_of, lost_tools,
+    max_attempts, recovery_secs, retriable, upstream_endpoint,
 };
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -36,7 +36,7 @@ pub(super) async fn try_model(
     let mut stopped_early = false;
 
     for mut cand in candidates {
-        if attempted >= MAX_ATTEMPTS {
+        if attempted >= max_attempts() {
             stopped_early = true;
             break;
         }
@@ -417,7 +417,7 @@ pub(super) fn classify_fatal(
     if let Some(trace) = super::super::diagnostics::Trace::current() {
         trace.failure(&err);
     }
-    if err.retriable_before_first_token() {
+    if retriable(&err) {
         return AttemptError::Retriable {
             code: err.error_code(),
             upstream_status: err.upstream_status(),

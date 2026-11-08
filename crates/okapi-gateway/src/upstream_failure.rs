@@ -2,14 +2,38 @@
 //!
 //! 原先放在 chat 里，媒体端点与图片流都要反过来引用 chat；挪出来后各入口平级引用这里。
 use bytes::Bytes;
+use okapi_kernel::policies::PolicyVerdict;
 use okapi_providers::UpstreamError;
 use okapi_providers::account_fault::AccountFault;
 use okapi_store::channels::KeyFailure;
 
+/// 这次失败该不该换渠道重试：内置的重试矩阵（[`UpstreamError::retriable_before_first_token`]），加上请求策略里点名的状态码，
+/// 以及策略判成账号级故障（凭证失效 / 配额耗尽）的——问题在这把 key，不在请求，换一个就能成功。
+pub(crate) fn retriable(err: &UpstreamError) -> bool {
+    if err.retriable_before_first_token() {
+        return true;
+    }
+    let UpstreamError::Status { status, body, .. } = err else {
+        return false;
+    };
+    let policy = super::request_policy::current();
+    policy.extra_retry(*status) || policy.classify(*status, body) != PolicyVerdict::None
+}
+
 /// 上游错误 → key 状态机类别（§3.6 重试矩阵）。
 /// 注意顺序：insufficient_quota 判定先于 429——OpenAI 风格的
 /// `429 + insufficient_quota` 语义是配额耗尽（冷却到次日），不是限速（60s）。
+///
+/// 请求策略（`settings.request_policy`）的状态码 / 关键词规则先于内置的表：站长点名「这个码 / 这句话就是凭证失效 / 配额耗尽」时，
+/// 以他说的为准。没有策略作用域（测试、worker）时取缺省策略，也就是只有内置的表。
 pub(crate) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
+    if let UpstreamError::Status { status, body, .. } = err {
+        match super::request_policy::current().classify(*status, body) {
+            PolicyVerdict::Invalid => return KeyFailure::Invalid,
+            PolicyVerdict::QuotaExhausted => return KeyFailure::QuotaExhausted,
+            PolicyVerdict::None => {}
+        }
+    }
     match err {
         UpstreamError::Status { status, body, .. }
             if *status == 402 || (*status == 429 && body_says_insufficient_quota(body)) =>
@@ -152,6 +176,59 @@ mod tests {
             failure_kind_of(&status(503, "")),
             KeyFailure::Transient
         ));
+    }
+
+    /// 请求策略是**追加**规则：作用域外只有内置的表；作用域内站长点名的状态码 / 关键词先认，内置的照常生效。
+    #[tokio::test]
+    async fn the_request_policy_adds_to_the_builtin_tables_and_only_inside_its_scope() {
+        let policy = std::sync::Arc::new(
+            okapi_kernel::policies::RequestPolicy::parse(&serde_json::json!({
+                "retry_statuses": ["404"],
+                "invalid_statuses": ["418"],
+                "invalid_keywords": ["zxq-ban-notice"],
+                "quota_keywords": ["zxq-wallet-empty"],
+            }))
+            .unwrap(),
+        );
+        assert!(matches!(
+            failure_kind_of(&status(418, "")),
+            KeyFailure::Request
+        ));
+        assert!(!retriable(&status(404, "")));
+        crate::request_policy::with(policy, async {
+            assert!(matches!(
+                failure_kind_of(&status(418, "")),
+                KeyFailure::Invalid
+            ));
+            assert!(matches!(
+                failure_kind_of(&status(
+                    400,
+                    r#"{"error":{"message":"ZXQ-Ban-Notice: call us"}}"#
+                )),
+                KeyFailure::Invalid
+            ));
+            assert!(matches!(
+                failure_kind_of(&status(500, "zxq-wallet-empty, top up")),
+                KeyFailure::QuotaExhausted
+            ));
+            // 内置的表照常生效
+            assert!(matches!(
+                failure_kind_of(&status(401, "")),
+                KeyFailure::Invalid
+            ));
+            assert!(matches!(
+                failure_kind_of(&status(503, "")),
+                KeyFailure::Transient
+            ));
+            assert!(retriable(&status(404, "")));
+            assert!(retriable(&status(500, "")));
+            assert!(
+                retriable(&status(400, "zxq-wallet-empty")),
+                "a fault the policy calls account-level is retried on another channel"
+            );
+            assert!(!retriable(&status(400, "plain bad request")));
+        })
+        .await;
     }
 
     /// Google 系的 429 把等待时间放在正文的 `RetryInfo.retryDelay`：key 的冷却按它走，不再落到缺省 60 秒。

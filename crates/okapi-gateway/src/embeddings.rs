@@ -21,7 +21,10 @@ use serde::Deserialize;
 use std::time::Instant;
 use uuid::Uuid;
 
-const MAX_ATTEMPTS: usize = 3;
+/// 单请求最多尝试的渠道 key 数：请求策略里的 `max_attempts`（缺省 3）。
+fn max_attempts() -> usize {
+    super::request_policy::max_attempts()
+}
 
 #[derive(Deserialize)]
 struct EmbeddingsProbe {
@@ -421,7 +424,7 @@ async fn forward(
     let mut last_error = AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR);
     let mut attempted = 0;
     for cand in candidates {
-        if attempted >= MAX_ATTEMPTS {
+        if attempted >= max_attempts() {
             break;
         }
         // key 级 RPM / 当日消费闸挡下的候选不算一次尝试（与 chat 同一套闸）
@@ -462,7 +465,7 @@ async fn forward(
                     upstream_model,
                 ));
             }
-            Err(err) if err.retriable_before_first_token() => {
+            Err(err) if super::upstream_failure::retriable(&err) => {
                 last_error = if err.error_code() == codes::NO_AVAILABLE_CHANNEL {
                     super::account_control::attempt_error(&err)
                 } else {

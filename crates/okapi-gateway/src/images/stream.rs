@@ -108,7 +108,7 @@ async fn open(
     let mut last: Option<AppError> = None;
     let mut index = 0;
     for candidate in candidates {
-        if index >= super::MAX_ATTEMPTS {
+        if index >= super::max_attempts() {
             break;
         }
         // key 级 RPM / 当日消费闸挡下的候选不算一次尝试（与 chat 同一套闸）

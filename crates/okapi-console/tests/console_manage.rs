@@ -812,6 +812,40 @@ async fn admin_list_surface_covers_every_resource() {
         .await
         .unwrap();
 
+    // ---- 请求策略：同样在写入时拦坏值（网关读到坏值会退回缺省，等于站长以为改了其实没改） ----
+    for bad in [
+        json!({"max_attempts": 0}),
+        json!({"max_attempts": 11}),
+        json!({"retry_statuses": ["99"]}),
+        json!({"retry_statuses": [404]}),
+        json!({"invalid_keywords": [""]}),
+        json!({"retry": ["404"]}),
+        json!("on"),
+    ] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/settings",
+            t,
+            Some(json!({"key":"request_policy","value":bad})),
+        )
+        .await;
+        assert_eq!(status, 400, "request_policy={bad} 必须拒绝");
+    }
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"request_policy","value":{"max_attempts":4,"retry_statuses":["404","520-529"],"quota_keywords":["wallet empty"]}})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    sqlx::query("DELETE FROM settings WHERE key = 'request_policy'")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
     // ---- 权限分级：普通用户对管理面一律 403 ----
     for path in [
         "/admin/models",

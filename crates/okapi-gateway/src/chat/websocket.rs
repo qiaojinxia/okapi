@@ -226,7 +226,10 @@ impl Queue {
             let pending = session.state.settlements.clone();
             pending.spawn(async move {
                 let lane = work.lane.clone();
-                turn::run(&session, &work).await;
+                // 会话任务与每个请求的任务都是另起的，中间件放的任务本地不会带过来：每个请求自己取一次
+                // （10s 缓存），长会话里改了请求策略，下一个请求就生效，不必重连。
+                let policy = session.state.request_policy().await;
+                crate::request_policy::with(policy, Box::pin(turn::run(&session, &work))).await;
                 // Keep the work permits until the complete settlement finishes.
                 drop(work);
                 let _ = finished.send(lane).await;

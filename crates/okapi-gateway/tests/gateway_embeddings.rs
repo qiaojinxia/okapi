@@ -291,6 +291,26 @@ async fn embeddings_failover_on_transient() {
     assert_eq!(failover, 1);
 }
 
+/// 请求策略的 `max_attempts` 对向量请求同样生效：调成 1 后，第一条渠道 5xx 不再改投下一条，客户端拿到失败。
+#[tokio::test]
+async fn embeddings_attempts_follow_the_request_policy() {
+    let env = setup(&[("/fail/v1", 10), ("/ok/v1", 0)]).await;
+    // 只填这个用例自己的网关状态的设置缓存，不写共享的 settings 表：同库并行的其它用例读到的仍是缺省策略
+    env.state
+        .settings_cache
+        .insert(
+            "request_policy".to_owned(),
+            std::sync::Arc::new(Some(json!({"max_attempts": 1}))),
+        )
+        .await;
+    let resp = post_embeddings(&env).await;
+    assert!(
+        resp.status().is_server_error(),
+        "one attempt only: the healthy second channel is never tried, got {}",
+        resp.status()
+    );
+}
+
 /// 候选只认注册表里声明了 embeddings 的 provider，渠道还能用 `capabilities.embeddings = false`
 /// 关掉这一面：排在前面的那条不会被选上（也不算一次 failover），请求直接落到后面能接的渠道。
 #[tokio::test]

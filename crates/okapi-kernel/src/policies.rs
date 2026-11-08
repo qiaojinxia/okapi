@@ -149,6 +149,169 @@ impl ChannelProbePolicy {
 /// `settings` 里渠道探测策略的键。
 pub const CHANNEL_PROBE_SETTING: &str = "channel_probe_policy";
 
+/// 一组 HTTP 状态码范围，JSON 里写成字符串数组：`["404", "520-529"]`。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusRanges(Vec<(u16, u16)>);
+
+impl StatusRanges {
+    pub fn contains(&self, status: u16) -> bool {
+        self.0
+            .iter()
+            .any(|(from, to)| (*from..=*to).contains(&status))
+    }
+
+    fn parse_one(text: &str) -> Option<(u16, u16)> {
+        let text = text.trim();
+        let (from, to) = if let Some((from, to)) = text.split_once('-') {
+            (
+                from.trim().parse::<u16>().ok()?,
+                to.trim().parse::<u16>().ok()?,
+            )
+        } else {
+            let single = text.parse::<u16>().ok()?;
+            (single, single)
+        };
+        ((100..=599).contains(&from) && (100..=599).contains(&to) && from <= to)
+            .then_some((from, to))
+    }
+}
+
+impl<'de> Deserialize<'de> for StatusRanges {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let texts = Vec::<String>::deserialize(deserializer)?;
+        if texts.len() > MAX_POLICY_ENTRIES {
+            return Err(serde::de::Error::custom("too many status ranges"));
+        }
+        texts
+            .iter()
+            .map(|text| Self::parse_one(text))
+            .collect::<Option<Vec<_>>>()
+            .map(Self)
+            .ok_or_else(|| {
+                serde::de::Error::custom(
+                    "status range must look like \"404\" or \"520-529\" within 100-599",
+                )
+            })
+    }
+}
+
+impl Serialize for StatusRanges {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|(from, to)| {
+            if from == to {
+                from.to_string()
+            } else {
+                format!("{from}-{to}")
+            }
+        }))
+    }
+}
+
+/// 状态码范围、关键词各自最多几条。
+const MAX_POLICY_ENTRIES: usize = 32;
+/// 只在错误正文开头这么多字节里找关键词（上游的错误体通常几百字节，网页类的大体不值得扫）。
+const KEYWORD_SCAN_BYTES: usize = 16 * 1024;
+
+/// `settings.request_policy`：上游请求失败后怎么重试、怎么判 key 的状态。缺省 = 现行行为，只在站长写了才变。
+/// 状态码和关键词是**追加**规则：默认的重试矩阵与账号级错误识别照常生效，这里只多认几种。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RequestPolicy {
+    /// 一个请求最多试几个渠道 / key（含第一次）。
+    pub max_attempts: u8,
+    /// 默认的重试矩阵之外，上游回这些状态码时也换渠道重试（对话 / 向量 / 计数；图片、视频、语音不是幂等的，不受影响）。
+    pub retry_statuses: StatusRanges,
+    /// 上游回这些状态码时按「凭证失效」登记 key（摘出轮转）。
+    pub invalid_statuses: StatusRanges,
+    /// 错误正文含其中任一关键词（不分大小写）时按「凭证失效」登记 key。
+    pub invalid_keywords: Vec<String>,
+    /// 错误正文含其中任一关键词时按「配额耗尽」登记 key（冷却到次日 0 点）。
+    pub quota_keywords: Vec<String>,
+}
+
+/// 请求策略对一次上游错误的判定。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyVerdict {
+    None,
+    Invalid,
+    QuotaExhausted,
+}
+
+impl Default for RequestPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            retry_statuses: StatusRanges::default(),
+            invalid_statuses: StatusRanges::default(),
+            invalid_keywords: Vec::new(),
+            quota_keywords: Vec::new(),
+        }
+    }
+}
+
+impl RequestPolicy {
+    /// 形状与取值域校验（设置写入与网关读取共用）。关键词统一小写、去首尾空白、去重。
+    pub fn parse(value: &Value) -> Option<Self> {
+        let mut policy = if value.is_null() {
+            Self::default()
+        } else {
+            serde_json::from_value::<Self>(value.clone()).ok()?
+        };
+        for keywords in [&mut policy.invalid_keywords, &mut policy.quota_keywords] {
+            if keywords.len() > MAX_POLICY_ENTRIES {
+                return None;
+            }
+            let mut normalized: Vec<String> = Vec::with_capacity(keywords.len());
+            for keyword in keywords.iter() {
+                let keyword = keyword.trim().to_lowercase();
+                if keyword.is_empty() || keyword.chars().count() > 64 {
+                    return None;
+                }
+                if !normalized.contains(&keyword) {
+                    normalized.push(keyword);
+                }
+            }
+            *keywords = normalized;
+        }
+        (1..=10).contains(&policy.max_attempts).then_some(policy)
+    }
+
+    /// 默认矩阵之外，这个状态码也换渠道重试吗。
+    pub fn extra_retry(&self, status: u16) -> bool {
+        self.retry_statuses.contains(status)
+    }
+
+    /// 一次上游错误按策略该判成什么（优先级：凭证失效的状态码 → 凭证失效的关键词 → 配额耗尽的关键词）。
+    pub fn classify(&self, status: u16, body: &[u8]) -> PolicyVerdict {
+        if self.invalid_statuses.contains(status) {
+            return PolicyVerdict::Invalid;
+        }
+        if self.invalid_keywords.is_empty() && self.quota_keywords.is_empty() {
+            return PolicyVerdict::None;
+        }
+        let head = &body[..body.len().min(KEYWORD_SCAN_BYTES)];
+        let text = String::from_utf8_lossy(head).to_lowercase();
+        if self
+            .invalid_keywords
+            .iter()
+            .any(|keyword| text.contains(keyword.as_str()))
+        {
+            PolicyVerdict::Invalid
+        } else if self
+            .quota_keywords
+            .iter()
+            .any(|keyword| text.contains(keyword.as_str()))
+        {
+            PolicyVerdict::QuotaExhausted
+        } else {
+            PolicyVerdict::None
+        }
+    }
+}
+
+/// `settings` 里请求策略的键。
+pub const REQUEST_POLICY_SETTING: &str = "request_policy";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +352,107 @@ mod tests {
             &json!({"mode": "all", "interval_secs": 60, "concurrency": 8, "batch_size": 200}),
         );
         assert_eq!(all.map(|p| p.mode), Some(ChannelProbeMode::All));
+    }
+
+    #[test]
+    fn request_policy_defaults_keep_todays_behaviour() {
+        let policy = RequestPolicy::parse(&Value::Null).unwrap();
+        assert_eq!(policy, RequestPolicy::default());
+        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(
+            policy.classify(401, b"anything"),
+            PolicyVerdict::None,
+            "the built-in table handles 401, not the policy"
+        );
+        assert!(!policy.extra_retry(404));
+    }
+
+    #[test]
+    fn status_ranges_read_single_codes_and_spans() {
+        let policy = RequestPolicy::parse(
+            &json!({"retry_statuses": ["404", "520-529"], "invalid_statuses": [" 418 "]}),
+        )
+        .unwrap();
+        for hit in [404, 520, 525, 529] {
+            assert!(policy.extra_retry(hit), "{hit}");
+        }
+        for miss in [403, 405, 519, 530] {
+            assert!(!policy.extra_retry(miss), "{miss}");
+        }
+        assert_eq!(policy.classify(418, b""), PolicyVerdict::Invalid);
+        let again = serde_json::to_value(&policy).unwrap();
+        assert_eq!(
+            again["retry_statuses"],
+            json!(["404", "520-529"]),
+            "serialises back to the same strings"
+        );
+    }
+
+    #[test]
+    fn keywords_match_case_insensitively_and_invalid_beats_quota() {
+        let policy = RequestPolicy::parse(&json!({
+            "invalid_keywords": ["Account Suspended", "封禁"],
+            "quota_keywords": ["credit balance is too low", "ACCOUNT SUSPENDED"],
+        }))
+        .unwrap();
+        assert_eq!(
+            policy.classify(
+                400,
+                br#"{"error":{"message":"Your ACCOUNT SUSPENDED for abuse"}}"#
+            ),
+            PolicyVerdict::Invalid
+        );
+        assert_eq!(
+            policy.classify(500, "账号已被封禁".as_bytes()),
+            PolicyVerdict::Invalid
+        );
+        assert_eq!(
+            policy.classify(400, br#"{"error":"Credit balance is too low"}"#),
+            PolicyVerdict::QuotaExhausted
+        );
+        assert_eq!(
+            policy.classify(400, b"plain bad request"),
+            PolicyVerdict::None
+        );
+    }
+
+    #[test]
+    fn keywords_are_only_searched_in_the_start_of_the_body() {
+        let policy = RequestPolicy::parse(&json!({"quota_keywords": ["needle"]})).unwrap();
+        let mut late = vec![b'x'; KEYWORD_SCAN_BYTES];
+        late.extend_from_slice(b"needle");
+        assert_eq!(policy.classify(400, &late), PolicyVerdict::None);
+        let mut early = b"needle".to_vec();
+        early.extend(std::iter::repeat_n(b'x', KEYWORD_SCAN_BYTES));
+        assert_eq!(policy.classify(400, &early), PolicyVerdict::QuotaExhausted);
+    }
+
+    #[test]
+    fn request_policy_rejects_bad_shapes_and_out_of_range_values() {
+        let too_many: Vec<String> = (0..33).map(|n| format!("kw{n}")).collect();
+        for bad in [
+            json!({"max_attempts": 0}),
+            json!({"max_attempts": 11}),
+            json!({"retry_statuses": ["99"]}),
+            json!({"retry_statuses": ["600"]}),
+            json!({"retry_statuses": ["500-400"]}),
+            json!({"retry_statuses": ["abc"]}),
+            json!({"retry_statuses": [404]}),
+            json!({"invalid_keywords": [""]}),
+            json!({"invalid_keywords": ["  "]}),
+            json!({"invalid_keywords": ["x".repeat(65)]}),
+            json!({"quota_keywords": too_many}),
+            json!({"retry": [404]}),
+            json!("on"),
+        ] {
+            assert!(RequestPolicy::parse(&bad).is_none(), "{bad}");
+        }
+        let kept =
+            RequestPolicy::parse(&json!({"invalid_keywords": [" Foo ", "foo", "BAR"]})).unwrap();
+        assert_eq!(
+            kept.invalid_keywords,
+            vec!["foo".to_owned(), "bar".to_owned()],
+            "trimmed, lower-cased, deduplicated"
+        );
     }
 }

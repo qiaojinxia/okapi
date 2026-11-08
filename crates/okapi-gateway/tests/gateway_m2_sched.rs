@@ -143,8 +143,36 @@ async fn mock_flip(body: axum::body::Bytes) -> axum::response::Response {
     mock_ok(body).await
 }
 
+async fn mock_404(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        axum::Json(json!({"error":{"message":"no such route on this relay","type":"not_found"}})),
+    )
+        .into_response()
+}
+
+/// 内置规则认不出的账号级 400：靠请求策略里的关键词点名。
+async fn mock_400_ban(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(json!({"error":{"message":"zxq-ban-notice: contact support","type":"invalid_request_error"}})),
+    )
+        .into_response()
+}
+
+async fn mock_400_wallet(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(json!({"error":{"message":"zxq-wallet-empty","type":"invalid_request_error"}})),
+    )
+        .into_response()
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
+        .route("/r404/v1/chat/completions", post(mock_404))
+        .route("/rban/v1/chat/completions", post(mock_400_ban))
+        .route("/rwallet/v1/chat/completions", post(mock_400_wallet))
         .route("/ok/v1/chat/completions", post(mock_ok))
         .route("/flip/v1/chat/completions", post(mock_flip))
         .route("/slow/v1/chat/completions", post(mock_slow))
@@ -165,6 +193,7 @@ async fn spawn_mock() -> SocketAddr {
 }
 
 struct TestEnv {
+    state: gateway::state::AppState,
     pg: PgPool,
     gateway: SocketAddr,
     token: String,
@@ -235,7 +264,7 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
         .await
         .unwrap();
 
-    let app = gateway::router(state);
+    let app = gateway::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -243,6 +272,7 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
     });
 
     TestEnv {
+        state,
         pg,
         gateway: addr,
         token,
@@ -858,4 +888,134 @@ async fn least_concurrency_pool_spreads_overlapping_requests() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("请求结束后在途租约应退回");
+}
+
+/// 给**这个用例自己的**网关状态设置（或清掉）请求策略：只填它的设置缓存，不写共享的 `settings` 表——同一个库里并行跑的
+/// 其它用例各有各的状态，读到的仍是缺省策略，不会被这里的 `max_attempts: 1` 之类误伤。
+async fn set_policy(env: &TestEnv, value: Option<Value>) {
+    env.state.routing.request_policy.invalidate(&0).await;
+    env.state.settings_cache.invalidate("request_policy").await;
+    if let Some(value) = value {
+        env.state
+            .settings_cache
+            .insert(
+                "request_policy".to_owned(),
+                std::sync::Arc::new(Some(value)),
+            )
+            .await;
+    }
+}
+
+/// 失败登记过的 key 数：每试一个渠道失败一次，就有一把 key 的连续失败计数是 1。
+async fn keys_that_failed(env: &TestEnv) -> usize {
+    let mut failed = 0;
+    for key in &env.channel_keys {
+        if key_row(env, *key).await.1 > 0 {
+            failed += 1;
+        }
+    }
+    failed
+}
+
+/// 一个请求最多试几个渠道由请求策略的 `max_attempts` 定：缺省 3（现行行为），可调小也可调大。
+#[tokio::test]
+async fn max_attempts_follows_the_request_policy() {
+    for (limit, expected) in [(None, 3), (Some(1), 1), (Some(5), 5)] {
+        let env = setup(&[
+            ("/r500/v1", 40),
+            ("/r500/v1", 30),
+            ("/r500/v1", 20),
+            ("/r500/v1", 10),
+            ("/r500/v1", 0),
+        ])
+        .await;
+        set_policy(&env, limit.map(|n| json!({ "max_attempts": n }))).await;
+        let resp = post_chat(&env, &env.model, None).await;
+        assert_eq!(resp.status(), 502, "limit {limit:?}");
+        assert_eq!(keys_that_failed(&env).await, expected, "limit {limit:?}");
+        set_policy(&env, None).await;
+    }
+}
+
+/// 404 默认是请求错误：原样回给客户端，不换渠道。站长把它点名进 `retry_statuses`（有的中转站对暂时没配这个模型的
+/// 渠道就回 404）后，改投下一个渠道。
+#[tokio::test]
+async fn retry_statuses_move_a_404_to_the_next_channel() {
+    let env = setup(&[("/r404/v1", 10), ("/ok/v1", 0)]).await;
+    set_policy(&env, None).await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(
+        resp.status(),
+        404,
+        "default: the upstream's 404 reaches the client"
+    );
+    assert_eq!(
+        key_row(&env, env.channel_keys[0]).await,
+        (1, 0, false),
+        "and the key is left alone"
+    );
+
+    set_policy(&env, Some(json!({"retry_statuses": ["404"]}))).await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(served_by(&env, resp).await, env.channel_keys[1]);
+    assert_eq!(
+        key_row(&env, env.channel_keys[0]).await.0,
+        1,
+        "a retried 404 says nothing about the key"
+    );
+    set_policy(&env, None).await;
+}
+
+/// 内置规则认不出的账号级错误（这里的 `zxq-ban-notice` / `zxq-wallet-empty` 是编出来的）靠请求策略的关键词点名：
+/// 当次改投下一个渠道并成功，这把 key 登记成凭证失效 / 配额耗尽（冷却到次日）。没点名时是普通的 400，原样回给客户端。
+#[tokio::test]
+async fn policy_keywords_register_account_level_failures_on_the_key() {
+    for (path, keyword, status, cooling) in [
+        ("/rban/v1", "invalid_keywords", 6_i64, false),
+        ("/rwallet/v1", "quota_keywords", 4, true),
+    ] {
+        let env = setup(&[(path, 10), ("/ok/v1", 0)]).await;
+        set_policy(&env, None).await;
+        let resp = post_chat(&env, &env.model, None).await;
+        assert_eq!(
+            resp.status(),
+            400,
+            "{path}: without the keyword it is a plain request error"
+        );
+        assert_eq!(
+            key_row(&env, env.channel_keys[0]).await,
+            (1, 0, false),
+            "{path}"
+        );
+
+        let word = if keyword == "invalid_keywords" {
+            "ZXQ-Ban-Notice"
+        } else {
+            "zxq-wallet-empty"
+        };
+        set_policy(&env, Some(json!({ keyword: [word] }))).await;
+        let resp = post_chat(&env, &env.model, None).await;
+        assert_eq!(served_by(&env, resp).await, env.channel_keys[1], "{path}");
+        let (key_status, failed, cooldown) = key_row(&env, env.channel_keys[0]).await;
+        assert_eq!(
+            (key_status, failed, cooldown),
+            (status, 1, cooling),
+            "{path}"
+        );
+        set_policy(&env, None).await;
+    }
+}
+
+/// 控制台写设置后走的是路由缓存的失效入口：请求策略的 10 秒缓存必须随它一起清掉，否则站长改完策略要等十秒才生效。
+#[tokio::test]
+async fn invalidating_the_routing_caches_drops_the_cached_request_policy() {
+    let env = setup(&[("/ok/v1", 0)]).await;
+    set_policy(&env, Some(json!({ "max_attempts": 7 }))).await;
+    assert_eq!(env.state.request_policy().await.max_attempts, 7);
+    env.state.invalidate_routing_caches_local();
+    assert_eq!(
+        env.state.request_policy().await.max_attempts,
+        3,
+        "the setting is gone from the cache and the table, so the default applies"
+    );
 }
