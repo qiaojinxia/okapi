@@ -17,16 +17,13 @@ pub mod account;
 
 use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
 use crate::anthropic::{ANTHROPIC_VERSION, MessagesResponse, send_messages_at};
+use crate::beta_latch::{drop_refused, refusal_retry};
 use crate::error::UpstreamError;
 use crate::profiles::identity::BETA_TOKEN_COUNTING;
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::{LazyLock, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Claude Code 公开客户端 id（Anthropic 私有，可能变更）。
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -364,7 +361,7 @@ pub async fn messages(
     };
     let extra = prepared.headers;
     let scope = refusal_scope(account_id, access_token);
-    let mut beta = drop_refused(&scope, &beta);
+    let mut beta = drop_refused(&scope, &beta, &REQUIRED_BETAS);
     let mut retried = false;
     loop {
         let mut headers: Vec<(String, String)> = vec![
@@ -386,7 +383,7 @@ pub async fn messages(
             &outbound,
         )
         .await;
-        if let Some(next) = refusal_retry(&scope, &beta, &result, &mut retried) {
+        if let Some(next) = refusal_retry(&scope, &beta, &REQUIRED_BETAS, &result, &mut retried) {
             beta = next;
             continue;
         }
@@ -424,7 +421,7 @@ pub async fn count_tokens(
     };
     let extra = prepared.headers;
     let scope = refusal_scope(account_id, access_token);
-    let mut beta = drop_refused(&scope, &beta);
+    let mut beta = drop_refused(&scope, &beta, &REQUIRED_BETAS);
     let mut retried = false;
     loop {
         let mut req = http
@@ -445,7 +442,7 @@ pub async fn count_tokens(
         } else {
             Err(crate::openai::status_error(resp).await)
         };
-        if let Some(next) = refusal_retry(&scope, &beta, &result, &mut retried) {
+        if let Some(next) = refusal_retry(&scope, &beta, &REQUIRED_BETAS, &result, &mut retried) {
             beta = next;
             continue;
         }
@@ -453,115 +450,13 @@ pub async fn count_tokens(
     }
 }
 
-/// 上游拒收的 beta（按账号，一小时）。真机碰到 400「Unexpected value(s) `x` for the `anthropic-beta` header」时把点名的
-/// beta 拉黑、之后的请求不再带（二进制里的 `requestLatches.refusedBetaHeaders`）；同一个 beta 是否被接受取决于端点与组织，
-/// 抓包里看不出来，所以这里也按真机的办法自愈：去掉点名的 beta 重发一次，并记住，之后一小时这个账号一开始就不带。
-static REFUSED_BETAS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-const REFUSED_BETA_TTL: Duration = Duration::from_mins(60);
-
 /// 拉黑记录的归属：账号 UUID；没有（只导入了 token）就用 token 的哈希，不存 token 本身。
+/// 拒收记录的存取在 [`crate::beta_latch`]，API key 路径共用同一份。
 fn refusal_scope(account_id: Option<&str>, access_token: &str) -> String {
     account_id.map_or_else(
-        || {
-            let mut hasher = DefaultHasher::new();
-            access_token.hash(&mut hasher);
-            format!("token:{:016x}", hasher.finish())
-        },
+        || crate::beta_latch::secret_scope("token", access_token),
         str::to_owned,
     )
-}
-
-/// 400 体里被点名的 beta（`Unexpected value(s) `a`, `b` for the `anthropic-beta` header`）。
-fn refused_betas(body: &[u8]) -> Vec<String> {
-    const TAIL: &str = " for the `anthropic-beta` header";
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
-    };
-    let Some(message) = value["error"]["message"].as_str() else {
-        return Vec::new();
-    };
-    let Some((_, rest)) = message.split_once("Unexpected value(s) ") else {
-        return Vec::new();
-    };
-    let Some((list, _)) = rest.split_once(TAIL) else {
-        return Vec::new();
-    };
-    list.split(',')
-        .map(|name| name.trim().trim_matches('`').to_owned())
-        .filter(|name| !name.is_empty())
-        .collect()
-}
-
-fn beta_parts(beta: &str) -> impl Iterator<Item = &str> {
-    beta.split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-}
-
-/// 这个账号当前被拉黑的 beta 先去掉（必备的三个不动：缺了订阅路径本身就过不了）。
-fn drop_refused(scope: &str, beta: &str) -> String {
-    let refused = REFUSED_BETAS.lock().unwrap_or_else(PoisonError::into_inner);
-    beta_parts(beta)
-        .filter(|part| {
-            REQUIRED_BETAS.contains(part)
-                || refused
-                    .get(&(scope.to_owned(), (*part).to_owned()))
-                    .is_none_or(|since| since.elapsed() >= REFUSED_BETA_TTL)
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// 400 点名了本次请求里非必备的 beta：记下并返回去掉它们的 beta 串；点名的都不在请求里（或是必备的）就是别的 400，不重发。
-fn resend_without_refused(scope: &str, beta: &str, body: &[u8]) -> Option<String> {
-    let named = refused_betas(body);
-    let sent: Vec<&str> = beta_parts(beta).collect();
-    let dropped: Vec<&String> = named
-        .iter()
-        .filter(|name| sent.contains(&name.as_str()) && !REQUIRED_BETAS.contains(&name.as_str()))
-        .collect();
-    if dropped.is_empty() {
-        return None;
-    }
-    {
-        let mut refused = REFUSED_BETAS.lock().unwrap_or_else(PoisonError::into_inner);
-        refused.retain(|_, since| since.elapsed() < REFUSED_BETA_TTL);
-        for name in &dropped {
-            refused.insert((scope.to_owned(), (*name).clone()), Instant::now());
-        }
-    }
-    tracing::warn!(
-        refused = ?dropped,
-        "upstream refused anthropic-beta values; resending without them and leaving them out for an hour"
-    );
-    Some(
-        sent.into_iter()
-            .filter(|part| !dropped.iter().any(|name| name.as_str() == *part))
-            .collect::<Vec<_>>()
-            .join(","),
-    )
-}
-
-/// 被点名拒收 beta 的 400：返回去掉它们的 beta 串，让调用方重发；只重发一次（还是 400 就是别的问题，交回上层）。
-fn refusal_retry<T>(
-    scope: &str,
-    beta: &str,
-    result: &Result<T, UpstreamError>,
-    retried: &mut bool,
-) -> Option<String> {
-    if *retried {
-        return None;
-    }
-    let Err(UpstreamError::Status {
-        status: 400, body, ..
-    }) = result
-    else {
-        return None;
-    };
-    let next = resend_without_refused(scope, beta, body)?;
-    *retried = true;
-    Some(next)
 }
 
 #[cfg(test)]

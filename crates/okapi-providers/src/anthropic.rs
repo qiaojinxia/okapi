@@ -4,6 +4,7 @@
 //! 协议转换在 convert 模块按方向进行（禁统一 IR，IMPLEMENTATION §4.1）。
 //! 原生事件保留原文，为后续 /v1/messages 入口 + anthropic 上游的纯透传留路。
 
+use crate::beta_latch::{beta_parts, drop_refused, refusal_retry, secret_scope};
 use crate::error::UpstreamError;
 use crate::types::ChatEvent;
 use bytes::Bytes;
@@ -15,6 +16,85 @@ use std::time::Duration;
 const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
 /// `anthropic-version` 头的值：真实请求与管理面的测活 / 拉模型共用，探测才和流量走同一种协议。
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// 转给上游的客户端 beta 最多几个、名字最长几个字符；形状不对的直接丢弃（只放行形如 `prompt-caching-2024-07-31` 的名字）。
+const MAX_FORWARDED_BETAS: usize = 32;
+const MAX_BETA_NAME: usize = 64;
+
+fn beta_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_BETA_NAME
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+}
+
+/// API key 路径上这条请求要发的 `anthropic-beta`，以及拒收记录的归属（按这把 key）。
+///
+/// 没有客户端画像（模拟 Claude Code）接管时：渠道自己配的 `anthropic-beta`（`extra_headers`）在前，客户端带来的随后，去重；
+/// 渠道配的那一行从 `extra_headers` 里摘走，免得发出两行同名头。画像接管时整件事一个字不动（由画像自己管 beta）。
+/// 渠道自己配的永远不被自愈丢掉——那是站长明说要发的。
+struct BetaPlan {
+    value: String,
+    scope: String,
+    configured: Vec<String>,
+}
+
+impl BetaPlan {
+    fn new(prepared: &mut crate::profiles::PreparedRequest, credential: &str) -> Option<Self> {
+        if prepared.shaped {
+            return None;
+        }
+        let outbound = &mut prepared.outbound;
+        let configured = outbound
+            .extra_headers
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|index| outbound.extra_headers.remove(index).1);
+        let client = outbound
+            .context
+            .client_headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|(_, value)| value.as_str());
+        let configured: Vec<String> = configured
+            .iter()
+            .flat_map(|value| beta_parts(value))
+            .map(str::to_owned)
+            .collect();
+        let mut parts = configured.clone();
+        for part in client
+            .into_iter()
+            .flat_map(beta_parts)
+            .filter(|part| beta_name_ok(part))
+        {
+            if parts.len() >= MAX_FORWARDED_BETAS {
+                break;
+            }
+            if !parts.iter().any(|existing| existing == part) {
+                parts.push(part.to_owned());
+            }
+        }
+        let scope = secret_scope("key", credential);
+        let required: Vec<&str> = configured.iter().map(String::as_str).collect();
+        let value = drop_refused(&scope, &parts.join(","), &required);
+        Some(Self {
+            value,
+            scope,
+            configured,
+        })
+    }
+
+    /// 上游点名拒收了其中某些 beta：返回去掉它们的 beta 串，调用方换上重发一次。
+    fn refusal<T>(&self, result: &Result<T, UpstreamError>, retried: &mut bool) -> Option<String> {
+        let required: Vec<&str> = self.configured.iter().map(String::as_str).collect();
+        refusal_retry(&self.scope, &self.value, &required, result, retried)
+    }
+}
 
 /// 原生 Anthropic SSE 事件（event 行 + data 行原文）。
 #[derive(Debug, Clone)]
@@ -65,26 +145,42 @@ impl AnthropicUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
         let url = format!("{}/messages", api_base.trim_end_matches('/'));
-        let prepared = crate::profiles::prepare_anthropic(body, stream, false, outbound, None)?;
-        let mut headers = vec![
-            ("x-api-key", credential),
-            ("anthropic-version", ANTHROPIC_VERSION),
-        ];
-        headers.extend(
-            prepared
-                .headers
-                .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str())),
-        );
-        send_messages_at(
-            &self.http,
-            url,
-            &headers,
-            prepared.body,
-            stream,
-            &prepared.outbound,
-        )
-        .await
+        let mut prepared = crate::profiles::prepare_anthropic(body, stream, false, outbound, None)?;
+        let mut plan = BetaPlan::new(&mut prepared, credential);
+        let mut retried = false;
+        loop {
+            let mut headers = vec![
+                ("x-api-key", credential),
+                ("anthropic-version", ANTHROPIC_VERSION),
+            ];
+            if let Some(plan) = plan.as_ref().filter(|plan| !plan.value.is_empty()) {
+                headers.push(("anthropic-beta", plan.value.as_str()));
+            }
+            headers.extend(
+                prepared
+                    .headers
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            );
+            let result = send_messages_at(
+                &self.http,
+                url.clone(),
+                &headers,
+                prepared.body.clone(),
+                stream,
+                &prepared.outbound,
+            )
+            .await;
+            if let Some(next) = plan
+                .as_ref()
+                .and_then(|plan| plan.refusal(&result, &mut retried))
+                && let Some(plan) = plan.as_mut()
+            {
+                plan.value = next;
+                continue;
+            }
+            return result;
+        }
     }
 
     /// `POST /v1/messages/count_tokens`：不计费，原样回 `{input_tokens}`。
@@ -96,24 +192,41 @@ impl AnthropicUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<Bytes, UpstreamError> {
         let url = format!("{}/messages/count_tokens", api_base.trim_end_matches('/'));
-        let prepared = crate::profiles::prepare_anthropic(body, false, true, outbound, None)?;
-        let mut req = self
-            .http
-            .post(&prepared.outbound, url)?
-            .header("x-api-key", credential)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .timeout(NON_STREAM_TIMEOUT)
-            .body(prepared.body);
-        for (name, value) in prepared.headers {
-            req = req.header(name.as_str(), value.as_str());
+        let mut prepared = crate::profiles::prepare_anthropic(body, false, true, outbound, None)?;
+        let mut plan = BetaPlan::new(&mut prepared, credential);
+        let mut retried = false;
+        loop {
+            let mut req = self
+                .http
+                .post(&prepared.outbound, url.clone())?
+                .header("x-api-key", credential)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .timeout(NON_STREAM_TIMEOUT)
+                .body(prepared.body.clone());
+            if let Some(plan) = plan.as_ref().filter(|plan| !plan.value.is_empty()) {
+                req = req.header("anthropic-beta", plan.value.as_str());
+            }
+            for (name, value) in &prepared.headers {
+                req = req.header(name.as_str(), value.as_str());
+            }
+            let resp = self.http.send(req, &prepared.outbound).await?;
+            let status = resp.status().as_u16();
+            let result = if (200..300).contains(&status) {
+                crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
+            } else {
+                Err(crate::openai::status_error(resp).await)
+            };
+            if let Some(next) = plan
+                .as_ref()
+                .and_then(|plan| plan.refusal(&result, &mut retried))
+                && let Some(plan) = plan.as_mut()
+            {
+                plan.value = next;
+                continue;
+            }
+            return result;
         }
-        let resp = self.http.send(req, &prepared.outbound).await?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(crate::openai::status_error(resp).await);
-        }
-        crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
     }
 }
 

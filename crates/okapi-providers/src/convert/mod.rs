@@ -10,6 +10,7 @@ pub mod responses_to_chat;
 pub mod thinking;
 pub mod tool_loss;
 
+mod gemini_schema;
 mod gemini_usage;
 
 use crate::error::UpstreamError;

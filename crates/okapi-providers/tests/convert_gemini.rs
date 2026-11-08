@@ -67,6 +67,56 @@ fn request_maps_contents_config_and_tools() {
     );
 }
 
+/// Gemini 的 Schema 只认 OpenAPI 子集：OpenAI 侧工具里常见的 additionalProperties / $schema / $ref / 类型数组 / 整数 enum
+/// 到不了上游（它们会让整条请求 400）；没有参数的函数不带 parameters。
+#[test]
+fn tool_schemas_reach_gemini_in_its_own_subset() {
+    let out = convert_req(&json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {"type": "function", "function": {"name": "lookup", "description": "d", "strict": true,
+                "parameters": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "q": {"type": ["string", "null"]},
+                        "opts": {"$ref": "#/$defs/Opts"}
+                    },
+                    "required": ["q", "ghost"],
+                    "$defs": {"Opts": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {"n": {"type": "integer", "enum": [1, 2]}}
+                    }}
+                }}},
+            {"type": "function", "function": {"name": "ping",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}},
+            {"type": "function", "function": {"name": "bare"}}
+        ]
+    }));
+    let declarations = out["tools"][0]["functionDeclarations"].as_array().unwrap();
+    assert_eq!(
+        declarations[0]["parameters"],
+        json!({
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "nullable": true},
+                "opts": {"type": "object", "properties": {"n": {"type": "integer"}}}
+            },
+            "required": ["q"]
+        })
+    );
+    for (index, name) in [(1, "ping"), (2, "bare")] {
+        assert_eq!(declarations[index]["name"], name);
+        assert!(
+            declarations[index].get("parameters").is_none(),
+            "{name} has no arguments, Gemini rejects an empty properties object: {}",
+            declarations[index]
+        );
+    }
+}
+
 #[test]
 fn request_preserves_remote_image_and_structured_output() {
     let out = convert_req(&json!({

@@ -22,6 +22,7 @@ pub mod aws_sigv4;
 pub mod azure;
 pub mod batch;
 pub mod bedrock;
+mod beta_latch;
 mod client_tls;
 pub mod convert;
 pub mod custom_pass;

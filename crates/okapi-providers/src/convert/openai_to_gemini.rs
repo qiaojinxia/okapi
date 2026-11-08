@@ -290,11 +290,17 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
         .flatten()
         .filter_map(|t| {
             let f = t.get("function")?;
-            Some(json!({
+            let mut declaration = json!({
                 "name": f.get("name").and_then(Value::as_str)?,
                 "description": f.get("description").and_then(Value::as_str).unwrap_or(""),
-                "parameters": f.get("parameters").cloned().unwrap_or_else(|| json!({"type":"object"})),
-            }))
+            });
+            // Gemini 的 Schema 只认 OpenAPI 子集（多一个 additionalProperties 就 400）；没有参数的函数不写 parameters
+            if let Some(parameters) = super::gemini_schema::function_parameters(
+                f.get("parameters").unwrap_or(&Value::Null),
+            ) {
+                declaration["parameters"] = parameters;
+            }
+            Some(declaration)
         })
         .collect();
     if decls.is_empty() {

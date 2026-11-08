@@ -27,11 +27,24 @@ fn sse_named(events: &[(&str, Value)]) -> String {
     out
 }
 
+/// 两个 anthropic mock 收到过的 `anthropic-beta` 值（各用例用自己唯一的 beta 名去认，互不串）。
+static SEEN_BETAS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn note_beta(headers: &axum::http::HeaderMap) {
+    if let Some(beta) = headers
+        .get("anthropic-beta")
+        .and_then(|value| value.to_str().ok())
+    {
+        SEEN_BETAS.lock().unwrap().push(beta.to_owned());
+    }
+}
+
 async fn mock_anthropic(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     assert!(headers.get("x-api-key").is_some());
+    note_beta(&headers);
     let req: Value = serde_json::from_slice(&body).unwrap();
     // 透传语义：客户端原始字段应原样到达（仅 model 重写）
     assert_eq!(req["system"], "keep me");
@@ -123,6 +136,7 @@ async fn mock_count_tokens(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     assert!(headers.get("x-api-key").is_some());
+    note_beta(&headers);
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert!(req["model"].as_str().is_some());
     axum::Json(json!({ "input_tokens": 42 })).into_response()
@@ -407,6 +421,54 @@ async fn count_tokens_proxies_anthropic() {
     .await
     .unwrap();
     assert_eq!(n, 0, "count_tokens 不计费");
+}
+
+/// 客户端的 `anthropic-beta` 经网关送到 anthropic API key 渠道（messages 与 count_tokens 各一次）；原先这行头在 key 渠道上被整行丢掉。
+#[tokio::test]
+async fn client_betas_reach_an_anthropic_api_key_channel() {
+    let env = setup("anthropic").await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let for_messages = format!("gw-msg-{}", &tag[..10]);
+    let for_count = format!("gw-cnt-{}", &tag[..10]);
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/v1/messages", env.gateway))
+        .header("x-api-key", &env.token)
+        .header("anthropic-version", "2023-06-01")
+        .header(
+            "anthropic-beta",
+            format!("prompt-caching-2024-07-31, {for_messages}"),
+        )
+        .json(&json!({
+            "model": env.model, "max_tokens": 256, "system": "keep me",
+            "messages": [{"role": "user", "content": "hi there"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let resp = client
+        .post(format!("http://{}/v1/messages/count_tokens", env.gateway))
+        .header("x-api-key", &env.token)
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", &for_count)
+        .json(&json!({
+            "model": env.model, "system": "keep me",
+            "messages": [{"role": "user", "content": "hi there"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let seen = SEEN_BETAS.lock().unwrap().clone();
+    assert!(
+        seen.contains(&format!("prompt-caching-2024-07-31,{for_messages}")),
+        "messages: {seen:?}"
+    );
+    assert!(seen.contains(&for_count), "count_tokens: {seen:?}");
 }
 
 /// 优先的那把 key 撞上渠道 RPM 时换下一个候选，别让同模型下空闲的 key 白白闲着而整体 429；

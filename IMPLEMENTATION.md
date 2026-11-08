@@ -3789,6 +3789,32 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
     人停的不启用 / 管理员重新启用后再停）；`channel_balance` 集成九条（进程内 dashboard 替身 + webhook 接收端）——定时回填列表且间隔内不重查、notify 只通知一次并在 24
     小时后提醒、渠道自己的动作压过全局缺省、stop 停用 + 审计 + 充值后自动启用且启用无通知、人停的不启用、读不到不动、坏规则忽略、退出 / 非 openai 协议 / 已删除
     的渠道不查、出口不可用的渠道不直连、停用 / 启用的条件更新；控制台写入校验（全局策略与渠道设置各一组）；控制台原有的余额接口用例原样通过。
+- **Gemini 工具 schema 清洗**：Gemini 的 `functionDeclarations[].parameters` 只认一小撮 OpenAPI 字段，多一个整条请求 400（`Unknown name "additionalProperties"`）。
+  OpenAI 侧客户端导出的工具参数几乎每个对象都带 `additionalProperties` / `$schema`，pydantic / zod 的还有 `$ref` / `$defs`、`anyOf: [{…}, {type: null}]`、
+  `type: ["string", "null"]`、整数 enum、`format: uri`、不在 `properties` 里的 `required`——原先 `convert_tools` 把 `parameters` 原样塞进去，这些请求在 Gemini
+  渠道上全是 400（new-api 对此有白名单清洗，我们没有）。新模块 `convert/gemini_schema.rs`：
+  - 只留 Gemini 认的字段；能等价改写的改写——`$ref` 沿文档内 JSON pointer 内联（循环、过深 6 层、外部或悬空的收成裸 `{"type": "object"}`）、`anyOf` 里的
+    `{"type": "null"}` 变 `nullable`（只剩一个分支就并回本节点）、`oneOf` 当 `anyOf`、`allOf` 合并（`properties` / `required` 取并集）、类型数组取第一个非 null 并 `nullable`、
+    元组 `items` 取第一个、`const` 字符串变单值 enum、`enum` 里的 null 变 `nullable`；
+  - 不能表达的丢掉：非字符串 / 非字符串类型的 enum、Gemini 不收的 `format`（字符串只留 `date-time`，整数 `int32` / `int64`，数字 `float` / `double`）、`default: null`、
+    不在属性里的 `required` / `propertyOrdering`；int64 边界写成 `3.0` 的改成 `3`；嵌套超过 32 层只留类型与说明；
+  - 没有参数的函数（对象且没有属性）不带 `parameters` 字段（Gemini 不收 `properties: {}`）；原先缺 `parameters` 时补的 `{"type": "object"}` 也一并去掉；
+  - 已知有损：自由形式的字典（没有 `properties` 的对象）Gemini 描述不了，只剩 `{"type": "object"}`；数组没写元素类型补 `items: {"type": "string"}`；没有任何类型线索的叶子当字符串。
+    这些都丢「约束」而不丢「结构」，模型照样看得到有哪些参数、各是什么类型。结构化输出的 `responseJsonSchema` 本来就收标准 JSON Schema，没动。
+  - 验收：模块内 7 条单测（典型导出 schema 逐字比对、无参数函数、allOf / oneOf、enum、无类型与退化节点、「输出里只有白名单字段且清洗是不动点」、200 层深不爆栈）；
+    `convert_gemini` 一条经 `request_openai_to_gemini` 的端到端（additionalProperties / `$ref` / 类型数组 / 整数 enum 都到不了上游，无参数函数不带 `parameters`）。
+  - 没做：用 `parametersJsonSchema`（新版 Gemini 才认）原样发 misfit 的 schema——要兼容老端点，选了清洗。
+- **Anthropic API key 渠道转发客户端的 `anthropic-beta`**：Claude Code / SDK 靠这个头开 `effort`、`interleaved-thinking`、`context-1m`、`files-api`、`fine-grained-tool-streaming` 等功能；
+  订阅账号路径早就合并转发它，**API key 渠道却把客户端的这行整行丢掉**（`prepare_anthropic` 只在客户端画像接管时才碰它），功能悄悄失效，或者上游因缺 beta 直接 400。现在：
+  - 没有客户端画像（模拟 Claude Code）接管时，messages 与 count_tokens 都带上客户端的 beta：渠道自己配的（`extra_headers` 里的 `anthropic-beta`）在前，客户端的随后，去重，
+    **发一行**（渠道配的那行从 `extra_headers` 摘掉，免得发出两行同名头）。画像接管时一个字不动，仍由画像管 beta。
+  - 客户端的值先过形状闸：只放行形如 `prompt-caching-2024-07-31`（小写字母 / 数字开头，其后小写字母、数字和 `-_.`，≤ 64 字符），最多 32 个，别的直接丢，不把任意字符串写进上游头。
+  - 自愈：上游 400「Unexpected value(s) `x` for the `anthropic-beta` header」点名拒收时，去掉点名的重发一次，并按这把 key 记一小时（之后一开始就不带）；不是点名 beta 的 400、
+    点名的值这次请求里没发，都原样交回。渠道自己配的 beta 永远不被自愈丢掉（站长明说要发的，被拒就是错误）。
+  - 实现上把订阅路径里的「拒收闩锁」（`REFUSED_BETAS`、解析 400、去掉点名值重发一次）挪到共用的 `beta_latch` 模块，订阅路径（记录归属是账号）和 API key 路径（归属是 key 的哈希，
+    不存凭证本身）共用同一份；订阅路径的行为不变（必备的三个 beta 仍不丢）。
+  - 验收：`anthropic_beta_forwarding` 七条（messages 与 count_tokens 转发、没带就不发、渠道配的与客户端的合成一行、形状不对的不转、最多 32 个、拒收后去掉 / 按 key 记 / 别的 key 照带、
+    count_tokens 同样自愈、渠道配的不被丢且别的 400 不重发）；`gateway_messages` 一条端到端（客户端头经网关到 key 渠道，messages 与 count_tokens 各一次）；订阅路径原有的 `anthropic_beta_refusal` 两条不变。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
