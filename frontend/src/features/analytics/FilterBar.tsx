@@ -1,9 +1,9 @@
 import { useNavigate } from '@tanstack/react-router'
-import { Filter, X } from 'lucide-react'
 import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AnalyticsSearch } from '@/features/analytics/route-state'
 import { Button } from '@/components/ui/button'
+import { FilterChip, FilterChips } from '@/components/ui/filter-chip'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { ModelSearchInput } from '@/features/models/model-input'
@@ -19,7 +19,12 @@ import { maskEmails } from '@/lib/mask'
 /// 不摆五个输入框：这页最常见的状态是不过滤看全站，五个空框会把注意力从数据
 /// 拉到表单上。加一个过滤 = 选维度、填值、回车；芯片显示回填的名字
 /// （"用户 alice"而非"用户 #42"），点 × 移除。过滤态即 URL，可分享、可回退。
-export function FilterBar({ search, scope }: { search: AnalyticsSearch; scope?: ScopeEcho }) {
+export function FilterBar({ search, scope, trailing }: {
+  search: AnalyticsSearch
+  scope?: ScopeEcho
+  /// 排在这一行末尾的控件（高级条件的入口）。
+  trailing?: React.ReactNode
+}) {
   const { t } = useTranslation()
   const navigate = useNavigate({ from: '/admin/stats' })
   const [dim, setDim] = useState<FilterDim>('model')
@@ -87,70 +92,61 @@ export function FilterBar({ search, scope }: { search: AnalyticsSearch; scope?: 
   if (search.group !== undefined) chips.push({ dim: 'group', text: search.group })
 
   return (
-    <section aria-label={t('analytics:quickFilters')} className="min-w-0 space-y-2 rounded-xl border border-border bg-card px-3 py-2.5">
-      <form className="flex min-w-0 flex-wrap items-start gap-2" onSubmit={(e) => { e.preventDefault(); add() }}>
-      <Filter aria-hidden className="mt-2.5 hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />
-      <Select
-        aria-label={t('analytics:filterDimension')}
-        value={dim}
-        onChange={(v) => { setDim(v as FilterDim); changeValue('') }}
-        options={FILTER_DIMS.map((d) => ({ value: d, label: dimLabel[d] }))}
-        className="w-24 shrink-0 sm:w-28"
-      />
-      {dim === 'model' ? <ModelSearchInput
-        id={inputId} aria-label={dimLabel[dim]} value={value} onChange={changeValue}
-        placeholder={t('analytics:filterTextPlaceholder')} className="min-w-36 flex-1 sm:max-w-96" onSubmit={add}
-      /> : dim === 'group' ? <Input
-        id={inputId}
-        aria-label={dimLabel[dim]}
-        value={value}
-        placeholder={t('analytics:filterTextPlaceholder')}
-        className="h-9 min-w-36 flex-1 sm:max-w-96"
-        onChange={(e) => changeValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && e.nativeEvent.isComposing) e.preventDefault()
-        }}
-      /> : <EntitySearchInput id={inputId} kind={kinds[dim]} knownOptions={known[kinds[dim]]}
-        aria-label={dimLabel[dim]} value={value} onChange={changeValue} onSubmit={add}
-        onBlur={() => setBlurred(true)} className="min-w-36 flex-1 sm:max-w-96"
-        aria-invalid={showError || undefined} aria-describedby={showError ? `${inputId}-error` : undefined} />}
-      <Button type="submit" size="sm" variant="outline" className="min-h-9 max-sm:w-full" disabled={value.trim() === '' || numericInvalid}>
-        {t('analytics:addFilter')}
-      </Button>
-      </form>
-      {showError && <p id={`${inputId}-error`} role="alert" className="text-xs text-destructive">{t(malformedEntityId(value) ? 'analytics:invalidFilterId' : 'analytics:entitySelectionRequired')}</p>}
-
-      {chips.length > 0 && <div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-border pt-2" aria-label={t('analytics:activeFilters')}>
-      <span className="text-xs text-muted-foreground">{t('analytics:activeFilters')}</span>
-      {chips.map((c) => (
-        <span
-          key={c.dim}
-          className="inline-flex max-w-full items-center gap-1 rounded-full bg-primary/10 py-0.5 pr-1 pl-2.5 text-xs text-primary"
-        >
-          <span className="shrink-0 text-primary/70">{dimLabel[c.dim]}</span>
-          <span className="min-w-0 max-w-64 truncate font-medium" title={c.text}>{c.text}</span>
-          <button
-            type="button"
-            aria-label={t('analytics:removeFilter', { name: c.text })}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full outline-none hover:bg-primary/15 focus-visible:ring-2 focus-visible:ring-primary/40"
-            onClick={() => apply({ [c.dim]: undefined })}
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      ))}
-      {chips.length > 1 && (
-        <button
-          type="button"
-          className="min-h-8 rounded px-2 text-xs text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40"
-          onClick={() =>
-            apply({ user_id: undefined, api_key_id: undefined, channel_id: undefined, model: undefined, group: undefined })
-          }
-        >
-          {t('analytics:clearFilters')}
-        </button>
-      )}
-      </div>}
-    </section>
+    <div data-slot="analytics-filters" className="min-w-0">
+      <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2">
+        <section aria-label={t('analytics:quickFilters')} className="min-w-0 max-w-full flex-1 basis-96 space-y-2">
+          <form className="flex min-w-0 flex-wrap items-start gap-2" onSubmit={(e) => { e.preventDefault(); add() }}>
+            <Select
+              aria-label={t('analytics:filterDimension')}
+              value={dim}
+              onChange={(v) => { setDim(v as FilterDim); changeValue('') }}
+              options={FILTER_DIMS.map((d) => ({ value: d, label: dimLabel[d] }))}
+              className="w-24 shrink-0 sm:w-28"
+            />
+            {dim === 'model' ? <ModelSearchInput
+              id={inputId} aria-label={dimLabel[dim]} value={value} onChange={changeValue}
+              placeholder={t('analytics:filterTextPlaceholder')} className="min-w-36 flex-1 sm:max-w-80" onSubmit={add}
+            /> : dim === 'group' ? <Input
+              id={inputId}
+              aria-label={dimLabel[dim]}
+              value={value}
+              placeholder={t('analytics:filterTextPlaceholder')}
+              className="h-9 min-w-36 flex-1 sm:max-w-80"
+              onChange={(e) => changeValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && e.nativeEvent.isComposing) e.preventDefault()
+              }}
+            /> : <EntitySearchInput id={inputId} kind={kinds[dim]} knownOptions={known[kinds[dim]]}
+              aria-label={dimLabel[dim]} value={value} onChange={changeValue} onSubmit={add}
+              onBlur={() => setBlurred(true)} className="min-w-36 flex-1 sm:max-w-80"
+              aria-invalid={showError || undefined} aria-describedby={showError ? `${inputId}-error` : undefined} />}
+            <Button type="submit" size="sm" variant="outline" className="min-h-9 max-sm:w-full" disabled={value.trim() === '' || numericInvalid}>
+              {t('analytics:addFilter')}
+            </Button>
+          </form>
+          {showError && <p id={`${inputId}-error`} role="alert" className="text-xs text-destructive">{t(malformedEntityId(value) ? 'analytics:invalidFilterId' : 'analytics:entitySelectionRequired')}</p>}
+          {chips.length > 0 && (
+            <FilterChips label={t('analytics:activeFilters')}>
+              {chips.map((c) => (
+                <FilterChip key={c.dim} label={dimLabel[c.dim]} value={c.text}
+                  removeLabel={t('analytics:removeFilter', { name: c.text })} onRemove={() => apply({ [c.dim]: undefined })} />
+              ))}
+              {chips.length > 1 && (
+                <button
+                  type="button"
+                  className="min-h-7 rounded px-2 text-xs text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40"
+                  onClick={() =>
+                    apply({ user_id: undefined, api_key_id: undefined, channel_id: undefined, model: undefined, group: undefined })
+                  }
+                >
+                  {t('analytics:clearFilters')}
+                </button>
+              )}
+            </FilterChips>
+          )}
+        </section>
+        {trailing}
+      </div>
+    </div>
   )
 }

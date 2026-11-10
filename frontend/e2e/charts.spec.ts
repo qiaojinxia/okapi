@@ -5,6 +5,7 @@ import { calendarDays, usageChart } from '../src/features/portal-overview/usage-
 import type { BreakdownResp, BreakdownRow } from '../src/features/portal-overview/types'
 import { trendChart } from '../src/features/analytics/trend-data'
 import type { TrendResp } from '../src/lib/cube'
+import { appliedConditions, openAdvanced } from './analysis-filters'
 
 
 /// 当前窗口的用量查询（带 days）；总览另发一条只带日期的上一期对比查询，不计入「不重复请求」
@@ -190,7 +191,8 @@ test('门户下钻调用明细保留日期和统计时区，排行与模型分�
   await expect(details).toHaveAttribute('href', '/portal/logs?scope=user&start_date=2026-09-01&end_date=2026-09-04&timezone=America%2FLos_Angeles')
   await details.click()
   await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.get('end_date')).toBe('2026-09-04')
-  await expect(page.getByRole('region', { name: '统计时段', exact: true })).toContainText('America/Los_Angeles')
+  await expect(page.getByRole('region', { name: '统计时段', exact: true })).toContainText('2026-09-01 — 2026-09-04')
+  await expect(page.locator('[data-slot="log-window"]')).toContainText('America/Los_Angeles')
   await page.goBack()
   await expect(page).toHaveURL(start)
   const ranking = page.getByRole('region', { name: '模型消费排行' })
@@ -514,10 +516,13 @@ test('质量趋势的指标、比较维度与高级条件可刷新还原；草�
   await page.getByRole('combobox', { name: '对比维度', exact: true }).selectOption('model_group')
   await page.getByText('高级筛选与比较', { exact: true }).click()
   await page.getByLabel('请求端点', { exact: true }).fill('/v1/responses')
+  // 条件在抽屉里编辑：没点应用就关掉，草稿留着；这时切指标，草稿不参与查询
+  await page.keyboard.press('Escape')
   await metrics.getByRole('button', { name: '输出吞吐量', exact: true }).click()
-  await expect(page.getByLabel('请求端点', { exact: true })).toHaveValue('/v1/responses')
   await expect.poll(() => latest().get('metric')).toBe('throughput')
   expect(latest().get('endpoint')).toBeNull()
+  await openAdvanced(page)
+  await expect(page.getByLabel('请求端点', { exact: true })).toHaveValue('/v1/responses')
   await page.getByLabel('模型口径', { exact: true }).selectOption('upstream')
   await page.getByLabel('调用类型', { exact: true }).selectOption('stream')
   await page.getByLabel('比较模型（最多 8 个）').fill('up.a')
@@ -530,8 +535,8 @@ test('质量趋势的指标、比较维度与高级条件可刷新还原；草�
   await page.reload()
   await expect(metrics.getByRole('button', { name: '输出吞吐量', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('combobox', { name: '对比维度', exact: true })).toHaveValue('model_group')
-  await expect(page.locator('summary')).toContainText('/v1/responses')
-  await expect(page.locator('summary')).toContainText('up.a')
+  await expect(appliedConditions(page)).toContainText('/v1/responses')
+  await expect(appliedConditions(page)).toContainText('up.a')
   await page.getByText('高级筛选与比较', { exact: true }).click()
   await expect(page.getByLabel('模型口径', { exact: true })).toHaveValue('upstream')
   await page.getByRole('button', { name: '重置高级条件', exact: true }).click()
@@ -541,6 +546,7 @@ test('质量趋势的指标、比较维度与高级条件可刷新还原；草�
   expect(latest().get('stack')).toBe('model_group')
   await page.goBack()
   await expect.poll(() => latest().get('endpoint')).toBe('/v1/responses')
+  await openAdvanced(page)
   await expect(page.getByLabel('请求端点', { exact: true })).toHaveValue('/v1/responses')
 })
 
@@ -552,7 +558,7 @@ test('质量自定义时段不误亮预设；跨页签明确统计范围并保�
   const period = page.getByRole('group', { name: '统计时段', exact: true })
   await expect(period).toBeVisible()
   await expect(period.locator('[aria-pressed=true]')).toHaveCount(0)
-  await expect(page.locator('summary')).toContainText('2026-09-01 — 2026-09-04')
+  await expect(appliedConditions(page)).toContainText('2026-09-01 — 2026-09-04')
   await page.getByRole('tab', { name: '错误分布', exact: true }).click()
   await expect(page.getByRole('note')).toContainText('近 30 天展示全站数据')
   const request = () => queries.findLast((url) => url.pathname === '/admin/stats/errors')
@@ -564,7 +570,7 @@ test('质量自定义时段不误亮预设；跨页签明确统计范围并保�
   await page.getByRole('link', { name: '返回质量趋势', exact: true }).click()
   await expect(page.getByRole('group', { name: '图表指标', exact: true }).getByRole('button', { name: '首 Token 时延', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('combobox', { name: '对比维度', exact: true })).toHaveValue('channel')
-  await expect(page.locator('summary')).toContainText('gateway-east')
+  await expect(appliedConditions(page)).toContainText('gateway-east')
   await page.getByRole('button', { name: '近 7 天', exact: true }).click()
   const latest = () => queries.findLast((url) => url.pathname === '/admin/stats/trend')!.searchParams
   await expect.poll(() => latest().get('days')).toBe('7')
@@ -572,7 +578,7 @@ test('质量自定义时段不误亮预设；跨页签明确统计范围并保�
   expect(latest().get('start_date')).toBeNull()
   expect(latest().get('end_date')).toBeNull()
   await page.goBack()
-  await expect(page.locator('summary')).toContainText('2026-09-01 — 2026-09-04')
+  await expect(appliedConditions(page)).toContainText('2026-09-01 — 2026-09-04')
   await expect(period.locator('[aria-pressed=true]')).toHaveCount(0)
 })
 
@@ -587,8 +593,8 @@ test('质量地址中的非法指标、比较维度和列表安全回退，false
   for (const key of ['stack', 'models', 'groups']) expect(latest().get(key)).toBeNull()
   await expect(page.getByRole('group', { name: '图表指标', exact: true }).getByRole('button', { name: '错误率', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('combobox', { name: '对比维度', exact: true })).toHaveValue('')
-  await expect(page.locator('summary')).toContainText('调用类型: 非流式')
-  await expect(page.locator('summary')).not.toContainText('false')
+  await expect(appliedConditions(page)).toContainText('调用类型: 非流式')
+  await expect(appliedConditions(page)).not.toContainText('false')
   await page.getByText('高级筛选与比较', { exact: true }).click()
   await expect(page.getByLabel('调用类型', { exact: true })).toHaveValue('non_stream')
 })
@@ -625,7 +631,7 @@ for (const width of [320, 390]) {
     await expect(page.getByRole('note')).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.getByRole('link', { name: width === 390 ? 'Return to quality trend' : '返回质量趋势', exact: true }).click()
-    await expect(page.locator('summary')).toContainText('very-long-model-name-for-trend-analysis')
+    await expect(appliedConditions(page)).toContainText('very-long-model-name-for-trend-analysis')
     await expect(page.locator('.recharts-surface').first()).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     if (width === 390) await page.evaluate(() => document.documentElement.classList.add('dark'))
@@ -693,7 +699,8 @@ test('高级筛选提交后才查询，跨视图与刷新保留，模型分组�
   expect(last.searchParams.get('models')).toBe('["up.a","up.b"]')
   expect(last.searchParams.get('groups')).toBe('["vip"]')
   expect(last.searchParams.get('start_date')).toBe('2026-09-01')
-  await page.getByText('高级筛选与比较', { exact: true }).click()
+  // 应用后抽屉自己收起，页面上的指标 / 对比维度可以直接点
+  await expect(page.getByRole('dialog', { name: '高级筛选与比较', exact: true })).toHaveCount(0)
   await page.getByRole('group', { name: '图表指标' }).getByRole('button', { name: '平均时延', exact: true }).click()
   await page.getByRole('combobox', { name: '对比维度' }).selectOption('model_group')
   await expect(page.getByRole('button', { name: 'up.a · vip' })).toBeVisible()
@@ -702,7 +709,7 @@ test('高级筛选提交后才查询，跨视图与刷新保留，模型分组�
   await page.getByRole('tab', { name: '拆分' }).click()
   await expect.poll(() => queries.findLast((q) => q.pathname === '/admin/stats/breakdown')?.searchParams.get('endpoint')).toBe('/v1/responses')
   await page.reload()
-  await expect(page.locator('summary')).toContainText('2026-09-01 — 2026-09-04')
+  await expect(appliedConditions(page)).toContainText('2026-09-01 — 2026-09-04')
   await page.getByRole('tab', { name: '趋势' }).click()
   await expect(page.locator('.recharts-line').first()).toBeVisible()
   await page.screenshot({ path: 'test-results/advanced-analysis-desktop.png', fullPage: true, animations: 'disabled' })
@@ -765,10 +772,12 @@ test('高级比较的模型候选去重、草稿隔离，手机内滚动保留�
   await expect(page).toHaveURL(/model=old-model/)
   expect(queries.findLast((q) => q.pathname === '/admin/stats/trend')?.searchParams.get('models')).toBeNull()
   await expect(page.getByRole('button', { name: '应用分析条件' })).toBeInViewport({ ratio: 1 })
-  const bounds = await editor.boundingBox()
+  // 条件区在抽屉正文里滚动，底部的操作栏固定：正文不压到按钮上
+  const body = page.getByRole('dialog', { name: '高级筛选与比较', exact: true }).locator('[data-slot="drawer-body"]')
+  const bounds = await body.boundingBox()
   const footer = await page.getByRole('button', { name: '应用分析条件' }).boundingBox()
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(footer!.y)
-  expect(await editor.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+  expect(await body.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/analysis-editor-mobile.png', fullPage: true, animations: 'disabled' })
   await page.getByRole('button', { name: '应用分析条件' }).click()

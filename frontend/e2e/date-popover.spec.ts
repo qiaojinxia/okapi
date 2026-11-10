@@ -3,6 +3,7 @@ import type { Locator, Page } from '@playwright/test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { appliedConditions, openAdvanced } from './analysis-filters'
 
 // 固定“现在”：月历里的“今天”、可选的最晚一天才稳定（时区一律按 UTC）。
 const NOW = new Date('2026-09-15T12:00:00Z')
@@ -270,7 +271,10 @@ test('分析页的起止日期是弹出框字段：确定只写进草稿，不�
   await page.getByRole('button', { name: '应用分析条件' }).click()
   await expect(page).toHaveURL(/granularity=hour/)
   await expect(page).toHaveURL(/start_date=2026-09-03&end_date=2026-09-09/)
+  // 应用后抽屉收起，生效的日期显示成入口旁的标签
+  await expect(appliedConditions(page)).toContainText('2026-09-03 — 2026-09-09')
   // 重新打开有「清空」：清掉后两端都空，只写进草稿，仍要应用才生效
+  await openAdvanced(page)
   await field.click()
   await panel.getByRole('button', { name: '清空', exact: true }).click()
   await expect(panel).toHaveCount(0)

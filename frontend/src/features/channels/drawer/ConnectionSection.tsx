@@ -8,28 +8,27 @@ import { OptionalSection } from '@/components/ui/optional-section'
 import { OAuthLoginCard } from '@/features/channels/OAuthLoginCard'
 import { ClientProfileEditor } from '@/features/channels/ClientProfileEditor'
 import { ChannelEgress, NewChannelEgress } from '@/features/channels/ChannelEgress'
-import { PROVIDERS, apiBasePlaceholder, channelSettingsForSave, needsVersionSegment } from '@/features/channels/types'
+import { PROVIDERS, apiBasePlaceholder, needsVersionSegment } from '@/features/channels/types'
 import { Select } from '@/components/ui/select'
 import { Tabs } from '@/components/ui/tabs'
 import type { ChannelForm } from './use-channel-form'
 import { CredentialStatus } from './key-panels'
 
-const PROVIDER_LABELS: Record<string, string> = {
+export const PROVIDER_LABELS: Record<string, string> = {
   anthropic_max: 'admin:providerClaudeSubscription',
   codex: 'admin:providerCodexSubscription',
 }
 
 /// 「接入信息」：名称、协议、地址、凭证 / 订阅登录、出口。
-export function ConnectionSection({ f, channel, rotate, onDone, onClose }: {
+export function ConnectionSection({ f, channel, rotate, onDone }: {
   f: ChannelForm
   channel: ChannelRow | undefined
   rotate: { isPending: boolean; mutate: () => void }
   onDone: () => void
-  onClose: () => void
 }) {
   const { t } = useTranslation()
   const isEdit = channel !== undefined
-  const { canManagePools, form, setForm, account, authorization, accountReady, costMilli, models, credential, setCredential, oauthInput, setOauthInput, rotationKeyId, setRotationKeyId, settings, setSettings, controlValid, concurrency, concurrencyValid, priority, newPools, newEgress, setNewEgress, egressBinding, oauth, importToken, defaultBase, endpointRequired, endpointValid } = f
+  const { form, setForm, account, authorization, accountReady, models, credential, setCredential, oauthInput, setOauthInput, rotationKeyId, setRotationKeyId, settings, setSettings, controlValid, concurrencyValid, newEgress, setNewEgress, oauth, importToken, defaultBase, endpointRequired } = f
   const baseField = <div className="flex flex-col gap-1.5">
     <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
     <Input id="d-base" value={form.api_base} placeholder={defaultBase ?? apiBasePlaceholder(form.provider)} required={endpointRequired}
@@ -147,8 +146,11 @@ export function ConnectionSection({ f, channel, rotate, onDone, onClose }: {
         </div>
       )}
       {oauth && !importToken ? (
-        <FieldGroup title={t('admin:oauthLoginTitle')} hint={t('admin:oauthLoginHint')}>
-          {isEdit && channel.keys.length > 1 && <div>
+        // 新建时登录授权是引导的最后一步（ChannelDrawer）：这一步没有凭证可填，说清楚登录放在后面，免得以为漏了什么。
+        // 这里只管已有渠道的重新授权
+        !isEdit ? <FieldGroup title={t('admin:oauthLoginTitle')} hint={t('admin:channelAuthLastStep')}>{null}</FieldGroup>
+        : <FieldGroup title={t('admin:oauthLoginTitle')} hint={t('admin:oauthLoginHint')}>
+          {channel.keys.length > 1 && <div>
             <Label htmlFor="d-reauthorization-key">{t('admin:oauthTokenTarget')}</Label>
             <Select id="d-reauthorization-key" value={rotationKeyId === undefined ? '' : String(rotationKeyId)}
               placeholder={t('admin:oauthTokenTarget')} onChange={(value) => setRotationKeyId(Number(value))}
@@ -158,20 +160,10 @@ export function ConnectionSection({ f, channel, rotate, onDone, onClose }: {
             provider={form.provider}
             name={form.name}
             models={models}
-            settings={channelSettingsForSave(settings)}
-            valid={controlValid && concurrencyValid && (isEdit ? rotationKeyId !== undefined
-              : endpointValid && costMilli !== null && priority !== null && egressBinding !== null)}
-            creationOptions={!isEdit ? { api_base: form.api_base, priority: priority ?? 0,
-              pools: canManagePools ? newPools : undefined, cost_milli: costMilli ?? undefined,
-              ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}) }
-              : undefined}
-            maxConcurrency={concurrency ?? undefined}
-            channelId={channel?.id}
-            channelKeyId={isEdit ? rotationKeyId : undefined}
-            onDone={() => {
-              onDone()
-              if (!isEdit) onClose()
-            }}
+            valid={controlValid && concurrencyValid && rotationKeyId !== undefined}
+            channelId={channel.id}
+            channelKeyId={rotationKeyId}
+            onDone={onDone}
           />
         </FieldGroup>
       ) : (

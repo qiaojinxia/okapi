@@ -12,7 +12,6 @@ import { toast } from '@/components/ui/toast'
 import { GenerateDrawer } from '@/features/codes/GenerateDrawer'
 import { CODE_STATUS, CODE_STATUS_FILTERS } from '@/features/codes/types'
 import { IconButton } from '@/components/ui/icon-button'
-import { Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { Select } from '@/components/ui/select'
@@ -89,6 +88,7 @@ export function RedemptionsPage() {
         className="shrink-0"
         title={t('admin:codeListTitle')}
         description={t('admin:codesDesc')}
+        meta={codes.data && t('common:totalCount', { n: codes.data.total })}
         action={
           canCreate && (
             <Button onClick={() => setDrawer(true)}>
@@ -102,26 +102,19 @@ export function RedemptionsPage() {
       <Toolbar
         className="shrink-0"
         filters={
-          <div className="flex items-center gap-2">
-            <Label htmlFor="cstatus">{t('common:status')}</Label>
             <Select
               id="cstatus"
-              className="w-36"
+              className="w-40"
+              aria-label={t('common:status')}
               value={status}
               onChange={setStatus}
-              placeholder={t('admin:codeAll')}
+              placeholder={t('admin:codeAllStatus')}
               options={[
                 { value: '1', label: t('admin:codeUnused') },
                 { value: '2', label: t('admin:codeUsed') },
                 { value: '3', label: t('common:disabled') },
               ]}
             />
-          </div>
-        }
-        selection={
-          <Badge variant="muted" className="tabular-nums">
-            {t('common:totalCount', { n: codes.data?.total ?? 0 })}
-          </Badge>
         }
       />
       {dialog}

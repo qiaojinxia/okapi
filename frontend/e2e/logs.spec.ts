@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { portalLogSearch } from '../src/features/logs/search'
 import { billingLines, cacheRead, cacheReadShare, cacheWrite, netAmount } from '../src/features/logs/types'
 import { formatOutputRate, outputRates } from '../src/features/logs/performance'
+import { openMoreFilters } from './log-filters'
 
 const models = [
   { model: 'gpt-alpha', model_name: 'gpt-alpha', display_name: '通用助手', vendor: 'OpenAI' },
@@ -978,7 +979,9 @@ test('门户日志日期：应用、清除、刷新和后退保留其他条件�
   await expect(period).toContainText('2024-11-01 — 2024-11-03')
   await page.getByRole('switch', { name: '只看失败' }).click()
   await page.getByRole('button', { name: '清除日期', exact: true }).click()
-  await expect(period).toContainText('近 30 天')
+  // 缺省窗口与时区的说明跟在页头标题后面（不再占筛选区一行）
+  await expect(page.locator('[data-slot="log-window"]')).toContainText('近 30 天')
+  await expect(period).not.toContainText('2024-11-01')
   await expect(page).toHaveURL('/portal/logs?scope=user&model=gpt-alpha&errors_only=true')
   await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.has('start_date')).toBe(false)
   await page.goBack()
@@ -1056,18 +1059,31 @@ for (const width of [390, 1024, 1440, 1920]) {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.setViewportSize({ width, height: 1000 })
     await page.goto('/admin/logs')
+    // 检索条本身只有一行控件高：更多筛选是浮层，打开也不把表格往下推
+    const bar = page.locator('[data-slot="admin-log-filters"]')
+    const barHeight = (await bar.boundingBox())!.height
     await page.getByText('更多筛选', { exact: true }).click()
-    await page.getByText('自定义时间', { exact: true }).click()
-    const entityBoxes = await Promise.all(['user_id', 'api_key_id', 'channel_id'].map(async (name) => (await page.locator(`#lf-${name}`).boundingBox())!))
+    const advanced = page.getByRole('dialog', { name: '更多筛选', exact: true })
+    await expect(advanced).toBeVisible()
+    await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)))
+    expect((await bar.boundingBox())!.height).toBe(barHeight)
+    expect(await advanced.evaluate((el) => { const box = el.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth && box.bottom <= innerHeight })).toBe(true)
+    const entityBoxes = await page.evaluate(() => ['user_id', 'api_key_id', 'channel_id'].map((name) => { const box = document.getElementById(`lf-${name}`)!.getBoundingClientRect(); return { width: box.width, height: box.height, y: box.y } }))
     if (width >= 1024) {
       for (const box of entityBoxes) { expect(box.width).toBeLessThanOrEqual(320); expect(box.height).toBe(36) }
       expect(Math.max(...entityBoxes.map((b) => b.y)) - Math.min(...entityBoxes.map((b) => b.y))).toBeLessThanOrEqual(1)
       expect((await page.locator('#lf-model').boundingBox())!.width).toBeLessThanOrEqual(384)
-      const error = (await page.locator('#lf-error_code').boundingBox())!, request = (await page.locator('#lf-request_id').boundingBox())!
+      const [error, request] = await page.evaluate(() => ['lf-error_code', 'lf-request_id'].map((id) => { const box = document.getElementById(id)!.getBoundingClientRect(); return { width: box.width, y: box.y } }))
       expect(error.width).toBeLessThanOrEqual(320)
       expect(request.width).toBeGreaterThanOrEqual(error.width)
       expect(request.width).toBeLessThanOrEqual(512)
       expect(Math.abs(error.y - request.y)).toBeLessThanOrEqual(1)
+    }
+    await page.screenshot({ path: `test-results/admin-log-more-filters-${width}.png`, fullPage: true, animations: 'disabled' })
+    // 点别处（自定义时间）收起更多筛选，两个浮层不叠着
+    await page.getByText('自定义时间', { exact: true }).click()
+    await expect(advanced).toBeHidden()
+    if (width >= 1024) {
       // 浮层刚弹出时有一帧入场动画：两个输入框在同一次求值里一起量，别分两次异步去取
       const [from, to] = await page.evaluate(() => ['logs-from', 'logs-to'].map((id) => { const box = document.getElementById(id)!.getBoundingClientRect(); return { width: box.width, y: box.y } }))
       expect(from.width).toBeLessThanOrEqual(320)
@@ -1113,8 +1129,19 @@ test('管理日志：高级筛选按需展开，候选只填草稿，无效ID不
   await expect(page).toHaveURL(/model=claude-beta/)
   await expect(page).toHaveURL(/user_id=42/)
   await page.reload()
-  await expect(page.locator('#lf-user_id')).toBeVisible()
+  // 带着高级条件进来：不自动弹开浮层，生效的条件显示成标签；点开浮层能看到回填的值
+  await expect(page.locator('#lf-user_id')).toBeHidden()
+  const chip = page.getByRole('group', { name: '当前筛选', exact: true }).locator('[data-slot="filter-chip"]')
+  await expect(chip).toHaveCount(1)
+  await expect(chip).toContainText('用户')
+  await openMoreFilters(page)
   await expect(page.locator('#lf-user_id')).toHaveValue('42')
+  // 点标签上的 × 立即去掉这一条（不用再点搜索）
+  await page.keyboard.press('Escape')
+  await chip.getByRole('button').click()
+  await expect(page).not.toHaveURL(/user_id=/)
+  await expect(page).toHaveURL(/model=claude-beta/)
+  await expect(chip).toHaveCount(0)
 })
 
 test('日志展开显示调用对象和密钥前缀，CSV 附带名称且保留原有列顺序', async ({ page }) => {
@@ -1140,7 +1167,9 @@ test('旧日志未返回密钥名称时明确降级，不把未知对象显示�
   await prepare(page)
   await page.route('**/admin/logs?*', (route) => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [{ ...log, key_name: undefined, key_prefix: undefined, username: '', channel_name: '', channel_id: 0 }] } }))
   await page.goto('/admin/logs?api_key_id=1')
+  await openMoreFilters(page)
   await expect(page.locator('#lf-api_key_id')).toHaveValue('1')
+  await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '展开 req-20 的明细', exact: true }).click()
   const identities = page.getByLabel('调用对象', { exact: true })
   await expect(identities.getByText('名称不可用', { exact: true })).toHaveCount(2)
@@ -1382,6 +1411,10 @@ for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
 test('新增高级筛选：URL和后端查询保留分组、客户端、日志类型及上游ID', async ({ page }) => {
   const queries = await prepare(page)
   await page.goto('/admin/logs?group=vip&client_type=codex&log_type=5&upstream_request_id=upstream-123')
+  // 地址里带来的高级条件：浮层不自动弹开，四条都显示成标签；点开浮层是回填好的
+  await expect(page.getByRole('group', { name: '当前筛选', exact: true }).locator('[data-slot="filter-chip"]'))
+    .toHaveText(['上游请求 IDupstream-123', '分组vip', '客户端类型codex', '日志类型错误'])
+  await openMoreFilters(page)
   await expect(page.getByLabel('分组', { exact: true })).toHaveValue('vip')
   await expect(page.getByLabel('客户端类型', { exact: true })).toHaveValue('codex')
   await expect(page.getByLabel('上游请求 ID', { exact: true })).toHaveValue('upstream-123')
@@ -1389,5 +1422,6 @@ test('新增高级筛选：URL和后端查询保留分组、客户端、日志�
     && url.searchParams.get('group') === 'vip' && url.searchParams.get('client_type') === 'codex'
     && url.searchParams.get('log_type') === '5' && url.searchParams.get('upstream_request_id') === 'upstream-123')).toBe(true)
   await page.reload()
+  await openMoreFilters(page)
   await expect(page.getByLabel('分组', { exact: true })).toHaveValue('vip')
 })

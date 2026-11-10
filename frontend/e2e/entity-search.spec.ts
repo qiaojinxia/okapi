@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { openMoreFilters } from './log-filters'
 
 const users = [{ id: 7, username: 'alice', email: 'alice@example.test' }, { id: 42, username: 'bob', email: 'bob@example.test' }]
 const keys = [{ id: 10, name: 'production', user_id: 7, username: 'alice', key_prefix: 'sk-alice' }, { id: 20, name: 'production', user_id: 42, username: 'bob', key_prefix: 'sk-bob' }]
@@ -153,16 +154,24 @@ test('日志三类候选按名称选择，查询时回首页，刷新复用日�
   await expect(page).toHaveURL(/channel_id=9/)
   await expect(page).not.toHaveURL(/page=/)
   await page.reload()
+  // 生效的条件在检索条下面显示成标签（用回填的名字），浮层收着也看得见
+  const chips = page.getByRole('group', { name: '当前筛选', exact: true })
+  await expect(chips.locator('[data-slot="filter-chip"]')).toHaveText(['用户bob', '密钥production', '渠道OpenAI Primary'])
+  await expect(user).toBeHidden()
+  await openMoreFilters(page)
   await expect(user).toHaveValue('bob')
   await expect(channel).toHaveValue('OpenAI Primary')
   await expect(key).toHaveValue('production')
   await page.getByRole('button', { name: '清空筛选', exact: true }).click()
   const before = requests.filter((url) => url.pathname === '/admin/logs').length
+  await openMoreFilters(page)
   await expect(user).toHaveValue('')
   expect(requests.filter((url) => url.pathname === '/admin/logs')).toHaveLength(before)
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await expect(page).not.toHaveURL(/user_id=/)
+  await expect(chips).toHaveCount(0)
   await page.goBack()
+  await openMoreFilters(page)
   await expect(user).toHaveValue('bob')
   await expect(channel).toHaveValue('OpenAI Primary')
   await expect(key).toHaveValue('production')
@@ -185,6 +194,7 @@ test('空日志仍回填全部筛选名称；刷新不查目录，错误对象�
   for (const refresh of [false, true]) {
     if (refresh) await page.reload()
     await expect(page.getByText('当前窗口与过滤条件下没有日志。放宽时间窗或清空过滤再试。')).toBeVisible()
+    await openMoreFilters(page)
     await expect(user).toHaveValue('bob')
     await expect(key).toHaveValue('production')
     await expect(channel).toHaveValue('OpenAI Primary')
@@ -194,10 +204,14 @@ test('空日志仍回填全部筛选名称；刷新不查目录，错误对象�
     user: { id: 42, username: '' }, api_key: { id: 20, name: '', key_prefix: 'sk-bob' }, channel: { id: 9, name: '' },
   } } }))
   await page.reload()
+  await openMoreFilters(page)
   await expect(user).toHaveValue('未命名用户')
   await expect(key).toHaveValue('未命名密钥')
   await expect(channel).toHaveValue('未命名渠道')
   await page.goto('/admin/logs?user_id=999&api_key_id=999&channel_id=999')
+  // 查不到名字的对象，标签退回 #id
+  await expect(page.getByRole('group', { name: '当前筛选', exact: true }).locator('[data-slot="filter-chip"]')).toHaveText(['用户#999', '密钥#999', '渠道#999'])
+  await openMoreFilters(page)
   await expect(user).toHaveValue('999')
   await expect(key).toHaveValue('999')
   await expect(channel).toHaveValue('999')

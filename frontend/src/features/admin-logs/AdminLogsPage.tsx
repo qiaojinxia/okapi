@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next'
 import { Download, RotateCw } from 'lucide-react'
 import type { LogSearch } from '@/routes/admin.logs'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page'
 import type { EntityKind, EntityOption } from '@/features/entity-search/EntitySearchInput'
 import { DEFAULT_PAGE_SIZE, PAGE_SIZES, usePagination } from '@/hooks/use-pagination'
@@ -81,17 +80,13 @@ export function AdminLogsPage() {
           </Button>
         </>}
       />
-      <Card aria-label={t('logs:filters')} data-slot="admin-log-filters" className="shrink-0 rounded-xl px-2 py-1">
-        <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} known={known} />
-        <div className="flex min-w-0 flex-wrap items-start gap-2 border-t border-border/60 pt-2">
-          <RangePicker
-            draft={draft}
-            onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
-            onRange={(from, to) => setDraft({ ...draft, from, to })}
-            onApplyRange={() => commit(draft)}
-          />
-        </div>
-      </Card>
+      <FilterBar draft={draft} applied={applied} onChange={setDraft} onApply={() => commit(draft)} onCommit={commit} known={known}
+        range={<RangePicker
+          draft={draft}
+          onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
+          onRange={(from, to) => setDraft({ ...draft, from, to })}
+          onApplyRange={() => commit(draft)}
+        />} />
       <StatBar applied={applied} />
       <LogTable applied={applied} pager={pager} q={logs} />
     </div>

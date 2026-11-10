@@ -16,7 +16,7 @@ test('分析窗口带进日志页：不超过后端上限用 hours，更长的�
 })
 
 test('LOG_MAX_HOURS 与后端 hours 钳位同值', () => {
-  const rust = readFileSync(fileURLToPath(new URL('../../bins/okapi/src/console/logs.rs', import.meta.url)), 'utf8')
+  const rust = readFileSync(fileURLToPath(new URL('../../crates/okapi-console/src/logs.rs', import.meta.url)), 'utf8')
   const clamp = /fn hours\(&self\)[^}]*clamp\(1,\s*(\d+)\)/.exec(rust)
   expect(Number(clamp?.[1])).toBe(LOG_MAX_HOURS)
 })

@@ -29,6 +29,8 @@ export default {
     tagsPending: '待添加 {{count}} 项',
     tagKeyboardHint: '标签清单：左右键浏览，Delete 删除，Esc 返回输入',
     create: '新建',
+    next: '下一步',
+    back: '上一步',
     save: '保存',
     edit: '编辑',
     confirmTypeHint: '请输入 {{text}} 以确认',

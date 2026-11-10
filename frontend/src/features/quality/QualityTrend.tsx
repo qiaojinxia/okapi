@@ -21,8 +21,10 @@ export function QualityTrend({ search, onChange }: { search: QualitySearch; onCh
   const params = cubeParams(search, { stack: search.stack, metric })
   const query = useQuery({ queryKey: qk.statsTrend(params), queryFn: () => apiFetch<TrendResp>(`/admin/stats/trend?${params}`), retry: false })
   return <Card className="min-w-0 rounded-xl"><CardContent className="space-y-3 px-4 py-3"><div className="flex min-w-0 flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">{t('charts:qualityTrend')}</h2><Segmented ariaLabel={t('charts:metric')} value={metric} onChange={(measure) => onChange({ ...search, measure })} options={QUALITY_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))} /></div>
-    <AnalysisControls value={search} onApply={(next) => onChange({ ...search, ...advancedSearch({ ...next }) })} today={query.data?.window?.today} />
-    <label className="flex min-w-0 max-w-sm items-center gap-2 text-sm"><span className="shrink-0">{t('analysis:compare')}</span><select className={selectClass} value={search.stack ?? ''} onChange={(e) => onChange({ ...search, stack: e.target.value as QualitySearch['stack'] || undefined })}>{['', ...QUALITY_COMPARISONS].map((value) => <option key={value} value={value}>{value ? dimensionLabel(t, value) : t('analytics:stackNone')}</option>)}</select></label>
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+      <label className="flex min-w-0 max-w-xs items-center gap-2 text-sm"><span className="shrink-0 text-muted-foreground">{t('analysis:compare')}</span><select className={selectClass} value={search.stack ?? ''} onChange={(e) => onChange({ ...search, stack: e.target.value as QualitySearch['stack'] || undefined })}>{['', ...QUALITY_COMPARISONS].map((value) => <option key={value} value={value}>{value ? dimensionLabel(t, value) : t('analytics:stackNone')}</option>)}</select></label>
+      <AnalysisControls className="flex-1 basis-64" value={search} onApply={(next) => onChange({ ...search, ...advancedSearch({ ...next }) })} today={query.data?.window?.today} />
+    </div>
     <FreshnessNotice value={query.isError ? undefined : query.data?.window?.freshness} />
     {query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.data?.data.length ? <TrendPlot key={params} resp={query.data} metric={metric} paginateTable /> : <EmptyState hint={t('admin:trendEmptyHint')} />}
   </CardContent></Card>

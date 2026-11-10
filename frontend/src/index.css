@@ -414,39 +414,44 @@ select:not(.appearance-none, [multiple], [size]) {
   background-size: 32px 32px;
 }
 
-/* 渠道编辑抽屉：沿用渠道列表的轻量分区与语义层级。只装饰顶层段落，
+/* 抽屉表单的分区：每段一张浅底小卡，段标题用正文色。所有抽屉共用一套——此前只有渠道抽屉是卡片分区，
+   其余抽屉是细线分隔 + 灰色小标题，同一个站里两种表单长相。
+   只装饰顶层段落（抽屉正文的直接子元素，或 .form-sections / .channel-editor 容器的直接子元素），
    嵌套的 key / 模型选择器仍保留自己的密度，不会出现层层套卡。 */
-.channel-editor {
+.channel-editor,
+.form-sections {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 1rem;
 }
-.channel-editor > [data-slot="field-group"],
-.channel-editor > [data-slot="optional-section"],
-.channel-editor > [data-slot="channel-key-schedule"] {
+:is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > :is([data-slot="field-group"], [data-slot="optional-section"], [data-slot="channel-key-schedule"]) {
   border: 1px solid color-mix(in oklch, var(--border) 78%, transparent);
   border-radius: 0.875rem;
   background: color-mix(in oklch, var(--muted) 34%, transparent);
   padding: 1rem;
   box-shadow: 0 1px 2px oklch(0 0 0 / 0.025);
 }
-.channel-editor > [data-slot="field-group"] [data-slot="field-group-title"],
-.channel-editor > [data-slot="channel-key-schedule"] [data-slot="field-group-title"] {
+/* 抽屉正文不是 flex 容器（里面常混着说明文字、确认框），段与段之间用外边距拉开 */
+[data-slot="drawer-body"] > :is([data-slot="field-group"], [data-slot="optional-section"]) + *,
+[data-slot="drawer-body"] > * + :is([data-slot="field-group"], [data-slot="optional-section"]) {
+  margin-top: 1rem;
+}
+:is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > :is([data-slot="field-group"], [data-slot="channel-key-schedule"]) [data-slot="field-group-title"] {
   color: var(--fg);
   font-size: 0.8125rem;
   font-weight: 600;
   letter-spacing: normal;
   text-transform: none;
 }
-.channel-editor > [data-slot="optional-section"] [data-slot="optional-section-title"] {
+:is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > [data-slot="optional-section"] [data-slot="optional-section-title"] {
   color: var(--fg);
   font-size: 0.8125rem;
   font-weight: 600;
 }
-.channel-editor > [data-slot="optional-section"] > details > summary {
+:is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > [data-slot="optional-section"] > details > summary {
   border-radius: 0.5rem;
 }
-.channel-editor > [data-slot="optional-section"] > details > summary:hover [data-slot="optional-section-title"] {
+:is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > [data-slot="optional-section"] > details > summary:hover [data-slot="optional-section-title"] {
   color: var(--primary);
 }

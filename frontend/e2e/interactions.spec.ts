@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { buildActivity } from '../src/features/profile/activity'
 import type { ActivityResponse } from '../src/features/profile/activity'
 import { pickDay } from './calendar'
+import { toModelsStep } from './channel-steps'
 
 function profileData(year = 2026, scope: 'key' | 'user' = 'key'): ActivityResponse {
   const row = (day: string, n = 1) => ({ day, model: 'gpt-5', requests: 2 * n,
@@ -911,6 +912,7 @@ test('已有模型可搜索、联想和勾选，筛选保留已选项，中文�
   await expect(page.getByRole('listbox').getByRole('option')).toContainText('gpt-demo')
   await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).last().click()
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
+  await toModelsStep(page.getByRole('dialog'))
   const search = page.getByRole('searchbox', { name: '从已配定价的模型中选择' })
   await search.fill('openai')
   await page.getByRole('checkbox', { name: 'gpt-demo', exact: true }).check()
@@ -929,7 +931,7 @@ test('已有模型可搜索、联想和勾选，筛选保留已选项，中文�
   await expect(manual).toHaveValue('')
   await expect(page.getByRole('dialog')).toContainText('custom-a')
   await expect(page.getByRole('dialog')).toContainText('custom-b')
-  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
   const queries: string[] = []
   await page.route('**/admin/models?*', (route) => {
     queries.push(new URL(route.request().url()).search)

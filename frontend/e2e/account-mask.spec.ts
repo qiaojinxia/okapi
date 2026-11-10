@@ -7,6 +7,7 @@ import { flowIdentity } from '../src/features/analytics/flow-labels'
 import { trendChart } from '../src/features/analytics/trend-data'
 import type { FlowNode, TrendResp } from '../src/lib/cube'
 import { maskAccount, maskChannelName, maskEmails } from '../src/lib/mask'
+import { openMoreFilters } from './log-filters'
 
 // 订阅账号（OAuth 登录的邮箱）展示时遮住中间部分，渠道名只有被识别为账号名才遮，其余原样。
 
@@ -113,6 +114,9 @@ test('管理端日志：渠道列与展开明细里邮箱形的渠道名遮住�
 test('管理端日志的渠道筛选：已选渠道回填到输入框与提示句里的名字也是遮过的', async ({ page }) => {
   await prepare(page)
   await page.goto('/admin/logs?channel_id=1')
+  // 生效条件的标签、「更多筛选」浮层里回填的输入框与提示句，三处都是遮过的
+  await expect(page.getByRole('group', { name: '当前筛选', exact: true }).locator('[data-slot="filter-chip"]')).toHaveText('渠道gr***er@gmail.com')
+  await openMoreFilters(page)
   await expect(page.getByText('已选择 gr***er@gmail.com · ID 1', { exact: true })).toBeVisible()
   expect(await page.locator('body').innerText()).not.toContain('grace.hopper@gmail.com')
   expect(await page.locator('input').evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value).join('|'))).not.toContain('grace.hopper@gmail.com')

@@ -9,7 +9,6 @@ import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
-import { Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
 import { ListState } from '@/components/ui/list-state'
@@ -141,22 +140,19 @@ export function AdminKeysPage() {
         selection={keys.isFetching ? <span role="status" className="text-xs text-muted-foreground">{t('common:loading')}</span> : undefined}
         filters={
           <form className="grid w-full min-w-0 items-start gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,20rem)_minmax(0,20rem)_auto]" onSubmit={(event) => { event.preventDefault(); applySearch() }}>
+            <SearchInput
+              id="kq"
+              className="w-full"
+              aria-label={t('admin:keySearch')}
+              value={draft}
+              placeholder={t('admin:keySearchHint')}
+              onChange={setDraft}
+              onSubmit={applySearch}
+            />
             <div className="flex min-w-0 flex-col gap-1">
-              <Label htmlFor="kq" className="leading-4">{t('admin:keySearch')}</Label>
-              <SearchInput
-                id="kq"
-                className="w-full"
-                aria-label={t('admin:keySearch')}
-                value={draft}
-                placeholder={t('admin:keySearchHint')}
-                onChange={setDraft}
-                onSubmit={applySearch}
-              />
-            </div>
-            <div className="flex min-w-0 flex-col gap-1">
-              <Label htmlFor="kuid" className="leading-4">{t('admin:userFilterLabel')}</Label>
               <UserSearchInput
                 id="kuid"
+                aria-label={t('admin:userFilterLabel')}
                 value={userIdDraft}
                 knownUsers={rows.map((key) => ({ id: key.user_id, username: key.username }))}
                 onChange={(value) => { setUserIdDraft(value); setFilterError(false) }}
@@ -166,7 +162,7 @@ export function AdminKeysPage() {
               />
               {invalidUser && <p id="kuid-error" role="alert" className="text-xs text-destructive">{t('admin:userFilterInvalid')}</p>}
             </div>
-            <div className="flex flex-wrap gap-2 lg:pt-5">
+            <div className="flex flex-wrap gap-2">
               <Button type="submit" size="sm" variant="outline">{t('common:search')}</Button>
               {(query !== '' || uid !== null || draft !== '' || userIdDraft !== '') && <Button size="sm" variant="ghost" onClick={clearFilters}>{t('common:clearFilters')}</Button>}
             </div>

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { toModelsStep } from './channel-steps'
 
 // 写操作表单回归（接口桩，不碰数据库）：渠道抽屉的注入字段 / 出站代理 / 额外请求头、
 // 门户安全页的会话吊销卡、找回与重置密码页。断言的重点是提交给后端的请求体形状——
@@ -1886,14 +1887,19 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await page.keyboard.press('Escape')
   await expect(drawer).toBeHidden()
 
-  // 新建：三件必答事（名 / 凭证 / 模型）齐了才放行，池成员随建渠道一起提交，缺省进 default
+  // 新建是分步引导：三件必答事（名 / 凭证 / 模型）按步骤放行，池成员随建渠道一起提交，缺省进 default
   await page.getByRole('button', { name: '新建渠道' }).first().click()
   const create = await openedDialog(page)
+  const next = create.getByRole('button', { name: '下一步', exact: true })
   const submit = create.getByRole('button', { name: '新建', exact: true })
+  // API key 渠道只有两步；「新建」在最后一步才出现
+  await expect(create.getByRole('navigation', { name: '新建渠道的步骤' }).getByRole('button')).toHaveText(['1接入', '2模型与调度'])
+  await expect(submit).toHaveCount(0)
   await create.locator('#d-name').fill('anthropic-eu')
   await create.locator('#d-provider').selectOption('anthropic')
-  await expect(submit).toBeDisabled()
+  await expect(next).toBeDisabled()
   await create.locator('#d-cred').fill('sk-ant-1')
+  await next.click()
   await expect(submit).toBeDisabled()
   const manual = create.locator('#d-models')
   await manual.fill('claude-sonnet-4')
@@ -1921,6 +1927,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await page.reload()
   await page.getByRole('button', { name: '新建渠道' }).first().click()
   const emptyPicker = await openedDialog(page)
+  await toModelsStep(emptyPicker)
   await expect(emptyPicker.getByText('尚无模型，请先在定价页配置。')).toBeVisible()
   await page.keyboard.press('Escape')
 
@@ -1932,10 +1939,9 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await page.reload()
   await page.getByRole('button', { name: '新建渠道' }).first().click()
   const picker = await openedDialog(page)
+  await toModelsStep(picker, { name: 'fail-ch', credential: 'sk-fail' })
   await expect(picker.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
 
-  await picker.locator('#d-name').fill('fail-ch')
-  await picker.locator('#d-cred').fill('sk-fail')
   await picker.locator('#d-models').fill('gpt-5')
   await picker.locator('#d-models').press('Enter')
   await page.route('**/admin/channels', (route) => {

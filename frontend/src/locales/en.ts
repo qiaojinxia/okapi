@@ -29,6 +29,8 @@ export default {
     tagsPending: '{{count}} pending',
     tagKeyboardHint: 'Tags: use arrow keys to browse, Delete to remove, Escape to return to the input',
     create: 'Create',
+    next: 'Next',
+    back: 'Back',
     save: 'Save',
     edit: 'Edit',
     confirmTypeHint: 'Type {{text}} to confirm',

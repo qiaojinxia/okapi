@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { nextStep } from './channel-steps'
 
 const providerMetadata = { data: [
   { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
@@ -124,7 +125,7 @@ test('失效 OAuth key 重新授权绑定原 key，不提供追加账号或直�
   })
   await drawer.getByRole('button', { name: '重新授权', exact: true }).click()
   await drawer.getByRole('button', { name: '打开登录页', exact: true }).last().click()
-  await drawer.getByLabel('把浏览器里的 code 贴回来').fill('new-code')
+  await drawer.getByLabel('把浏览器里的 code 贴回来').last().fill('new-code')
   await drawer.getByRole('button', { name: '换取凭证并更新此 key', exact: true }).click()
   await expect.poll(() => calls).toEqual([
     { provider: 'codex', channel_id: 42, channel_key_id: 7 },
@@ -195,6 +196,9 @@ test('直接导入 Claude token 并选择模拟请求风格，通过通用建渠
   await expect(drawer.getByLabel('请求风格', { exact: true })).toHaveValue('mimic')
   await expect(drawer.getByLabel('客户端版本', { exact: true })).toHaveValue('2.1.290')
   await drawer.getByLabel('客户端入口', { exact: true }).selectOption('sdk-cli')
+  // 导入 Token 不走登录授权：引导只有两步，最后一步的主按钮是「新建」
+  await expect(drawer.getByRole('navigation', { name: '新建渠道的步骤' }).getByRole('button')).toHaveCount(2)
+  await nextStep(drawer)
   await drawer.locator('#d-models').fill('claude-fixture')
   await drawer.locator('#d-models').press('Enter')
   await drawer.getByRole('button', { name: '新建', exact: true }).click()

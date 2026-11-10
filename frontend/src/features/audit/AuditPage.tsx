@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
-import { Input, Label } from '@/components/ui/input'
+import { Input } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { RowExpander } from '@/components/ui/row-expander'
 import { Segmented } from '@/components/ui/segmented'
@@ -151,76 +151,62 @@ export function AuditPage() {
 
   return (
     <div className="list-page">
-      <PageHeader title={t('admin:auditTitle')} description={t('admin:auditDesc')} />
+      <PageHeader title={t('admin:auditTitle')} description={t('admin:auditDesc')}
+        meta={q.data && t('admin:auditLoaded', { n: rows.length })} />
 
+      {/* 一行：控件自己说明填什么（占位文字 + 可访问名称），不再每个控件上面顶一行标签 */}
       <Toolbar
-        filtersClassName="items-end"
-        selectionClassName="min-h-9 self-end"
         filters={
           <>
-            <div className="flex w-full min-w-0 flex-col gap-1.5 sm:w-56">
-              <Label htmlFor="au-action">{t('admin:auditAction')}</Label>
-              <Select
-                id="au-action"
-                className="w-full"
-                value={draft.action}
-                onChange={(v) => setDraft((d) => ({ ...d, action: v }))}
-                placeholder={t('common:all')}
-                options={[
-                  // 前缀档：一类动作一起看（用户类 / 渠道类 / 定价类）
-                  ...['channel.', 'pricing.', 'user.', 'billing.', 'settings.'].map((p) => ({
-                    value: p,
-                    label: t('admin:auditActionGroup', { prefix: p }),
-                  })),
-                  ...(actions.data?.data ?? []).map((a) => ({ value: a, label: a })),
-                ]}
-              />
-            </div>
-            <div className="flex w-full min-w-0 flex-col gap-1.5 sm:w-64">
-              <Label htmlFor="au-target">{t('admin:auditTarget')}</Label>
-              <Input
-                id="au-target"
-                className="w-full"
-                value={draft.target}
-                placeholder={t('admin:auditTargetHint')}
-                onChange={(e) => setDraft((d) => ({ ...d, target: e.target.value }))}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') submit(draft)
-                }}
-              />
-            </div>
-            <div className="flex w-full min-w-0 flex-col gap-1.5 sm:w-40">
-              <Label htmlFor="au-actor">{t('admin:auditActor')}</Label>
-              <Input
-                id="au-actor"
-                className="w-full font-mono"
-                value={draft.actor}
-                placeholder="admin:42"
-                onChange={(e) => setDraft((d) => ({ ...d, actor: e.target.value }))}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') submit(draft)
-                }}
-              />
-            </div>
-            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-              <Segmented
-                options={HOURS.map((h) => ({ value: h, label: hoursLabel(h) }))}
-                value={draft.hours}
-                onChange={(h) => submit({ ...draft, hours: h })}
-                size="sm"
-                ariaLabel={t('admin:logsRange')}
-                className="md:h-9"
-              />
-              <Button size="sm" variant="outline" onClick={() => submit(draft)}>
-                {t('common:search')}
-              </Button>
-            </div>
+            <Select
+              id="au-action"
+              className="w-full sm:w-52"
+              aria-label={t('admin:auditAction')}
+              value={draft.action}
+              onChange={(v) => setDraft((d) => ({ ...d, action: v }))}
+              placeholder={t('admin:auditActionAll')}
+              options={[
+                // 前缀档：一类动作一起看（用户类 / 渠道类 / 定价类）
+                ...['channel.', 'pricing.', 'user.', 'billing.', 'settings.'].map((p) => ({
+                  value: p,
+                  label: t('admin:auditActionGroup', { prefix: p }),
+                })),
+                ...(actions.data?.data ?? []).map((a) => ({ value: a, label: a })),
+              ]}
+            />
+            <Input
+              id="au-target"
+              className="w-full sm:w-64"
+              aria-label={t('admin:auditTarget')}
+              value={draft.target}
+              placeholder={t('admin:auditTargetPlaceholder')}
+              onChange={(e) => setDraft((d) => ({ ...d, target: e.target.value }))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submit(draft)
+              }}
+            />
+            <Input
+              id="au-actor"
+              className="w-full font-mono sm:w-44"
+              aria-label={t('admin:auditActor')}
+              value={draft.actor}
+              placeholder={t('admin:auditActorPlaceholder')}
+              onChange={(e) => setDraft((d) => ({ ...d, actor: e.target.value }))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submit(draft)
+              }}
+            />
+            <Segmented
+              options={HOURS.map((h) => ({ value: h, label: hoursLabel(h) }))}
+              value={draft.hours}
+              onChange={(h) => submit({ ...draft, hours: h })}
+              size="field"
+              ariaLabel={t('admin:logsRange')}
+            />
+            <Button size="sm" variant="outline" onClick={() => submit(draft)}>
+              {t('common:search')}
+            </Button>
           </>
-        }
-        selection={
-          <Badge variant="muted" className="tabular-nums">
-            {t('admin:auditLoaded', { n: rows.length })}
-          </Badge>
         }
       />
 

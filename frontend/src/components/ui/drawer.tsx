@@ -87,7 +87,7 @@ export function Drawer({
           </Button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-gutter:stable] sm:px-6">{children}</div>
+        <div data-slot="drawer-body" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-gutter:stable] sm:px-6">{children}</div>
 
         {footer !== undefined && (
           <footer className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border bg-card px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_16px_-12px_var(--muted-fg)] sm:px-6 [&>button]:min-h-11 [&>button]:flex-1 sm:[&>button]:min-h-9 sm:[&>button]:flex-none">

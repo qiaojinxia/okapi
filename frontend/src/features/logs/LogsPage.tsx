@@ -92,25 +92,25 @@ export function LogsPage() {
     } })
   }
   return <LogList key={`${appliedKey}:${limit}`} filter={applied} ready={usageScope.ready} limit={limit} onLimit={setLimit} filters={
-    <section aria-label={t('logs:filters')} data-slot="log-filters" className="min-w-0 space-y-2 rounded-xl border border-border bg-card px-2 py-1 shadow-card">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <section aria-label={t('logs:filters')} data-slot="log-filters" className="flex min-w-0 shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
       <UsageScope {...usageScope} scope={applied.scope} onChange={(scope) => commit({ ...applied, scope, keyId: '' })} />
       <PublicModelSearchInput className="w-full sm:w-64" inputClassName="h-11 md:h-9" aria-label={t('pricing:model')}
         value={draft.model} placeholder={t('portal:logsModelHint')} onChange={(model) => setDraft({ ...draft, model })}
         onChoose={(model) => commit({ ...draft, model })} onSubmit={() => commit(draft)} />
       {applied.scope === 'user' && <PortalKeyFilter className="w-full sm:w-56" value={draft.keyId} onChange={(keyId) => setDraft({ ...draft, keyId })} onChoose={(keyId) => commit({ ...draft, keyId })} onSubmit={() => commit(draft)} />}
-      <Switch checked={draft.errorsOnly} onChange={(errorsOnly) => commit({ ...draft, errorsOnly })} label={t('logs:errorsOnly')} />
-      <Button size="sm" className="ml-auto h-11 md:h-9" disabled={!valid} onClick={() => commit(draft)}><Search className="h-3.5 w-3.5" />{t('common:search')}</Button>
-      </div>
-      <section aria-label={t('charts:period')} className="flex min-w-0 flex-wrap items-center gap-2 border-t border-border/60 pt-2">
-      <DateRangePicker className="h-11 md:h-9" today={todayInTimezone(applied.timezone)} value={applied.range} onApply={(range) => commit({ ...draft, range })} />
-      {applied.range && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, range: null })}>{t('portal:logsClearDates')}</Button>}
-      <Input className="w-full font-mono sm:w-80" aria-label={t('logs:requestId')} placeholder={t('logs:requestFilterHint')} value={draft.requestId}
-        maxLength={36} aria-invalid={!validRequest(draft.requestId)} onChange={(e) => setDraft({ ...draft, requestId: e.target.value })}
-        onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) commit(draft) }} />
-      {(applied.requestId || applied.keyId) && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, requestId: '', keyId: '' })}>{t('logs:clearLookup')}</Button>}
-      <p className="min-w-0 text-xs text-muted-foreground sm:ml-auto">{!valid ? t('logs:invalidLookup') : <>{!applied.range && <>{t(applied.requestId.trim() ? 'logs:allDatesShort' : 'logs:recentDaysShort')} · </>}{t('logs:displayTimezone', { timezone: applied.timezone })}</>}</p>
+      <section aria-label={t('charts:period')} className="flex min-w-0 max-w-full items-center gap-1">
+        <DateRangePicker className="h-11 md:h-9" today={todayInTimezone(applied.timezone)} value={applied.range} onApply={(range) => commit({ ...draft, range })} />
+        {applied.range && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, range: null })}>{t('portal:logsClearDates')}</Button>}
       </section>
+      <Input className="h-11 w-full min-w-0 font-mono sm:w-80 md:h-9" aria-label={t('logs:requestId')} placeholder={t('logs:requestFilterHint')} value={draft.requestId}
+        maxLength={36} aria-invalid={!validRequest(draft.requestId)} aria-describedby={!valid ? 'log-lookup-error' : undefined} onChange={(e) => setDraft({ ...draft, requestId: e.target.value })}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) commit(draft) }} />
+      <Switch checked={draft.errorsOnly} onChange={(errorsOnly) => commit({ ...draft, errorsOnly })} label={t('logs:errorsOnly')} />
+      <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
+        {(applied.requestId || applied.keyId) && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, requestId: '', keyId: '' })}>{t('logs:clearLookup')}</Button>}
+        <Button size="sm" className="h-11 md:h-9" disabled={!valid} onClick={() => commit(draft)}><Search className="h-3.5 w-3.5" />{t('common:search')}</Button>
+      </div>
+      {!valid && <p id="log-lookup-error" role="alert" className="basis-full text-xs text-destructive">{t('logs:invalidLookup')}</p>}
     </section>
   } />
 }
@@ -160,7 +160,9 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
   }
   const showKey = filter.scope === 'user'
   return <div className="list-page [--page-gap:8px]">
-    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} compact className="[&_p]:text-xs [&_p]:leading-5" action={<>
+    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} compact className="[&_p]:text-xs [&_p]:leading-5"
+      meta={<span data-slot="log-window" className="text-xs">{!filter.range && <>{t(filter.requestId.trim() ? 'logs:allDatesShort' : 'logs:recentDaysShort')} · </>}{t('logs:displayTimezone', { timezone: filter.timezone })}</span>}
+      action={<>
           <Button size="sm" variant="outline" disabled={!rows.length || q.isFetching} onClick={() => exportCsv(rows, showKey)} title={t('logs:exportPageHint', { n: rows.length })}>
             <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
           </Button>

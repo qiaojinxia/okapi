@@ -62,8 +62,8 @@ export function AnalyticsPage() {
           />
         }
       />
-      <FilterBar search={search} scope={trend.data?.scope} />
-      <AnalysisControls value={search} today={trend.data?.window?.today} onApply={(next) => void navigate({ search: cleanSearch(next) })} />
+      <FilterBar search={search} scope={trend.data?.scope}
+        trailing={<AnalysisControls value={search} today={trend.data?.window?.today} onApply={(next) => void navigate({ search: cleanSearch(next) })} />} />
       <FreshnessNotice value={trend.isError ? undefined : trend.data?.window?.freshness} />
       <KpiStrip
         total={trend.isError ? undefined : trend.data?.total}

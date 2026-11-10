@@ -46,9 +46,9 @@ export function RangePicker({
   }
   const valid = validRange(draft)
   return (
-    <section aria-label={t('admin:logsRange')} className="flex min-w-0 flex-1 basis-96 flex-wrap items-center gap-x-3 gap-y-2">
+    <section aria-label={t('admin:logsRange')} className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
       <Segmented
-        size="sm"
+        size="field"
         ariaLabel={t('admin:logsRange')}
         // 绝对区间生效时没有预设被选中：传一个不存在的值让全部熄灭
         value={absolute ? -1 : draft.hours}

@@ -128,6 +128,14 @@ export function ModelPricingPage() {
       <PageHeader
         title={t('admin:modelListTitle')}
         description={t('admin:modelsDesc')}
+        // 倍率基准价跟在标题后面：它是这一页所有倍率的换算前提，但不值得单独占一行
+        meta={
+          <span className="inline-flex flex-wrap items-center gap-2 text-xs">
+            <span>{t('catalog:pricingBasePreview', { price: basePrice / 1_000_000 })}</span>
+            {basePrice !== publishedBase && <Badge variant="warning">{t('admin:pricingBasePublished', { price: publishedBase / 1_000_000 })} · {t('admin:requiresPublish')}</Badge>}
+            {can('settings.read') && <Link to="/admin/settings" className="text-primary hover:underline">{t('admin:pricingBaseSettings')}</Link>}
+          </span>
+        }
         action={
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => setImporting(true)}>
@@ -142,11 +150,6 @@ export function ModelPricingPage() {
         }
       />
 
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span>{t('catalog:pricingBasePreview', { price: basePrice / 1_000_000 })}</span>
-        {basePrice !== publishedBase && <Badge variant="warning">{t('admin:pricingBasePublished', { price: publishedBase / 1_000_000 })} · {t('admin:requiresPublish')}</Badge>}
-        {can('settings.read') && <Link to="/admin/settings" className="text-primary hover:underline">{t('admin:pricingBaseSettings')}</Link>}
-      </div>
       <Toolbar
         filtersClassName="basis-full lg:basis-[32rem]"
         filters={

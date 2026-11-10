@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { gotoStep, nextStep, previousStep, toModelsStep } from './channel-steps'
 
 type Json = Record<string, unknown>
 const usage = { timezone: 'America/Los_Angeles', usage: {
@@ -58,6 +59,9 @@ async function newChannel(page: Page, provider = 'openai', expandLimits = true) 
   await expect(drawer.locator(':focus')).toHaveCount(1)
   await drawer.locator('#d-name').fill('new-controlled-channel')
   await drawer.locator('#d-provider').selectOption(provider)
+  // 第一步：API key 渠道在这里填凭证；订阅账号走浏览器登录，没有凭证可填（登录是最后一步）
+  if (!['anthropic_max', 'codex'].includes(provider)) await drawer.locator('#d-cred').fill('mock-api-key')
+  await nextStep(drawer)
   await drawer.locator('#d-models').fill('mock-model')
   await drawer.locator('#d-models').press('Enter')
   if (expandLimits) await drawer.locator('#channel-limits > summary').click()
@@ -72,7 +76,6 @@ test('API channels have only common controls and submit validated concurrency an
     saved = route.request().postDataJSON()
     return route.fulfill({ json: { channel_id: 42, channel_key_id: 7 } })
   })
-  await drawer.locator('#d-cred').fill('mock-api-key')
   await expect(drawer.locator('#d-provider option[value="anthropic_max"]')).toHaveText('Claude Code（订阅）')
   await expect(drawer.locator('#d-provider option[value="codex"]')).toHaveText('Codex（订阅）')
   for (const id of ['channel-subscription-controls', 'channel-quota-threshold', 'channel-limit-tokens', 'channel-limit-cost', 'channel-limit-requests', 'channel-usage-period']) {
@@ -213,7 +216,6 @@ test('inline pool creation rejects existing codes, preserves failed drafts and j
   fail = false
   await drawer.getByRole('button', { name: '创建并选中', exact: true }).click()
   await expect(drawer.getByRole('checkbox', { name: 'stable', exact: true })).toBeChecked()
-  await drawer.locator('#d-cred').fill('mock-api-key')
   await page.route('**/admin/channels', async (route) => {
     if (route.request().method() === 'GET') return route.fallback()
     saved = route.request().postDataJSON()
@@ -321,6 +323,9 @@ test('OAuth creation separates upstream percentage and authorization from common
   await expect(drawer.locator('#channel-refresh-margin')).toHaveCount(0)
   await drawer.locator('#channel-failure_threshold').fill('4')
   await drawer.locator('#d-concurrency').fill('3')
+  // 最后一步才是登录授权；换码按钮就是抽屉底部的主按钮，没有另外的「新建」
+  await nextStep(drawer)
+  await expect(drawer.getByRole('button', { name: '新建', exact: true })).toHaveCount(0)
   await drawer.getByRole('button', { name: '打开登录页', exact: true }).click()
   await drawer.getByLabel('把浏览器里的 code 贴回来').fill('mock-code')
   await drawer.getByRole('button', { name: '换取凭证并创建渠道', exact: true }).click()
@@ -358,22 +363,28 @@ test('provider switching hides subscription controls and preserves common settin
   const drawer = await newChannel(page)
   await drawer.locator('#d-concurrency').fill('4')
   await drawer.locator('#channel-failure_threshold').fill('5')
+  // 协议在第一步：退回去换，再回到调度这一步看
+  await gotoStep(drawer, '接入')
   await drawer.locator('#d-provider').selectOption('codex')
+  await nextStep(drawer)
   await drawer.locator('#channel-subscription-controls > summary').click()
   await expect(drawer.getByLabel('周额度使用上限（%）', { exact: true })).toBeVisible()
   await drawer.locator('#channel-quota-18000').fill('85')
+  await gotoStep(drawer, '接入')
   await drawer.locator('#d-provider').selectOption('openai')
   await expect(drawer.locator('#channel-subscription-controls')).toHaveCount(0)
   await expect(drawer.locator('#channel-failure_threshold')).toHaveValue('5')
   await expect(drawer.locator('#d-concurrency')).toHaveValue('4')
   await drawer.locator('#d-provider').selectOption('anthropic_max')
+  await nextStep(drawer)
   await expect(drawer.getByLabel('5小时额度使用上限（%）', { exact: true })).toHaveValue('85')
 })
 
 test('subscription percentage and refresh numbers validate before authorization even when folded', async ({ page }) => {
   const drawer = await newChannel(page, 'codex')
   await drawer.locator('#channel-subscription-controls > summary').click()
-  const authorize = drawer.getByRole('button', { name: '打开登录页', exact: true })
+  // 调度填错就进不了登录授权那一步
+  const authorize = drawer.getByRole('button', { name: '下一步', exact: true })
   for (const bad of ['0', '101', '1.5']) {
     await drawer.locator('#channel-quota-18000').fill(bad)
     await expect(authorize).toBeDisabled()
@@ -406,8 +417,12 @@ test('an access-token import queries quota without offering automatic renewal', 
     saved = route.request().postDataJSON()
     return route.fulfill({ json: { channel_id: 42, channel_key_id: 7 } })
   })
+  // 接入方式在第一步：退回去改成导入 Token，模型那一步已填的内容还在
+  await previousStep(drawer)
   await drawer.getByRole('tab', { name: '直接导入 Token', exact: true }).click()
   await drawer.locator('#d-cred').fill('sk-ant-oat01-fixture')
+  await nextStep(drawer)
+  await expect(drawer.getByRole('button', { name: '移除 mock-model', exact: true })).toBeVisible()
   await drawer.locator('#channel-subscription-controls > summary').click()
   await drawer.locator('#channel-quota-18000').fill('80')
   await drawer.locator('#channel-local-token-controls > summary').click()
@@ -435,6 +450,7 @@ test('subscription controls use plugin metadata rather than provider name', asyn
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
   const drawer = page.getByRole('dialog')
+  await toModelsStep(drawer)
   await drawer.locator('#channel-subscription-controls > summary').click()
   await expect(drawer.getByLabel('2小时额度使用上限（%）', { exact: true })).toBeVisible()
   await expect(drawer.getByRole('switch', { name: '自动续期', exact: true })).toHaveCount(0)
@@ -454,17 +470,25 @@ test('a newly registered account plugin drives channel options, authorization an
   const drawer = page.getByRole('dialog')
   await drawer.locator('#d-provider').selectOption('third_subscription')
   await drawer.locator('#d-name').fill('third-account')
+  await expect(drawer.locator('#channel-connection-options')).not.toHaveAttribute('open', '')
+  // 浏览器登录：三步（接入 → 模型与调度 → 登录授权）
+  await expect(drawer.getByRole('navigation', { name: '新建渠道的步骤' }).getByRole('button')).toHaveText(['1接入', '2模型与调度', '3登录授权'])
+  await nextStep(drawer)
   await drawer.locator('#d-models').fill('third-model')
   await drawer.locator('#d-models').press('Enter')
-  await expect(drawer.locator('#channel-connection-options')).not.toHaveAttribute('open', '')
   await page.route('**/admin/channels/oauth/start', (route) => route.fulfill({ json: {
     state: 'third-state', authorize_url: 'about:blank', redirect_uri: 'http://localhost:2345/callback',
   } }))
+  await nextStep(drawer)
   await drawer.getByRole('button', { name: '打开登录页', exact: true }).click()
   await expect(drawer.locator('#oauth-code')).toHaveAttribute('placeholder', 'http://localhost:2345/callback?code=…')
   await expect(drawer.getByText(/授权后会跳转到 http:\/\/localhost:2345\/callback/)).toBeVisible()
+  // 改成导入 Token：回第一步切换，引导变成两步，最后一步的主按钮是「新建」
+  await drawer.getByRole('navigation', { name: '新建渠道的步骤' }).getByRole('button', { name: '接入' }).click()
   await drawer.getByRole('tab', { name: '直接导入 Token', exact: true }).click()
+  await expect(drawer.getByRole('navigation', { name: '新建渠道的步骤' }).getByRole('button')).toHaveCount(2)
   await drawer.locator('#d-cred').fill('third_access_fixture')
+  await nextStep(drawer)
   await drawer.locator('#channel-subscription-controls > summary').click()
   await drawer.locator('#channel-quota-7200').fill('80')
   await drawer.locator('#channel-authorization-options > summary').click()
@@ -522,17 +546,22 @@ test('account catalog failure blocks creation and retry preserves the configurat
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
   const drawer = page.getByRole('dialog')
   await drawer.locator('#d-name').fill('preserved-draft')
-  await drawer.locator('#d-models').fill('mock-model')
-  await drawer.locator('#d-models').press('Enter')
   await drawer.locator('#d-cred').fill('mock-api-key')
   await page.clock.runFor(10_000)
   await expect(drawer.getByRole('alert')).toContainText('服务内部错误')
-  await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeDisabled()
+  // 协议目录没加载出来：第一步就过不去，并说明原因
+  const next = drawer.getByRole('button', { name: '下一步', exact: true })
+  await expect(next).toBeDisabled()
+  await expect(drawer.locator('[data-slot="step-hint"]')).toHaveText('协议目录还没加载完，稍等或点重试。')
   fail = false
   await drawer.getByRole('button', { name: '重试', exact: true }).click()
-  await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeEnabled()
+  await expect(next).toBeEnabled()
   await expect(drawer.locator('#d-name')).toHaveValue('preserved-draft')
   await expect(drawer.locator('#d-cred')).toHaveValue('mock-api-key')
+  await next.click()
+  await drawer.locator('#d-models').fill('mock-model')
+  await drawer.locator('#d-models').press('Enter')
+  await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeEnabled()
 })
 
 test('a non-subscription quota hook does not expose subscription configuration', async ({ page }) => {
@@ -696,11 +725,17 @@ test('default creation leaves all optional sections folded and submits unchanged
     saved = route.request().postDataJSON()
     return route.fulfill({ json: { channel_id: 42, channel_key_id: 7 } })
   })
-  for (const id of ['channel-connection-options', 'channel-client-options', 'channel-pools', 'channel-limits']) {
+  // 可选段分在两步里，都默认收起
+  for (const id of ['channel-pools', 'channel-limits']) {
     await expect(drawer.locator(`#${id}`)).not.toHaveAttribute('open')
     await expect(drawer.locator(`#${id} > summary`)).toBeVisible()
   }
-  await drawer.locator('#d-cred').fill('mock-api-key')
+  await gotoStep(drawer, '接入')
+  for (const id of ['channel-connection-options', 'channel-client-options']) {
+    await expect(drawer.locator(`#${id}`)).not.toHaveAttribute('open')
+    await expect(drawer.locator(`#${id} > summary`)).toBeVisible()
+  }
+  await nextStep(drawer)
   await drawer.getByRole('button', { name: '新建', exact: true }).click()
   await expect.poll(() => saved).toEqual({
     name: 'new-controlled-channel', provider: 'anthropic', api_base: '', credential: 'mock-api-key',
@@ -712,7 +747,6 @@ test('default creation leaves all optional sections folded and submits unchanged
 
 test('folding common controls preserves drafts and keeps validation errors visible', async ({ page }) => {
   const drawer = await newChannel(page)
-  await drawer.locator('#d-cred').fill('mock-api-key')
   await drawer.locator('#d-concurrency').fill('3')
   await drawer.locator('#channel-failure_threshold').fill('4')
   await drawer.locator('#channel-limits > summary').click()
@@ -733,16 +767,22 @@ test('folding common controls preserves drafts and keeps validation errors visib
 
 test('required cloud and pass-through addresses remain visible', async ({ page }) => {
   const drawer = await newChannel(page, 'openai', false)
+  // 地址在第一步；没有缺省地址的协议不填地址就过不了这一步
+  await gotoStep(drawer, '接入')
   await expect(drawer.locator('#d-base')).not.toBeVisible()
+  const next = drawer.getByRole('button', { name: '下一步', exact: true })
   for (const provider of ['azure', 'bedrock', 'vertex', 'custom_pass']) {
     await drawer.locator('#d-provider').selectOption(provider)
     await drawer.locator('#d-cred').fill('mock-credential')
     await expect(drawer.locator('#d-base')).toBeVisible()
     await drawer.locator('#d-base').fill('')
-    await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeDisabled()
+    await expect(next).toBeDisabled()
+    await expect(drawer.locator('[data-slot="step-hint"]')).toHaveText('这个协议没有缺省地址，请填写 API 地址。')
     await drawer.locator('#d-base').fill('https://upstream.example.com')
-    await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeEnabled()
+    await expect(next).toBeEnabled()
   }
+  await next.click()
+  await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeEnabled()
 })
 
 test('a Claude Code profile can restrict the channel to the real client and folds the switch into its summary', async ({ page }) => {

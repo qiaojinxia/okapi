@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Download, Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { openAdvanced } from './analysis-filters'
 
 // 第 2.5 节此前没有写操作 e2e 的功能面：邀请返利页、令牌管理、导入抽屉
 // （粘贴 JSON + 在线同步）、渠道抽屉的订阅 OAuth 登录卡；续补最近登录卡、
@@ -488,20 +489,34 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
   await page.getByRole('button', { name: '新建渠道' }).first().click()
   const create = await openedDialog(page)
   await create.locator('#d-provider').selectOption('anthropic_max')
+  // 分步引导：没名字过不了第一步，没模型进不了登录授权；底部说明还差什么
+  const next = create.getByRole('button', { name: '下一步', exact: true })
+  const hint = create.locator('[data-slot="step-hint"]')
+  await expect(next).toBeDisabled()
+  await expect(hint).toHaveText('先给渠道起个名字。')
+  await create.locator('#d-name').fill('max-new')
+  await next.click()
+  await expect(next).toBeDisabled()
+  await expect(hint).toHaveText('至少选择或填写一个模型。')
+  const manual = create.locator('#d-models')
+  await manual.fill('claude-opus-4')
+  await manual.press('Enter')
+  await next.click()
+  // 最后一步：登录授权。主按钮直接换码建渠道，没有另外的「新建」
   await expect(create.getByText(/^实验性：/)).toBeVisible()
+  await expect(create.locator('[data-slot="channel-create-summary"]')).toContainText('即将创建「max-new」')
+  await expect(create.getByRole('button', { name: '新建', exact: true })).toHaveCount(0)
+  const submit = create.getByRole('button', { name: '换取凭证并创建渠道' })
+  await expect(submit).toBeDisabled()
+  await expect(hint).toHaveText('先打开登录页，在上游完成授权。')
+  await expect(create.locator('#oauth-code')).toBeDisabled()
   await create.getByRole('button', { name: '打开登录页' }).click()
   await expect.poll(() => calls[0]).toEqual({
     path: '/admin/channels/oauth/start',
     method: 'POST',
     body: { provider: 'anthropic_max' },
   })
-  await expect(create.getByText('请先填渠道名和至少一个模型。')).toBeVisible()
-  const submit = create.getByRole('button', { name: '换取凭证并创建渠道' })
-  await expect(submit).toBeDisabled()
-  await create.locator('#d-name').fill('max-new')
-  const manual = create.locator('#d-models')
-  await manual.fill('claude-opus-4')
-  await manual.press('Enter')
+  await expect(hint).toHaveText('把授权后得到的 code 贴进来。')
   await create.locator('#oauth-code').fill(' code#st-1 ')
   const exchanged = page.waitForRequest((r) => r.url().includes('/oauth/exchange'))
   await submit.click()
@@ -1046,7 +1061,8 @@ test('管理端日志：过滤进 URL 与查询串；7 天改 hours；展开 req
   await expect.poll(() => queries.some((q) => q.qs.get('hours') === '168')).toBe(true)
 
   await page.getByRole('row').filter({ hasText: 'alice' }).first().click()
-  await expect(page.getByText('req-abc')).toBeVisible()
+  // 生效条件的标签里也有 req-abc，这里看的是详情抽屉里的那一个
+  await expect(page.getByRole('dialog').getByText('req-abc')).toBeVisible()
   await expect(page.getByText('up-1')).toBeVisible()
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   // 详情顶部的错误码也有复制按钮，不能再靠"第一个复制"取请求 ID：从"请求 ID"标签所在行取
@@ -3104,9 +3120,12 @@ test('服务质量趋势：缺省 metric=error_rate；切 stack 与天数进查�
   await page.getByLabel('时间粒度').selectOption('hour')
   await page.getByRole('button', { name: '应用分析条件' }).click()
   await expect.poll(() => qs.some((p) => p.get('granularity') === 'hour' && p.get('days') === '30')).toBe(true)
+  // 应用 / 重置后抽屉收起，继续改先重新打开
+  await openAdvanced(page)
   await page.getByRole('button', { name: '重置高级条件' }).click()
   await expect.poll(() => qs.at(-1)?.get('granularity')).toBeNull()
   // 弹出框里只填起点没法确定：半截日期进不了表单
+  await openAdvanced(page)
   await page.getByRole('button', { name: /^起止日期/ }).click()
   await page.getByLabel('开始日期').fill('2026-09-01')
   await expect(page.getByRole('button', { name: '确定', exact: true })).toBeDisabled()

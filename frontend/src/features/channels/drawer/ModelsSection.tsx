@@ -19,7 +19,7 @@ export function ModelsSection({ f, channel, discover, onDone }: {
 }) {
   const { t } = useTranslation()
   const isEdit = channel !== undefined
-  const { canManagePools, form, models, setModels, credential, newPools, setNewPools, oauth, canDiscover, unknownModels } = f
+  const { canManagePools, form, models, setModels, newPools, setNewPools, oauth, canDiscover, unknownModels } = f
   return (
     <>
       <FieldGroup
@@ -45,13 +45,11 @@ export function ModelsSection({ f, channel, discover, onDone }: {
           />
         </div>
         {(isEdit || !oauth) && (
-          <div className="flex flex-col gap-1.5">
-            <Button size="sm" variant="outline" className="self-start" disabled={!canDiscover || discover.isPending}
-              onClick={() => discover.mutate()}>
-              {t('admin:fetchModels')}
-            </Button>
-            {!isEdit && credential.trim() === '' && <p className="text-xs text-muted-foreground">{t('admin:fetchModelsNeedsCredential')}</p>}
-          </div>
+          // 新建时凭证在引导的上一步已经填好，这里总能拉
+          <Button size="sm" variant="outline" className="self-start" disabled={!canDiscover || discover.isPending}
+            onClick={() => discover.mutate()}>
+            {t('admin:fetchModels')}
+          </Button>
         )}
         {!isEdit && oauth && <p className="text-xs text-muted-foreground">{t('admin:fetchModelsAfterLogin')}</p>}
         {unknownModels.length > 0 && (

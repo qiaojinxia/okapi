@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
+import { nextStep, previousStep, toModelsStep } from './channel-steps'
 
 type Json = Record<string, unknown>
 
@@ -56,16 +57,20 @@ async function openNew(page: Page) {
   return drawer
 }
 
-test('新建渠道还没保存时就能拉上游模型：凭证没填按钮不可用，填了用表单里的地址 / 凭证拉，并入清单且提示还没建价簿的名字', async ({ page }) => {
+test('新建渠道还没保存时就能拉上游模型：凭证在第一步填，没填进不了模型这一步；填了用表单里的地址 / 凭证拉，并入清单且提示还没建价簿的名字', async ({ page }) => {
   const calls = await prepare(page)
   const drawer = await openNew(page)
-  const fetchButton = drawer.getByRole('button', { name: '拉取上游模型' })
-  await expect(fetchButton).toBeDisabled()
-  await expect(drawer).toContainText('先填写凭证，再拉取上游模型')
+  // 第一步没填凭证：「下一步」不可用，并说明还差什么
+  const next = drawer.getByRole('button', { name: '下一步', exact: true })
+  await expect(next).toBeDisabled()
+  await expect(drawer.locator('[data-slot="step-hint"]')).toHaveText('请填写上游凭证。')
+  await expect(drawer.getByRole('button', { name: '拉取上游模型' })).toBeHidden()
+  await drawer.locator('#d-cred').fill('sk-live')
+  await next.click()
 
+  const fetchButton = drawer.getByRole('button', { name: '拉取上游模型' })
   await drawer.locator('#d-models').fill('my-alias')
   await drawer.locator('#d-models').press('Enter')
-  await drawer.locator('#d-cred').fill('sk-live')
   await expect(fetchButton).toBeEnabled()
   await fetchButton.click()
 
@@ -148,7 +153,7 @@ test('Anthropic / Gemini 的地址只写了主机名时提示要带版本段（/
 test('拉取上游回的是网页（地址缺 /v1）：提示原因，而不是「请求参数有误（upstream_models_not_json）」', async ({ page }) => {
   await prepare(page)
   const drawer = await openNew(page)
-  await drawer.locator('#d-cred').fill('sk-page')
+  await toModelsStep(drawer, { name: null, credential: 'sk-page' })
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   const alert = page.getByRole('alert')
   await expect(alert).toContainText('上游返回的是网页而不是模型列表')
@@ -158,13 +163,16 @@ test('拉取上游回的是网页（地址缺 /v1）：提示原因，而不是�
 test('拉取失败不动清单，错误提示出来；没有定价读取权限时照样能拉，只是不提示价簿缺口', async ({ page }) => {
   const calls = await prepare(page, { models: 'denied' })
   const drawer = await openNew(page)
-  await drawer.locator('#d-cred').fill('sk-bad')
+  await toModelsStep(drawer, { name: null, credential: 'sk-bad' })
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('alert')).toBeVisible()
   await expect(drawer.getByTestId('discovered-unpriced')).toHaveCount(0)
   await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeDisabled()
 
+  // 回第一步换凭证再来：模型这一步已有的内容不丢
+  await previousStep(drawer)
   await drawer.locator('#d-cred').fill('sk-live')
+  await nextStep(drawer)
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('status').filter({ hasText: '发现 3 个模型，新增 3 个' })).toBeVisible()
   await expect(drawer.getByTestId('discovered-unpriced')).toHaveCount(0)
@@ -176,6 +184,9 @@ test('订阅账号（登录换令牌）没有草稿凭证：不给按钮，说�
   const calls = await prepare(page)
   const drawer = await openNew(page)
   await drawer.locator('#d-provider').selectOption('codex')
+  // 订阅账号的第一步没有凭证可填；登录放在最后一步
+  await expect(drawer.locator('#d-cred')).toHaveCount(0)
+  await nextStep(drawer)
   await expect(drawer.getByRole('button', { name: '拉取上游模型' })).toHaveCount(0)
   await expect(drawer).toContainText('订阅账号登录并创建渠道后，可在编辑页拉取上游模型')
   expect(calls.filter((call) => call.path === '/admin/channels/fetch-models')).toHaveLength(0)

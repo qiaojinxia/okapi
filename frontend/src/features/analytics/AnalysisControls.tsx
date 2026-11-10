@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import { ChevronDown, SlidersHorizontal, X } from 'lucide-react'
+import { SlidersHorizontal, X } from 'lucide-react'
 import type { AnalyticsSearch } from '@/features/analytics/route-state'
 import { Button } from '@/components/ui/button'
 import { DateRangeField } from '@/components/ui/date-range'
@@ -9,6 +9,7 @@ import { Drawer } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
 import { ModelInput } from '@/features/models/model-input'
 import { ADVANCED_KEYS } from '@/lib/cube'
+import { cn } from '@/lib/utils'
 export { ADVANCED_KEYS } from '@/lib/cube'
 
 export function dimensionLabel(t: TFunction, dim: string): string {
@@ -39,7 +40,8 @@ function Choices({ label, values, onChange, model = false }: { label: string; va
   </div>
 }
 
-export function AnalysisControls({ value, onApply, today }: { value: AnalyticsSearch; onApply: (next: AnalyticsSearch) => void; today?: string }) {
+/// 高级条件的入口：一个按钮 + 生效条件的标签，和快速筛选排在同一行；条件本身在抽屉里编辑，不占页面高度。
+export function AnalysisControls({ value, onApply, today, className }: { value: AnalyticsSearch; onApply: (next: AnalyticsSearch) => void; today?: string; className?: string }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const key = JSON.stringify([value.days, ...ADVANCED_KEYS.map((k) => value[k])])
@@ -54,21 +56,18 @@ export function AnalysisControls({ value, onApply, today }: { value: AnalyticsSe
   }
   const apply = (next: AnalyticsSearch) => { onApply(next); setOpen(false) }
   return <>
-    <section data-slot="analysis-filter-summary" aria-label={t('analysis:advanced')} className="flex min-h-11 min-w-0 items-center gap-2 overflow-hidden rounded-xl border border-border bg-card px-2 py-1.5">
-      <Button variant="ghost" size="sm" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)} className="shrink-0 px-2">
-        <SlidersHorizontal aria-hidden size={16} className="text-muted-foreground" />
+    <section data-slot="analysis-filter-summary" aria-label={t('analysis:advanced')} className={cn('flex min-h-9 min-w-0 max-w-full flex-wrap items-center gap-2', className)}>
+      <Button variant="outline" size="sm" aria-haspopup="dialog" aria-expanded={open} title={t('analysis:advancedHint')} onClick={() => setOpen(true)} className="min-h-11 shrink-0 md:min-h-9">
+        <SlidersHorizontal aria-hidden className="h-3.5 w-3.5 text-muted-foreground" />
         <span>{t('analysis:advanced')}</span>
-        {active.length > 0 && <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground" aria-label={t('analysis:active', { n: active.length })}>{active.length}</span>}
-        <ChevronDown aria-hidden size={15} className="text-muted-foreground" />
+        {active.length > 0 && <span className="rounded-full bg-primary/12 px-1.5 text-[11px] leading-[18px] font-medium text-primary tabular-nums" aria-label={t('analysis:active', { n: active.length })}>{active.length}</span>}
       </Button>
-      {chips.length === 0 ? (
-        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{t('analysis:advancedHint')}</span>
-      ) : (
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto whitespace-nowrap scrollbar-none" aria-label={t('analysis:active', { n: active.length })}>
-          {chips.slice(0, 3).map((chip) => <span key={chip.id} className={`shrink-0 rounded-md px-2 py-1 text-xs ${chip.primary ? 'bg-primary/8 text-primary' : 'bg-muted text-foreground'}`} title={chip.text}>{chip.text}</span>)}
-          {chips.length > 3 && <button type="button" className="min-h-7 shrink-0 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => setOpen(true)}>+{chips.length - 3}</button>}
-        </div>
-      )}
+      {/* 生效的条件全部列出来（多了换行）：收在抽屉里的条件必须在页面上看得见 */}
+      {chips.map((chip) => (
+        <span key={chip.id} className={cn('inline-flex h-7 min-w-0 max-w-full items-center rounded-full px-2.5 text-xs', chip.primary ? 'bg-primary/10 text-primary' : 'bg-muted text-foreground')} title={chip.text}>
+          <span className="truncate">{chip.text}</span>
+        </span>
+      ))}
     </section>
     <Editor key={key} open={open} value={value} onApply={apply} onClose={() => setOpen(false)} today={today} />
   </>
