@@ -48,7 +48,7 @@ async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
         10
     };
     Json(
-        json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
+        json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},"percent":37,"resets_at":4_070_908_800_i64}],"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
     )
 }
 async fn profile(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
@@ -991,6 +991,16 @@ async fn subscription_quota_is_observed_without_a_configured_percentage_cap() {
         .await
         .unwrap();
     assert_eq!(snapshot.threshold_window.as_deref(), Some("five_hour"));
+    // 用量应答里按模型分的 Fable 周窗口：跟着观测一起落库，只展示
+    assert_eq!(
+        snapshot.scoped,
+        [okapi_providers::account::quota::ScopedWindow {
+            model: "Fable".into(),
+            used_percent: 37,
+            resets_at: Some(4_070_908_800),
+            window_secs: Some(604_800),
+        }]
+    );
     assert!(
         account_control::admit(&env.state, env.channel, Some(env.key))
             .await
@@ -1002,6 +1012,18 @@ async fn subscription_quota_is_observed_without_a_configured_percentage_cap() {
     let cache_key = format!("quota:ck:{}", env.key);
     let raw: String = redis.get(&cache_key).await.unwrap();
     let mut cached: Value = serde_json::from_str(&raw).unwrap();
+    // Fable 周限额用尽不影响放行：别的模型照旧可用，不能把账号摘掉
+    cached["snapshot"]["scoped"][0]["used_percent"] = json!(100);
+    let _: () = redis
+        .set(&cache_key, cached.to_string(), None, None, false)
+        .await
+        .unwrap();
+    assert!(
+        account_control::admit(&env.state, env.channel, Some(env.key))
+            .await
+            .is_ok(),
+        "a spent Fable week must not stop the account"
+    );
     cached["snapshot"]["windows"][0]["used_percent"] = json!(100);
     let _: () = redis
         .set(&cache_key, cached.to_string(), None, None, false)
