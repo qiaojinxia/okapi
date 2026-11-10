@@ -65,7 +65,7 @@ function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'de
   return (
     <span
       className={cn(
-        'inline-flex min-h-6 items-center rounded-md px-2 py-0.5 text-xs leading-4 font-semibold whitespace-nowrap',
+        'inline-flex min-h-6 items-center rounded-md px-2 py-0.5 text-xs leading-4 font-medium whitespace-nowrap',
         // 宽屏等宽：「正常」「1/2 可用」「没有 key」宽度各不相同，胶囊右边的文字列起点就逐行错位；窄屏省下这点宽度给文字
         'min-[1420px]:min-w-[4.75rem] min-[1420px]:justify-center',
         'before:mr-1.5 before:inline-block before:size-1.5 before:shrink-0 before:rounded-full before:bg-current before:content-[""]',
@@ -173,9 +173,9 @@ export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
   const when = dayjs(probe.at)
   // 探测的是 /models 这类轻量端点，>2s 已经算慢
   const result = probe.ok ? (
-    <span className={cn('font-semibold tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
+    <span className={cn('font-medium tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
   ) : (
-    <span className="font-semibold text-destructive">
+    <span className="font-medium text-destructive">
       {probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))}
     </span>
   )
@@ -205,8 +205,8 @@ export function LastBalance({ balance }: { balance: ChannelBalance | null | unde
         <Wallet aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
         <span className="sr-only">{t('admin:channelBalanceLabel')}</span>
       </span>
-      <span className={cn('text-sm font-semibold tracking-normal tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
-        {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language)}
+      <span className={cn('text-[13px] font-medium tracking-normal tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
+        {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language, true)}
       </span>
       <span className="ml-auto text-xs text-muted-foreground/70 tabular-nums">{stampOf(when)}</span>
     </span>
@@ -293,34 +293,49 @@ export function useChannelUsage() {
   })
 }
 
-/// 近 30 天用量一行：计费金额打头（这行的重点，用前景色），后面跟请求数 · token，
-/// 悬停看输入 / 缓存 / 输出明细与上游成本。金额放在左边、紧挨着它的说明：列变宽时金额靠右会和计数隔出一大块空白。
-export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) {
+/// 近 30 天用量：三项同字重的指标共用一条浅底带，金额不再压过渠道名与异常状态。
+export function ChannelUsage({ usage, settled = false }: { usage: ChannelUsageRow | undefined; settled?: boolean }) {
   const { t, i18n } = useTranslation()
-  if (!usage || usage.requests === 0) return null
+  if (!usage || usage.requests === 0) {
+    if (!settled) return null
+    return (
+      <div data-slot="channel-usage" className="flex h-9 w-full items-center rounded-lg bg-muted/35 px-3 text-xs text-muted-foreground">
+        {t('admin:channelUsageEmpty')}
+      </div>
+    )
+  }
   const lang = i18n.language
   const total = usage.prompt_tokens + usage.completion_tokens
+  const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
+  const amount = formatMoneyAggregate(usage.amount_micro, lang, false, true)
+  const metrics = [
+    { label: t('admin:channelUsageSpend'), value: amount, spend: true },
+    { label: t('admin:channelUsageRequestsLabel'), value: t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) }), spend: false },
+    { label: t('admin:channelUsageTokensLabel'), value: compact.format(total), spend: false },
+  ]
   const detail = t('admin:channelUsageDetail', {
     days: USAGE_DAYS,
     requests: formatCount(usage.requests, lang),
     prompt: formatCount(usage.prompt_tokens, lang),
     cached: formatCount(usage.cached_tokens, lang),
     completion: formatCount(usage.completion_tokens, lang),
-    amount: formatMoneyAggregate(usage.amount_micro, lang),
-    cost: formatMoneyAggregate(usage.upstream_cost_micro, lang),
+    amount,
+    cost: formatMoneyAggregate(usage.upstream_cost_micro, lang, false, true),
   })
-  const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
   return (
-    <span className="flex w-full flex-wrap items-baseline gap-x-2.5 gap-y-0.5 whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={detail}>
-      <span className="text-sm font-semibold tracking-normal text-foreground">
-        {formatMoneyAggregate(usage.amount_micro, lang)}
-      </span>
-      {' '}
-      <span>
-        {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
-        {' · '}
-        {t('admin:channelUsageTokens', { n: compact.format(total) })}
-      </span>
-    </span>
+    <div data-slot="channel-usage" className="grid h-9 w-full grid-cols-3 divide-x divide-border/60 overflow-hidden rounded-lg bg-muted/35" title={detail}>
+      {metrics.map((metric) => (
+        <span key={metric.label} className="flex min-w-0 flex-col justify-center px-2.5">
+          <span className="truncate text-[11px] leading-3 text-muted-foreground">{metric.label}</span>
+          <span
+            data-slot={metric.spend ? 'channel-spend' : undefined}
+            className="truncate text-[13px] leading-4 font-medium text-foreground tabular-nums"
+            title={metric.value}
+          >
+            {metric.value}
+          </span>
+        </span>
+      ))}
+    </div>
   )
 }

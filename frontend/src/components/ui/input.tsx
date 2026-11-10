@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils'
 
 /// 所有文本类控件共用的外观：边框 + 轻阴影，悬停加深边框，聚焦主色环。
 export const inputClass =
-  'rounded-md border border-input bg-card text-sm shadow-xs outline-none transition-colors placeholder:text-muted-foreground hover:border-muted-foreground/40 focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-60 read-only:bg-muted/40'
+  'rounded-lg border border-input bg-card text-sm shadow-xs outline-none transition-colors placeholder:text-muted-foreground hover:border-muted-foreground/40 focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-60 read-only:bg-muted/40'
 
 export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cn(inputClass, 'h-9 w-full px-3', className)} {...props} />

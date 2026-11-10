@@ -10,7 +10,7 @@ import { useConfirm } from '@/components/ui/confirm'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Drawer } from '@/components/ui/drawer'
 import { Field } from '@/components/ui/field'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
@@ -348,42 +348,44 @@ export function PortalKeysPage() {
                 </Td>
                 <Td>
                   <div className="flex items-center justify-center gap-0.5">
-                    <IconButton
-                      icon={k.status === 1 ? PowerOff : Power}
-                      label={current && k.status === 1 ? t('portal:keyCurrentNoDisable') : k.status === 1 ? t('common:disable') : t('common:enable')}
-                      disabled={current && k.status === 1}
-                      onClick={() =>
-                        patch.mutate({ id: k.id, body: { status: k.status === 1 ? 2 : 1 } })
-                      }
-                    />
-                    <IconButton
-                      icon={Pencil}
-                      label={t('common:edit')}
-                      onClick={() =>
-                        openEditor({
-                          mode: 'rename',
-                          id: k.id,
-                          name: k.name,
-                          group: k.group_override,
-                          ips: k.ip_allowlist ?? [],
-                          limits: k,
-                        })
-                      }
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={current ? t('portal:keyCurrentNoDelete') : t('common:delete')}
-                      variant="destructive"
-                      disabled={current}
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: k.name }),
-                          description: t('common:confirmKeyDelete'),
-                          requireText: k.name,
-                          onConfirm: () => remove.mutate(k.id),
-                        })
-                      }
-                    />
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton
+                        icon={k.status === 1 ? PowerOff : Power}
+                        label={current && k.status === 1 ? t('portal:keyCurrentNoDisable') : k.status === 1 ? t('common:disable') : t('common:enable')}
+                        disabled={current && k.status === 1}
+                        onClick={() =>
+                          patch.mutate({ id: k.id, body: { status: k.status === 1 ? 2 : 1 } })
+                        }
+                      />
+                      <IconButton
+                        icon={Pencil}
+                        label={t('common:edit')}
+                        onClick={() =>
+                          openEditor({
+                            mode: 'rename',
+                            id: k.id,
+                            name: k.name,
+                            group: k.group_override,
+                            ips: k.ip_allowlist ?? [],
+                            limits: k,
+                          })
+                        }
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label={current ? t('portal:keyCurrentNoDelete') : t('common:delete')}
+                        variant="destructive"
+                        disabled={current}
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: k.name }),
+                            description: t('common:confirmKeyDelete'),
+                            requireText: k.name,
+                            onConfirm: () => remove.mutate(k.id),
+                          })
+                        }
+                      />
+                    </ActionGroup>
                   </div>
                 </Td>
               </Tr>

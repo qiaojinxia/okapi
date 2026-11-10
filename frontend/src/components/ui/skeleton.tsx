@@ -45,7 +45,7 @@ export function StatSkeleton({ layout = 'inline', compact = false, className, ic
   sub?: boolean
 }) {
   return (
-    <div aria-hidden className={cn('relative flex min-w-0 items-start gap-3 rounded-lg border border-border bg-card p-4 shadow-card', compact && 'p-3', className)}>
+    <div aria-hidden className={cn('relative flex min-w-0 items-start gap-3 rounded-xl border border-border bg-card p-4 shadow-card', compact && 'p-3', className)}>
       {icon && <Skeleton className={cn('h-9 w-9 shrink-0 rounded-md', layout === 'stacked' && 'absolute right-4 top-3 h-7 w-7')} />}
       <div className="flex min-w-0 flex-1 flex-col gap-2 pt-0.5">
         <div className={cn(layout === 'stacked' && 'min-h-7 pr-8', compact && layout === 'stacked' && 'min-h-5')}><Skeleton className="h-3 w-full max-w-20" /></div>

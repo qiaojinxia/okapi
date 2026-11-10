@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
@@ -27,6 +27,7 @@ import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { posInt, text } from '@/lib/search-params'
+import { cn } from '@/lib/utils'
 
 const routeApi = getRouteApi('/admin/keys')
 
@@ -252,36 +253,38 @@ export function AdminKeysPage() {
                 </Td>
                 {showActions && <Td>
                   <div className="flex items-center gap-0.5">
-                    {canReadLogs && <Link
-                      to="/admin/logs"
-                      search={{ api_key_id: k.id, hours: 168 }}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
-                      title={t('admin:keyViewLogs')}
-                      aria-label={t('admin:keyViewLogs')}
-                    >
-                      <ScrollText className="h-4 w-4" />
-                    </Link>}
-                    {canManage && <>
-                    <IconButton
-                      icon={k.status === 1 ? PowerOff : Power}
-                      disabled={setStatus.isPending || remove.isPending || keys.isFetching}
-                      label={k.status === 1 ? t('common:disable') : t('common:enable')}
-                      onClick={() => setStatus.mutate({ id: k.id, status: k.status === 1 ? 2 : 1 })}
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      disabled={setStatus.isPending || remove.isPending || keys.isFetching}
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: k.key_prefix }),
-                          description: t('common:confirmKeyDelete'),
-                          onConfirm: () => remove.mutate(k.id),
-                        })
-                      }
-                    />
-                    </>}
+                    <ActionGroup label={t('common:actions')}>
+                      {canReadLogs && <Link
+                        to="/admin/logs"
+                        search={{ api_key_id: k.id, hours: 168 }}
+                        className={cn('inline-flex items-center justify-center', ICON_BUTTON_CLASS)}
+                        title={t('admin:keyViewLogs')}
+                        aria-label={t('admin:keyViewLogs')}
+                      >
+                        <ScrollText className="h-4 w-4" />
+                      </Link>}
+                      {canManage && <>
+                      <IconButton
+                        icon={k.status === 1 ? PowerOff : Power}
+                        disabled={setStatus.isPending || remove.isPending || keys.isFetching}
+                        label={k.status === 1 ? t('common:disable') : t('common:enable')}
+                        onClick={() => setStatus.mutate({ id: k.id, status: k.status === 1 ? 2 : 1 })}
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label={t('common:delete')}
+                        variant="destructive"
+                        disabled={setStatus.isPending || remove.isPending || keys.isFetching}
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: k.key_prefix }),
+                            description: t('common:confirmKeyDelete'),
+                            onConfirm: () => remove.mutate(k.id),
+                          })
+                        }
+                      />
+                      </>}
+                    </ActionGroup>
                   </div>
                 </Td>}
               </Tr>

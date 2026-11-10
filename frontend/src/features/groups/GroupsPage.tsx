@@ -9,7 +9,7 @@ import { ListState } from '@/components/ui/list-state'
 import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { GroupDrawer } from '@/features/groups/GroupDrawer'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
@@ -158,24 +158,26 @@ export function GroupsPage() {
                   </Td>
                   <Td>
                     <div className="flex items-center justify-end gap-0.5">
-                      <IconButton
-                        icon={Pencil}
-                        label={t('common:edit')}
-                        onClick={() => setDrawer({ group: g })}
-                      />
-                      <IconButton
-                        icon={Trash2}
-                        label={t('common:delete')}
-                        variant="destructive"
-                        disabled={g.is_default}
-                        onClick={() =>
-                          confirm({
-                            title: t('common:confirmDeleteTitle', { name: g.group_code }),
-                            description: t('common:confirmGroupDelete'),
-                            onConfirm: () => remove.mutate(g.group_code),
-                          })
-                        }
-                      />
+                      <ActionGroup label={t('common:actions')}>
+                        <IconButton
+                          icon={Pencil}
+                          label={t('common:edit')}
+                          onClick={() => setDrawer({ group: g })}
+                        />
+                        <IconButton
+                          icon={Trash2}
+                          label={t('common:delete')}
+                          variant="destructive"
+                          disabled={g.is_default}
+                          onClick={() =>
+                            confirm({
+                              title: t('common:confirmDeleteTitle', { name: g.group_code }),
+                              description: t('common:confirmGroupDelete'),
+                              onConfirm: () => remove.mutate(g.group_code),
+                            })
+                          }
+                        />
+                      </ActionGroup>
                     </div>
                   </Td>
                 </Tr>

@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next'
 import type { ChannelBalance, ChannelRow } from '@/features/channels/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
 import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
@@ -320,7 +320,6 @@ export function ChannelsPage() {
   return (
     <div className="list-page">
       <PageHeader
-        className="[&_h1]:text-[22px] [&_h1]:leading-7 [&_h1]:tracking-[-0.025em] [&_p]:max-w-2xl [&_p]:text-[13px]"
         title={t('admin:channelsTitle')}
         description={t('admin:channelsDesc')}
         meta={channels.data && t('admin:channelsSummary', { total, enabled: enabledCount })}
@@ -328,7 +327,6 @@ export function ChannelsPage() {
           <>
             <Button
               variant="outline"
-              className="px-3.5"
               loading={testAll.isPending}
               // 筛选中的"0 启用"不代表全站没有可测的
               disabled={enabledCount === 0 && !filtered}
@@ -336,11 +334,11 @@ export function ChannelsPage() {
             >
               {testAll.isPending ? t('admin:testAllRunning') : t('admin:testAll')}
             </Button>
-            <Button variant="outline" className="px-3.5" onClick={() => setDiagnosing(true)}>
+            <Button variant="outline" onClick={() => setDiagnosing(true)}>
               {t('admin:diagTitle')}
             </Button>
-            <Button className="gap-1.5 rounded-lg px-4 shadow-[0_5px_14px_-8px_var(--primary)]" onClick={() => setDrawer({ mode: 'create' })}>
-              <span aria-hidden>+</span>
+            <Button onClick={() => setDrawer({ mode: 'create' })}>
+              <Plus aria-hidden className="h-4 w-4" />
               {t('admin:createChannel')}
             </Button>
           </>
@@ -418,8 +416,8 @@ export function ChannelsPage() {
           />
         )
       ) : (
-        <Table stickyHeader wrapperClassName="rounded-[18px] border-border/70 shadow-[0_1px_2px_oklch(0_0_0/0.035),0_18px_40px_-30px_oklch(0_0_0/0.26)]">
-          <THead className="bg-muted/30 [&_th]:h-10 [&_th]:bg-muted/30 [&_th]:text-[11px] [&_th]:font-semibold [&_th]:tracking-[0.045em] [&_th]:text-muted-foreground/85">
+        <Table stickyHeader>
+          <THead>
             <Tr>
               <Th className="w-11 min-w-11 pr-0 pl-5">
                 <Checkbox
@@ -448,7 +446,7 @@ export function ChannelsPage() {
           </THead>
           <TBody>
             {rows.map((c) => (
-              <Tr key={c.id} selected={picked.has(c.id)} className="group/row hover:bg-accent/30 data-[selected]:shadow-[inset_2px_0_0_var(--primary)]">
+              <Tr key={c.id} selected={picked.has(c.id)}>
                 <Td className="py-3 pr-0 pl-5 align-top">
                   {/* 与名称首行同高居中：直接放行内框，勾选框会落在基线上、比名字高出两三像素 */}
                   <div className="flex h-5 items-center">
@@ -498,7 +496,10 @@ export function ChannelsPage() {
                 {/* 用量窗口：近 30 天用量一行 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}
                 <Td className="py-3 align-top">
                   <div className="flex w-full max-w-[38rem] flex-col items-start gap-2.5">
-                    <ChannelUsage usage={usage.data?.data.find((u) => u.channel_id === c.id)} />
+                    <ChannelUsage
+                      usage={usage.data?.data.find((u) => u.channel_id === c.id)}
+                      settled={usage.data !== undefined}
+                    />
                     {c.status === 1 && <ChannelQuotaCell channelId={c.id} provider={c.provider} />}
                     <LastBalance balance={c.last_balance} />
                   </div>
@@ -515,25 +516,23 @@ export function ChannelsPage() {
                     />
                     {/* 图标动作：平时淡一档，悬停整行变深，悬停自己才有底色；名字在悬停提示（便签）与读屏名里。
                         「更多」菜单的触发器不套悬停提示：提示常驻时 Esc 会先关提示，菜单得按两次才关 */}
-                    <div className="flex items-center gap-0.5 rounded-lg border border-border/60 bg-background/45 p-0.5 shadow-xs">
+                    <ActionGroup label={t('common:actions')}>
                       <IconButton
                         icon={Activity}
                         label={t('admin:testChannel')}
                         loading={testingId === c.id}
-                        className={ROW_ICON}
                         onClick={() => test.mutate(c)}
                       />
                       <IconButton
                         icon={Pencil}
                         label={t('common:edit')}
-                        className={ROW_ICON}
                         onClick={() => setDrawer({ mode: 'edit', channel: c })}
                       />
                       <Menu
                         strategy="fixed"
                         className="min-w-44"
                         trigger={
-                          <Button size="icon" variant="ghost" aria-label={t('admin:channelMoreActions')} className={cn(ICON_BUTTON_CLASS, ROW_ICON)}>
+                          <Button size="icon" variant="ghost" aria-label={t('admin:channelMoreActions')} className={ICON_BUTTON_CLASS}>
                             <Ellipsis />
                           </Button>
                         }
@@ -566,7 +565,7 @@ export function ChannelsPage() {
                           {t('common:delete')}
                         </MenuItem>
                       </Menu>
-                    </div>
+                    </ActionGroup>
                   </div>
                 </Td>
               </Tr>
@@ -629,10 +628,6 @@ export function ChannelsPage() {
     </div>
   )
 }
-
-/// 行内图标动作的配色：平时比普通图标淡一档，悬停所在行时变深，悬停到自己才有底色。
-const ROW_ICON =
-  'rounded-lg text-muted-foreground/75 group-hover/row:text-foreground/80 hover:bg-accent hover:text-foreground'
 
 /// 渠道格：ID + 名称、地址、平台 / 档位胶囊 + 模型数与优先级。
 ///

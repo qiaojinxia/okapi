@@ -1,6 +1,7 @@
 import { Search, X } from 'lucide-react'
 import { useRef } from 'react'
 import { useTranslation } from 'react-i18next'
+import { inputClass } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
 interface SearchInputProps
@@ -49,10 +50,9 @@ export function SearchInput({
           onKeyDown?.(e)
         }}
         className={cn(
-          'h-9 w-full rounded-md border border-input bg-card pr-8 text-sm shadow-xs outline-none transition-colors',
+          inputClass,
+          'h-9 w-full pr-8 [&::-webkit-search-cancel-button]:appearance-none',
           hideIcon ? 'pl-3.5' : 'pl-8',
-          'placeholder:text-muted-foreground hover:border-muted-foreground/40 focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/25',
-          '[&::-webkit-search-cancel-button]:appearance-none',
           inputClassName,
         )}
         {...props}

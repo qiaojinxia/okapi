@@ -3,6 +3,26 @@ import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
+interface ActionGroupProps extends React.HTMLAttributes<HTMLDivElement> {
+  label: string
+}
+
+export function ActionGroup({ label, className, ...props }: ActionGroupProps) {
+  return (
+    <div
+      data-slot="action-group"
+      role="group"
+      aria-label={label}
+      className={cn(
+        'inline-flex shrink-0 items-center gap-0.5 rounded-lg md:border md:border-border/70 md:bg-background/55 md:p-0.5 md:shadow-xs',
+        '[&_[data-slot=button]]:rounded-md',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
 interface IconButtonProps {
   icon: LucideIcon
   /// 同时用作 tooltip 与可访问名字——图标按钮没有可见文字，
@@ -18,7 +38,7 @@ interface IconButtonProps {
 /// 图标按钮的尺寸与配色：触屏 44px、桌面 32px；平时灰、悬停转前景色。
 /// 作为菜单触发器的图标按钮（不能再包一层 Tooltip）直接用它，免得与 `IconButton` 长得不一样。
 export const ICON_BUTTON_CLASS =
-  'h-11 w-11 shrink-0 text-muted-foreground hover:text-foreground md:h-8 md:w-8 [&_svg]:h-4 [&_svg]:w-4'
+  'h-11 w-11 shrink-0 rounded-md text-muted-foreground/80 hover:bg-accent hover:text-foreground group-hover/row:text-foreground/80 md:h-8 md:w-8 [&_svg]:h-4 [&_svg]:w-4'
 
 /// 图标动作按钮。
 ///

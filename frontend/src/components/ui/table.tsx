@@ -126,7 +126,7 @@ export function Tr({ className, selected = false, ...props }: TrProps) {
     <tr
       data-selected={selected || undefined}
       className={cn(
-        'transition-colors hover:bg-accent/40 data-[selected]:bg-primary/5 data-[selected]:hover:bg-primary/8',
+        'group/row transition-colors hover:bg-accent/40 data-[selected]:bg-primary/5 data-[selected]:shadow-[inset_2px_0_0_var(--primary)] data-[selected]:hover:bg-primary/8',
         className,
       )}
       {...props}

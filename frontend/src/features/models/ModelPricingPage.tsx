@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { ListState } from '@/components/ui/list-state'
 import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { ImportDrawer } from '@/features/models/ImportDrawer'
 import { modelVendor } from '@/features/public-pricing/catalog-data'
 import { VendorIcon } from '@/components/vendor-icon'
@@ -295,24 +295,26 @@ export function ModelPricingPage() {
                 </Td>
                 <Td>
                   <div className="flex items-center justify-end gap-0.5">
-                    <IconButton
-                      icon={Pencil}
-                      label={t('common:edit')}
-                      onClick={() => setDrawer({ model: m })}
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: m.model_name }),
-                          description: t('common:confirmModelDelete'),
-                          requireText: m.model_name,
-                          onConfirm: () => remove.mutate(m.model_name),
-                        })
-                      }
-                    />
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton
+                        icon={Pencil}
+                        label={t('common:edit')}
+                        onClick={() => setDrawer({ model: m })}
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label={t('common:delete')}
+                        variant="destructive"
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: m.model_name }),
+                            description: t('common:confirmModelDelete'),
+                            requireText: m.model_name,
+                            onConfirm: () => remove.mutate(m.model_name),
+                          })
+                        }
+                      />
+                    </ActionGroup>
                   </div>
                 </Td>
               </Tr>

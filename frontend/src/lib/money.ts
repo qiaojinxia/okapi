@@ -15,10 +15,11 @@ export function formatMoney(micro: number, locale: string): string {
 
 /// 上游余额（IMPLEMENTATION §11.33）：不是站内账，货币随上游（DeepSeek / Moonshot 为 CNY），
 /// 后端给的是该货币的 micro 整数。与 formatMoney 分开，站内金额永远是 USD。
-export function formatUpstreamBalance(micro: number, currency: string, locale: string): string {
+export function formatUpstreamBalance(micro: number, currency: string, locale: string, narrowSymbol = false): string {
   return new Intl.NumberFormat(locale, {
     style: 'currency',
     currency,
+    currencyDisplay: narrowSymbol ? 'narrowSymbol' : 'symbol',
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(micro / 1_000_000)
@@ -39,11 +40,12 @@ export function formatUnitPrice(micro: number | null, locale: string): string {
 /// 与 formatMoney 分开是刻意的：单笔调用可能只花 $0.0012，两位小数会显示成
 /// $0.00 像是免费，故 formatMoney 保留四位；而站点级合计带四位小数（$485.4252）
 /// 只是噪音，且金额大到百万时需要紧凑记法才不撑破卡片。
-export function formatMoneyAggregate(micro: number, locale: string, preserveSmallAmounts = false): string {
+export function formatMoneyAggregate(micro: number, locale: string, preserveSmallAmounts = false, narrowSymbol = false): string {
   const usd = micro / 1_000_000
   return new Intl.NumberFormat(locale, {
     style: 'currency',
     currency: 'USD',
+    currencyDisplay: narrowSymbol ? 'narrowSymbol' : 'symbol',
     notation: Math.abs(usd) >= 1_000_000 ? 'compact' : 'standard',
     minimumFractionDigits: Math.abs(usd) >= 1_000_000 ? 0 : 2,
     maximumFractionDigits: preserveSmallAmounts && Math.abs(usd) > 0 && Math.abs(usd) < 0.01 ? 6 : 2,

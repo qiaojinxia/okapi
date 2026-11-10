@@ -1,10 +1,11 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react'
+import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import { ChevronDown, SlidersHorizontal, X } from 'lucide-react'
 import type { AnalyticsSearch } from '@/features/analytics/route-state'
 import { Button } from '@/components/ui/button'
 import { DateRangeField } from '@/components/ui/date-range'
+import { Drawer } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
 import { ModelInput } from '@/features/models/model-input'
 import { ADVANCED_KEYS } from '@/lib/cube'
@@ -14,7 +15,7 @@ export function dimensionLabel(t: TFunction, dim: string): string {
   const basic: Record<string, string> = { model: 'dimModel', channel: 'dimChannel', provider: 'dimProvider', user: 'dimUser', api_key: 'dimApiKey', group: 'dimGroup' }
   return basic[dim] ? t(`analytics:${basic[dim]}`) : t(`analysis:${dim}`)
 }
-export const selectClass = 'h-9 w-full min-w-0 rounded-md border border-border bg-card px-2 text-sm text-foreground focus-visible:outline-2 focus-visible:outline-primary'
+export const selectClass = 'h-9 w-full min-w-0 rounded-lg border border-border bg-card px-2 text-sm text-foreground focus-visible:outline-2 focus-visible:outline-primary'
 
 function Choices({ label, values, onChange, model = false }: { label: string; values: string[]; onChange: (v: string[]) => void; model?: boolean }) {
   const { t } = useTranslation()
@@ -40,109 +41,93 @@ function Choices({ label, values, onChange, model = false }: { label: string; va
 
 export function AnalysisControls({ value, onApply, today }: { value: AnalyticsSearch; onApply: (next: AnalyticsSearch) => void; today?: string }) {
   const { t } = useTranslation()
-  // Remount the editor only when applied filters change; view/metric switches retain drafts.
+  const [open, setOpen] = useState(false)
   const key = JSON.stringify([value.days, ...ADVANCED_KEYS.map((k) => value[k])])
   const label = (k: typeof ADVANCED_KEYS[number]) => t(`analysis:${k === 'stream' ? 'request_type' : k}`)
   const display = (k: typeof ADVANCED_KEYS[number]) => { const v = value[k]; return Array.isArray(v) ? v.join(' · ') : k === 'stream' && typeof v === 'boolean' ? t(v ? 'analysis:stream' : 'analysis:non_stream') : ['granularity', 'request_type', 'billing_type'].includes(k) && typeof v === 'string' && ['hour', 'day', 'stream', 'non_stream', 'websocket', 'ratio', 'tiered', 'per_call'].includes(v) ? t(`analysis:${v}`) : String(v) }
   const active = ADVANCED_KEYS.filter((k) => value[k] !== undefined && !(Array.isArray(value[k]) && !value[k]?.length))
-  return <details className="group min-w-0 rounded-xl border border-border bg-card">
-    <summary className="flex min-h-11 cursor-pointer flex-wrap items-center gap-2 rounded-xl px-3 py-2.5 text-sm outline-none marker:content-none focus-visible:ring-2 focus-visible:ring-primary/40">
-      <SlidersHorizontal size={16} className="shrink-0 text-muted-foreground" /><span className="font-medium">{t('analysis:advanced')}</span>
-      <span className="min-w-0 flex-1 text-xs text-muted-foreground">{active.length ? t('analysis:active', { n: active.length }) : t('analysis:advancedHint')}</span>
-      <ChevronDown aria-hidden size={16} className="shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
-      {active.length > 0 && <span className="flex w-full min-w-0 flex-wrap gap-1.5">
-        {value.start_date && <span className="rounded bg-primary/8 px-2 py-1 text-xs text-primary">{value.start_date} — {value.end_date}</span>}
-        {value.model_source && <span className="rounded bg-primary/8 px-2 py-1 text-xs text-primary">{t(`analysis:source_${value.model_source}`)}</span>}
-        {active.filter((k) => !['start_date', 'end_date', 'model_source'].includes(k)).map((k) => <span key={k} className="max-w-full truncate rounded bg-muted px-2 py-1 text-xs sm:max-w-72" title={`${label(k)}: ${display(k)}`}>{label(k)}: {display(k)}</span>)}
-      </span>}
-    </summary>
-    <Editor key={key} value={value} onApply={onApply} today={today} />
-  </details>
+  const chips: { id: string; text: string; primary?: boolean }[] = []
+  if (value.start_date) chips.push({ id: 'range', text: `${value.start_date} — ${value.end_date}`, primary: true })
+  if (value.model_source) chips.push({ id: 'source', text: t(`analysis:source_${value.model_source}`), primary: true })
+  for (const k of active.filter((key) => !['start_date', 'end_date', 'model_source'].includes(key))) {
+    chips.push({ id: k, text: `${label(k)}: ${display(k)}` })
+  }
+  const apply = (next: AnalyticsSearch) => { onApply(next); setOpen(false) }
+  return <>
+    <section data-slot="analysis-filter-summary" aria-label={t('analysis:advanced')} className="flex min-h-11 min-w-0 items-center gap-2 overflow-hidden rounded-xl border border-border bg-card px-2 py-1.5">
+      <Button variant="ghost" size="sm" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)} className="shrink-0 px-2">
+        <SlidersHorizontal aria-hidden size={16} className="text-muted-foreground" />
+        <span>{t('analysis:advanced')}</span>
+        {active.length > 0 && <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground" aria-label={t('analysis:active', { n: active.length })}>{active.length}</span>}
+        <ChevronDown aria-hidden size={15} className="text-muted-foreground" />
+      </Button>
+      {chips.length === 0 ? (
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{t('analysis:advancedHint')}</span>
+      ) : (
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto whitespace-nowrap scrollbar-none" aria-label={t('analysis:active', { n: active.length })}>
+          {chips.slice(0, 3).map((chip) => <span key={chip.id} className={`shrink-0 rounded-md px-2 py-1 text-xs ${chip.primary ? 'bg-primary/8 text-primary' : 'bg-muted text-foreground'}`} title={chip.text}>{chip.text}</span>)}
+          {chips.length > 3 && <button type="button" className="min-h-7 shrink-0 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" onClick={() => setOpen(true)}>+{chips.length - 3}</button>}
+        </div>
+      )}
+    </section>
+    <Editor key={key} open={open} value={value} onApply={apply} onClose={() => setOpen(false)} today={today} />
+  </>
 }
-function Editor({ value, onApply, today }: { value: AnalyticsSearch; onApply: (next: AnalyticsSearch) => void; today?: string }) {
+
+function Editor({ open, value, onApply, onClose, today }: { open: boolean; value: AnalyticsSearch; onApply: (next: AnalyticsSearch) => void; onClose: () => void; today?: string }) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState(value)
   const [error, setError] = useState(false)
-  // 数据还没回来时 today 是空的：先用浏览器的日期给月历定个“今天”，校验仍只认服务端给的 today
   const calendarToday = today ?? new Date().toISOString().slice(0, 10)
-  const form = useRef<HTMLFormElement>(null)
-  const fields = useRef<HTMLDivElement>(null)
-  const actions = useRef<HTMLDivElement>(null)
-  // 用实际剩余视口约束表单，操作栏占自己的行，不覆盖正在编辑的字段。
-  useLayoutEffect(() => {
-    const root = form.current, body = fields.current, footer = actions.current
-    if (!root || !body || !footer) return
-    let frame = 0
-    const measure = () => {
-      if (!root.getClientRects().length) return
-      const viewport = window.visualViewport
-      const bottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight)
-      const available = Math.max(160, Math.floor(bottom - Math.max(0, root.getBoundingClientRect().top) - footer.offsetHeight - 16))
-      const height = `min(55dvh, 32rem, ${available}px)`
-      if (body.style.maxHeight !== height) body.style.maxHeight = height
-    }
-    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure) }
-    const observer = new ResizeObserver(schedule)
-    observer.observe(root)
-    observer.observe(footer)
-    if (root.parentElement) observer.observe(root.parentElement)
-    window.addEventListener('resize', schedule)
-    window.addEventListener('scroll', schedule, { passive: true })
-    window.visualViewport?.addEventListener('resize', schedule)
-    window.visualViewport?.addEventListener('scroll', schedule)
-    schedule()
-    return () => {
-      cancelAnimationFrame(frame)
-      observer.disconnect()
-      window.removeEventListener('resize', schedule)
-      window.removeEventListener('scroll', schedule)
-      window.visualViewport?.removeEventListener('resize', schedule)
-      window.visualViewport?.removeEventListener('scroll', schedule)
-    }
-  }, [])
   const patch = (p: Partial<AnalyticsSearch>) => { setDraft((s) => ({ ...s, ...p })); setError(false) }
   const apply = () => {
     const { start_date: start, end_date: end } = draft
     const days = start && end ? (Date.parse(end) - Date.parse(start)) / 86400_000 + 1 : draft.days ?? 7
     if (!!start !== !!end || !Number.isFinite(days) || days < 1 || days > 366 || (end && today && end > today) || (draft.granularity === 'hour' && days > 31)) { setError(true); return }
-    // Model lists replace a previous single-model focus; selected source applies to all views.
     const next = { ...value }; for (const k of ADVANCED_KEYS) Object.assign(next, { [k]: draft[k] })
     if (draft.models?.length) next.model = undefined
     if (draft.groups?.length) next.group = undefined
     onApply(next)
   }
+  const reset = () => {
+    const next = { ...value }; for (const k of ADVANCED_KEYS) delete next[k]
+    onApply(next)
+  }
   const field = (name: 'endpoint' | 'upstream_endpoint' | 'node') => <label key={name} className="min-w-0 space-y-1 text-xs text-muted-foreground">{t(`analysis:${name}`)}<Input value={draft[name] ?? ''} maxLength={256} onChange={(e) => patch({ [name]: e.target.value.trim() || undefined })} /></label>
-  return <form ref={form} className="min-w-0 border-t border-border" onSubmit={(e) => { e.preventDefault(); apply() }}>
-    <div ref={fields} className="max-h-[min(55dvh,32rem)] space-y-5 overflow-y-auto overscroll-contain p-4" role="region" aria-label={t('analysis:editConditions')} tabIndex={0}>
-    <fieldset className="min-w-0 space-y-3">
-      <legend className="text-sm font-medium">{t('analysis:timeSection')}</legend>
-      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-      <div className="col-span-2 min-w-0 space-y-1">
-        <span className="block text-xs text-muted-foreground">{t('analysis:dateRange')}</span>
-        <DateRangeField today={calendarToday} label={t('analysis:dateRange')} placeholder={t('analysis:dateRangePlaceholder')} value={{ start: draft.start_date ?? '', end: draft.end_date ?? '' }} onChange={(range) => patch({ start_date: range.start || undefined, end_date: range.end || undefined })} />
-      </div>
-      <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:granularity')}<select aria-label={t('analysis:granularity')} className={selectClass} value={draft.granularity ?? ''} onChange={(e) => patch({ granularity: e.target.value as AnalyticsSearch['granularity'] || undefined })}>{['', 'hour', 'day'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'auto'}`)}</option>)}</select></label>
-      <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:model_source')}<select aria-label={t('analysis:model_source')} className={selectClass} value={draft.model_source ?? 'billed'} onChange={(e) => patch({ model_source: e.target.value as AnalyticsSearch['model_source'] })}>{['billed', 'requested', 'upstream'].map((v) => <option key={v} value={v}>{t(`analysis:source_${v}`)}</option>)}</select></label>
-      </div>
-      <p className="text-xs leading-5 text-muted-foreground">{t('analysis:rangeHint')}</p>
-    </fieldset>
-    <fieldset className="min-w-0 space-y-3 border-t border-border pt-3">
-      <legend className="pr-2 text-sm font-medium">{t('analysis:requestSection')}</legend>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-      {field('endpoint')}{field('upstream_endpoint')}{field('node')}
-      <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:request_type')}<select aria-label={t('analysis:request_type')} className={selectClass} value={draft.request_type ?? (draft.stream === true ? 'stream' : draft.stream === false ? 'non_stream' : '')} onChange={(e) => patch({ request_type: e.target.value || undefined, stream: undefined })}>{['', 'stream', 'non_stream', 'websocket'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'all'}`)}</option>)}</select></label>
-      <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:billing_type')}<select aria-label={t('analysis:billing_type')} className={selectClass} value={draft.billing_type ?? ''} onChange={(e) => patch({ billing_type: e.target.value || undefined })}>{['', 'ratio', 'tiered', 'per_call'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'all'}`)}</option>)}{draft.billing_type && !['ratio', 'tiered', 'per_call'].includes(draft.billing_type) && <option value={draft.billing_type}>{draft.billing_type}</option>}</select></label>
-      </div>
-    </fieldset>
-    <fieldset className="min-w-0 space-y-3 border-t border-border pt-3">
-      <legend className="pr-2 text-sm font-medium">{t('analysis:comparisonSection')}</legend>
-      <div className="grid gap-4 md:grid-cols-2"><Choices model label={t('analysis:models')} values={draft.models ?? []} onChange={(v) => patch({ models: v.length ? v : undefined })} /><Choices label={t('analysis:groups')} values={draft.groups ?? []} onChange={(v) => patch({ groups: v.length ? v : undefined })} /></div>
-      <p className="text-xs leading-5 text-muted-foreground">{t('analysis:selectionHint')}</p>
-    </fieldset>
-    </div>
-    <div ref={actions} className="space-y-2 rounded-b-xl border-t border-border bg-card px-4 py-3">
+  return <Drawer open={open} onClose={onClose} title={t('analysis:advanced')} description={t('analysis:advancedHint')} size="lg" footer={<>
+    <Button variant="outline" onClick={reset}>{t('analysis:reset')}</Button>
+    <Button variant="ghost" onClick={onClose}>{t('common:close')}</Button>
+    <Button onClick={apply}>{t('analysis:apply')}</Button>
+  </>}>
+    <form className="space-y-5" onSubmit={(e) => { e.preventDefault(); apply() }}>
       {error && <p role="alert" className="text-sm text-destructive">{t('analysis:invalidRange')}</p>}
-      <div className="flex flex-wrap items-center gap-2 [&>button]:min-h-10 max-sm:[&>button]:flex-1"><Button type="submit">{t('analysis:apply')}</Button><Button variant="outline" onClick={() => { const next = { ...value }; for (const k of ADVANCED_KEYS) delete next[k]; onApply(next); setDraft(next); setError(false) }}>{t('analysis:reset')}</Button></div>
-    </div>
-  </form>
+      <div className="space-y-5" role="region" aria-label={t('analysis:editConditions')} tabIndex={0}>
+        <fieldset className="min-w-0 space-y-3">
+          <legend className="text-sm font-medium">{t('analysis:timeSection')}</legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="col-span-2 min-w-0 space-y-1">
+              <span className="block text-xs text-muted-foreground">{t('analysis:dateRange')}</span>
+              <DateRangeField today={calendarToday} label={t('analysis:dateRange')} placeholder={t('analysis:dateRangePlaceholder')} value={{ start: draft.start_date ?? '', end: draft.end_date ?? '' }} onChange={(range) => patch({ start_date: range.start || undefined, end_date: range.end || undefined })} />
+            </div>
+            <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:granularity')}<select aria-label={t('analysis:granularity')} className={selectClass} value={draft.granularity ?? ''} onChange={(e) => patch({ granularity: e.target.value as AnalyticsSearch['granularity'] || undefined })}>{['', 'hour', 'day'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'auto'}`)}</option>)}</select></label>
+            <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:model_source')}<select aria-label={t('analysis:model_source')} className={selectClass} value={draft.model_source ?? 'billed'} onChange={(e) => patch({ model_source: e.target.value as AnalyticsSearch['model_source'] })}>{['billed', 'requested', 'upstream'].map((v) => <option key={v} value={v}>{t(`analysis:source_${v}`)}</option>)}</select></label>
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">{t('analysis:rangeHint')}</p>
+        </fieldset>
+        <fieldset className="min-w-0 space-y-3 border-t border-border pt-3">
+          <legend className="pr-2 text-sm font-medium">{t('analysis:requestSection')}</legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {field('endpoint')}{field('upstream_endpoint')}{field('node')}
+            <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:request_type')}<select aria-label={t('analysis:request_type')} className={selectClass} value={draft.request_type ?? (draft.stream === true ? 'stream' : draft.stream === false ? 'non_stream' : '')} onChange={(e) => patch({ request_type: e.target.value || undefined, stream: undefined })}>{['', 'stream', 'non_stream', 'websocket'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'all'}`)}</option>)}</select></label>
+            <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:billing_type')}<select aria-label={t('analysis:billing_type')} className={selectClass} value={draft.billing_type ?? ''} onChange={(e) => patch({ billing_type: e.target.value || undefined })}>{['', 'ratio', 'tiered', 'per_call'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'all'}`)}</option>)}{draft.billing_type && !['ratio', 'tiered', 'per_call'].includes(draft.billing_type) && <option value={draft.billing_type}>{draft.billing_type}</option>}</select></label>
+          </div>
+        </fieldset>
+        <fieldset className="min-w-0 space-y-3 border-t border-border pt-3">
+          <legend className="pr-2 text-sm font-medium">{t('analysis:comparisonSection')}</legend>
+          <div className="grid gap-4 md:grid-cols-2"><Choices model label={t('analysis:models')} values={draft.models ?? []} onChange={(v) => patch({ models: v.length ? v : undefined })} /><Choices label={t('analysis:groups')} values={draft.groups ?? []} onChange={(v) => patch({ groups: v.length ? v : undefined })} /></div>
+          <p className="text-xs leading-5 text-muted-foreground">{t('analysis:selectionHint')}</p>
+        </fieldset>
+      </div>
+    </form>
+  </Drawer>
 }

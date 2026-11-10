@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { ListState } from '@/components/ui/list-state'
 import { Pagination } from '@/components/ui/pagination'
 import { EmptyState } from '@/components/ui/state'
@@ -112,21 +112,23 @@ export function GroupList({ tabs }: { tabs: React.ReactNode }) {
                 </Td>
                 <Td>
                   <div className="flex items-center justify-end gap-0.5">
-                    <IconButton icon={ListTree} label={t('admin:proxyAssignmentsTitle', { name: g.name })} onClick={() => setAssignments(g)} />
-                    <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer({ group: g })} />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      disabled={g.channel_count > 0 || g.is_default}
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: g.name }),
-                          description: t('admin:proxyGroupDeleteConfirm'),
-                          onConfirm: () => remove.mutate(g.code),
-                        })
-                      }
-                    />
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton icon={ListTree} label={t('admin:proxyAssignmentsTitle', { name: g.name })} onClick={() => setAssignments(g)} />
+                      <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer({ group: g })} />
+                      <IconButton
+                        icon={Trash2}
+                        label={t('common:delete')}
+                        variant="destructive"
+                        disabled={g.channel_count > 0 || g.is_default}
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: g.name }),
+                            description: t('admin:proxyGroupDeleteConfirm'),
+                            onConfirm: () => remove.mutate(g.code),
+                          })
+                        }
+                      />
+                    </ActionGroup>
                   </div>
                 </Td>
               </Tr>

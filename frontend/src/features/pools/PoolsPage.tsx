@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { ListState } from '@/components/ui/list-state'
@@ -130,7 +130,7 @@ export function PoolsPage() {
                           : '')}
                   </Td>
                   <Td>
-                    <div className="flex items-center gap-0.5">
+                    <ActionGroup label={t('common:actions')}>
                       {/* 抽屉早就支持 pool 回填（策略/说明），页面却一直没给编辑入口 */}
                       <IconButton
                         icon={Pencil}
@@ -150,7 +150,7 @@ export function PoolsPage() {
                           })
                         }
                       />
-                    </div>
+                    </ActionGroup>
                   </Td>
                 </Tr>
               )

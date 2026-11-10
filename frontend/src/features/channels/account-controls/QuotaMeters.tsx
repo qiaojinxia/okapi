@@ -70,7 +70,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
                 aria-valuemin={0} aria-valuemax={100} aria-valuenow={stale ? undefined : percent}>
                 {!stale && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
               </div>
-              <span className={cn('text-right text-[13px] font-semibold tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
+              <span className={cn('text-right text-[13px] font-medium tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
                 {stale ? '—' : `${percent}%`}
               </span>
               {/* 行内只放剩余时长，具体重置时刻进悬停提示：表格不必为它横向滚动 */}

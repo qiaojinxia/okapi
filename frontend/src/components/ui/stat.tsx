@@ -68,7 +68,7 @@ export function Stat({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={cn(
-        'relative flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-card',
+        'relative flex items-start gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-card',
         compact && 'p-3',
         onClick && 'transition-colors hover:border-primary/40 hover:bg-accent/40',
         className,

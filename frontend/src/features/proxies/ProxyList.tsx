@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { ListState } from '@/components/ui/list-state'
 import { Pagination } from '@/components/ui/pagination'
 import { EmptyState } from '@/components/ui/state'
@@ -220,29 +220,31 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
                   </Td>
                   <Td>
                     <div className="flex items-center justify-end gap-0.5">
-                      <IconButton
-                        icon={Activity}
-                        label={t('admin:proxyTest')}
-                        disabled={test.isPending}
-                        onClick={() => test.mutate(p.id)}
-                      />
-                      <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer({ proxy: p })} />
-                      <IconButton
-                        icon={Trash2}
-                        label={t('common:delete')}
-                        variant="destructive"
-                        disabled={used}
-                        onClick={() =>
-                          confirm({
-                            title: t('common:confirmDeleteTitle', { name: p.name }),
-                            description: t(
-                              p.assigned_keys > 0 ? 'admin:proxyDeleteReassignConfirm' : 'admin:proxyDeleteConfirm',
-                              { n: p.assigned_keys },
-                            ),
-                            onConfirm: () => remove.mutate(p.id),
-                          })
-                        }
-                      />
+                      <ActionGroup label={t('common:actions')}>
+                        <IconButton
+                          icon={Activity}
+                          label={t('admin:proxyTest')}
+                          disabled={test.isPending}
+                          onClick={() => test.mutate(p.id)}
+                        />
+                        <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer({ proxy: p })} />
+                        <IconButton
+                          icon={Trash2}
+                          label={t('common:delete')}
+                          variant="destructive"
+                          disabled={used}
+                          onClick={() =>
+                            confirm({
+                              title: t('common:confirmDeleteTitle', { name: p.name }),
+                              description: t(
+                                p.assigned_keys > 0 ? 'admin:proxyDeleteReassignConfirm' : 'admin:proxyDeleteConfirm',
+                                { n: p.assigned_keys },
+                              ),
+                              onConfirm: () => remove.mutate(p.id),
+                            })
+                          }
+                        />
+                      </ActionGroup>
                     </div>
                   </Td>
                 </Tr>

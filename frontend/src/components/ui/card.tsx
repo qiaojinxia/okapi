@@ -9,7 +9,7 @@ export function Card({ className, interactive = false, ...props }: CardProps) {
   return (
     <div
       className={cn(
-        'rounded-lg border border-border bg-card text-card-foreground shadow-card',
+        'rounded-xl border border-border bg-card text-card-foreground shadow-card',
         interactive &&
           'cursor-pointer transition-[border-color,box-shadow,transform] hover:border-primary/40 hover:shadow-popover',
         className,

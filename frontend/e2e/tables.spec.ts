@@ -217,8 +217,8 @@ for (const { width, language } of [
     await expect(table.locator('tbody tr').nth(1).locator('td').nth(5)).toHaveText(language === 'en' ? 'Empty' : '空池')
     const actions = table.locator('th').last()
     for (const row of await table.locator('tbody tr').all()) {
-      const lastButton = (await row.getByRole('button').last().boundingBox())!
-      expect(Math.abs(await rightEdge(actions) - lastButton.x - lastButton.width)).toBeLessThanOrEqual(1)
+      const group = (await row.locator('[data-slot="action-group"]').boundingBox())!
+      expect(Math.abs(await rightEdge(actions) - group.x - group.width)).toBeLessThanOrEqual(1)
     }
     if (width === 390) await table.locator('..').evaluate((element) => { element.scrollLeft = element.scrollWidth })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

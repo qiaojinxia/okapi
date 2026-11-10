@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { ListState } from '@/components/ui/list-state'
 import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { fetchRoles } from '@/features/roles/api'
@@ -111,7 +111,7 @@ export function RolesPage() {
                   </div>
                 </Td>
                 <Td>
-                  <div className="flex items-center gap-0.5">
+                  <ActionGroup label={t('common:actions')}>
                     <IconButton
                       icon={Pencil}
                       label={t('common:edit')}
@@ -129,7 +129,7 @@ export function RolesPage() {
                         })
                       }
                     />
-                  </div>
+                  </ActionGroup>
                 </Td>
               </Tr>
             ))}

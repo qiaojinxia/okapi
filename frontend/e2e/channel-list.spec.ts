@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 
-// 渠道列表的版面与行内交互：状态分段筛选、「···」行菜单、行内五块信息（渠道 / 状态 / 用量窗口 / 调度操作）。
+// 渠道列表的版面与行内交互：状态分段筛选、「···」行菜单、行内五块信息（渠道 / 状态 / 用量 / 额度 / 调度操作）。
 // 接口桩，不碰数据库；固定"现在"让「今天 HH:mm」「x 分钟后」这类文案可重复。
 
 type Json = Record<string, unknown>
@@ -164,6 +164,9 @@ test('视觉评审：渠道页当前设计截图', async ({ page }) => {
   await page.waitForTimeout(300)
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.screenshot({ path: 'test-results/channel-after-1280.png', fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.getByRole('group', { name: '表格横向浏览' })).toBeVisible()
+  await page.screenshot({ path: 'test-results/channel-after-mobile.png', fullPage: true })
 })
 
 test('视觉评审：渠道页英文截图', async ({ page }) => {
@@ -195,15 +198,16 @@ test('视觉评审：渠道编辑抽屉截图', async ({ page }) => {
   await page.screenshot({ path: 'test-results/channel-drawer-dark.png', fullPage: true })
 })
 
-test('渠道列表：页头统计是朴素文字，按钮无图标，新建渠道的加号只是装饰', async ({ page }) => {
+test('渠道列表：页头统计是朴素文字，新建按钮沿用全局图标与排版', async ({ page }) => {
   await prepare(page)
   const header = page.locator('[data-slot="page-header"]')
   await expect(header).toContainText('共 5 条 · 4 启用')
-  // 统计不再是徽章胶囊，页头也没有图标方块
   await expect(header.locator('[class*="rounded-full"]')).toHaveCount(0)
-  await expect(header.locator('svg')).toHaveCount(0)
-  // 加号用 aria-hidden 的文字画，读屏与按名字找按钮时只有「新建渠道」
-  await expect(header.getByRole('button', { name: '新建渠道', exact: true })).toBeVisible()
+  await expect(header.locator('h1')).toHaveCSS('font-size', '20px')
+  const create = header.getByRole('button', { name: '新建渠道', exact: true })
+  await expect(create).toBeVisible()
+  await expect(create.locator('svg')).toHaveAttribute('aria-hidden', 'true')
+  await expect(header.locator('svg')).toHaveCount(1)
   await expect(header.getByRole('button', { name: '测试全部启用渠道', exact: true })).toBeVisible()
   await expect(header.getByRole('button', { name: '路由诊断', exact: true })).toBeVisible()
   // 筛选直接放在页面底色上，没有再包一层工具栏卡片
@@ -270,7 +274,7 @@ test('渠道列表：地址里手敲 status=enabled 直接生效，数字和别�
   expect(hits.at(-1)).toBe('?limit=10&offset=0')
 })
 
-test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / 调度与操作', async ({ page }) => {
+test('渠道列表：一行五块信息——渠道 / 状态 / 用量 / 额度 / 调度与操作', async ({ page }) => {
   await prepare(page)
   const alice = rowOf(page, ALICE_MASKED)
   await expect(alice).toBeVisible()
@@ -298,9 +302,15 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / �
   // 旧的「测试」标签行已并进第一行
   await expect(state.locator('dt', { hasText: /^测试$/ })).toHaveCount(0)
 
-  // 用量窗口：第一行金额打头（重点）、后面跟计数，再是额度窗口条
-  await expect(alice).toContainText('US$314.68 2,085 次 · 6.4亿 tokens')
-  await expect(alice).not.toContainText('US$314.68 ·')
+  // 花费 / 请求 / Token 是同级指标：金额不再加大加粗，也不带冗余的 US 前缀
+  const spend = alice.locator('[data-slot="channel-spend"]')
+  await expect(spend).toHaveText('$314.68')
+  await expect(spend).toHaveCSS('font-size', '13px')
+  await expect(spend).toHaveCSS('font-weight', '500')
+  await expect(alice.locator('[data-slot="channel-usage"]')).toContainText('30 天花费')
+  await expect(alice.locator('[data-slot="channel-usage"]')).toContainText('2,085 次')
+  await expect(alice.locator('[data-slot="channel-usage"]')).toContainText('6.4亿')
+  await expect(alice).not.toContainText('US$314.68')
   const fiveHour = alice.getByRole('progressbar', { name: '5小时额度用量' })
   const sevenDay = alice.getByRole('progressbar', { name: '7天额度用量' })
   await expect(fiveHour).toHaveAttribute('aria-valuenow', '0')
@@ -309,8 +319,10 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / �
 
   // 调度开关在上，测试 / 编辑 / 更多操作三个图标按钮在下（名字在读屏名与悬停提示里，按钮上没有字）
   await expect(alice.getByRole('switch', { name: `参与调度：${ALICE_MASKED}` })).toBeChecked()
+  const actions = alice.getByRole('group', { name: '操作', exact: true })
+  await expect(actions).toHaveAttribute('data-slot', 'action-group')
   for (const name of ['测试', '编辑', '更多操作']) {
-    const button = alice.getByRole('button', { name, exact: true })
+    const button = actions.getByRole('button', { name, exact: true })
     await expect(button).toBeVisible()
     await expect(button).toHaveText('')
     await expect(button.locator('svg')).toHaveCount(1)
@@ -394,7 +406,8 @@ test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复
   await expect(openai).toContainText('直连')
   // 上游余额：带标签，不和上面的计费金额混在一起
   await expect(openai).toContainText('余额')
-  await expect(openai).toContainText('US$12.34')
+  await expect(openai).toContainText('$12.34')
+  await expect(openai).toContainText('近 30 天暂无计费调用')
   await expect(openai.getByText('OpenAI API Key', { exact: true })).toBeVisible()
 
   const spare = rowOf(page, 'spare-compat')
@@ -494,6 +507,10 @@ test('渠道列表：菜单项走原有动作——试聊开抽屉、复制带 -
 test('渠道列表：菜单浮在表格之上不被裁掉；末行放不下就向上翻；触发器一动就收起', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 420 })
   await prepare(page)
+  // 等异步内容就位，避免菜单打开后行高变化把触发器移走。
+  await expect(page.getByRole('progressbar')).toHaveCount(6)
+  await expect(page.locator('[data-slot="channel-spend"]').first()).toHaveText('$314.68')
+  await expect(rowOf(page, ALICE_MASKED)).toContainText('216.167.15.231')
   const viewport = page.viewportSize()!
   const last = rowOf(page, 'spare-compat').getByRole('button', { name: '更多操作', exact: true })
   // 滚到表格底：末行贴着窗口下沿，下方放不下菜单。直接 el.click()，
@@ -545,11 +562,11 @@ test('渠道列表：1280 宽下五列放得下，不出现横向滚动', async 
   await expect(viewport).toBeVisible()
   expect(await viewport.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
   await expect(page.getByRole('group', { name: '表格横向浏览' })).toHaveCount(0)
-  // 表头五列：勾选 / 渠道 / 状态 / 用量窗口 / 调度 / 操作
-  await expect(page.locator('thead th')).toHaveText(['', '渠道', '状态', '用量窗口', '调度 / 操作'])
+  // 表头五列：勾选 / 渠道 / 状态 / 用量 / 额度 / 调度 / 操作
+  await expect(page.locator('thead th')).toHaveText(['', '渠道', '状态', '用量 / 额度', '调度 / 操作'])
 })
 
-test('渠道列表：宽屏（1608）下列与列不留大块空白——状态文字列逐行对齐，额度条拉长，金额挨着计数、与额度标签左对齐', async ({ page }) => {
+test('渠道列表：宽屏（1608）下状态逐行对齐，用量指标同排，额度条使用富余宽度', async ({ page }) => {
   await page.setViewportSize({ width: 1608, height: 900 })
   await prepare(page)
   const viewport = page.locator('[data-slot="table-viewport"]')
@@ -564,15 +581,19 @@ test('渠道列表：宽屏（1608）下列与列不留大块空白——状态�
   // 用量格吃掉富余的宽度：额度条比窄屏时长得多（1280 宽时只有 60~70px）
   const bar = (await alice.getByRole('progressbar', { name: '5小时额度用量' }).boundingBox())!
   expect(bar.width).toBeGreaterThanOrEqual(220)
-  // 金额打头：左缘与下面「5小时」标签的左缘对齐，计数紧跟在它后面（不是隔着一大截被推到右缘）
-  const amount = (await alice.getByText('US$314.68').boundingBox())!
+  const usage = (await alice.locator('[data-slot="channel-usage"]').boundingBox())!
   const label = (await alice.getByText('5小时', { exact: true }).boundingBox())!
-  const counts = (await alice.getByText('2,085 次 · 6.4亿 tokens').boundingBox())!
-  expect(Math.abs(amount.x - label.x)).toBeLessThanOrEqual(1)
-  expect(counts.x - (amount.x + amount.width)).toBeLessThanOrEqual(16)
+  expect(Math.abs(usage.x - label.x)).toBeLessThanOrEqual(1)
+  const amount = (await alice.locator('[data-slot="channel-spend"]').boundingBox())!
+  const requests = (await alice.getByText('2,085 次', { exact: true }).boundingBox())!
+  const tokens = (await alice.getByText('6.4亿', { exact: true }).boundingBox())!
+  expect(Math.abs(amount.y - requests.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(amount.y - tokens.y)).toBeLessThanOrEqual(1)
+  expect(requests.x).toBeGreaterThan(amount.x + amount.width)
+  expect(tokens.x).toBeGreaterThan(requests.x + requests.width)
   // 状态首行文字的末端与用量格的左缘之间留得出空隙（状态列定宽后曾紧贴）
   const probeText = (await alice.locator('dd').first().locator('xpath=./span[1]').boundingBox())!
-  expect(amount.x - (probeText.x + probeText.width)).toBeGreaterThanOrEqual(24)
+  expect(usage.x - (probeText.x + probeText.width)).toBeGreaterThanOrEqual(24)
 })
 
 test('渠道列表：深色主题下状态点与额度条仍用语义色', async ({ page }) => {

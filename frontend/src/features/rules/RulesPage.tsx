@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { ListState } from '@/components/ui/list-state'
 import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { RuleDrawer } from '@/features/rules/RuleDrawer'
@@ -207,25 +207,27 @@ export function RulesPage() {
                   </Td>
                   <Td>
                     <div className="flex items-center justify-end gap-0.5">
-                      <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer(r)} />
-                      <IconButton
-                        icon={r.enabled ? PowerOff : Power}
-                        label={r.enabled ? t('common:disabled') : t('common:enabled')}
-                        disabled={toggle.isPending}
-                        onClick={() => toggle.mutate({ code: r.rule_code, enabled: !r.enabled })}
-                      />
-                      <IconButton
-                        icon={Trash2}
-                        label={t('common:delete')}
-                        variant="destructive"
-                        onClick={() =>
-                          confirm({
-                            title: t('common:confirmDeleteTitle', { name: r.rule_code }),
-                            description: t('admin:confirmRuleDelete'),
-                            onConfirm: () => remove.mutate(r.rule_code),
-                          })
-                        }
-                      />
+                      <ActionGroup label={t('common:actions')}>
+                        <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer(r)} />
+                        <IconButton
+                          icon={r.enabled ? PowerOff : Power}
+                          label={r.enabled ? t('common:disabled') : t('common:enabled')}
+                          disabled={toggle.isPending}
+                          onClick={() => toggle.mutate({ code: r.rule_code, enabled: !r.enabled })}
+                        />
+                        <IconButton
+                          icon={Trash2}
+                          label={t('common:delete')}
+                          variant="destructive"
+                          onClick={() =>
+                            confirm({
+                              title: t('common:confirmDeleteTitle', { name: r.rule_code }),
+                              description: t('admin:confirmRuleDelete'),
+                              onConfirm: () => remove.mutate(r.rule_code),
+                            })
+                          }
+                        />
+                      </ActionGroup>
                     </div>
                   </Td>
                 </Tr>
