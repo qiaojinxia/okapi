@@ -225,14 +225,16 @@ test('历史不适用倍率灰显保留，编辑并保存不会清空缓存倍�
 })
 
 test('官方预设数据白名单、来源、独立副本和促销期限；不按名称前缀猜测', () => {
-  expect(MODEL_PRESETS).toHaveLength(32)
+  expect(MODEL_PRESETS).toHaveLength(33)
   expect(new Set(MODEL_PRESETS.map((p) => p.id)).size).toBe(MODEL_PRESETS.length)
   expect(new Set(MODEL_PRESETS.map((p) => p.vendor)).size).toBe(6)
   const sourceHosts = ['developers.openai.com', 'platform.claude.com', 'ai.google.dev', 'api-docs.deepseek.com', 'www.alibabacloud.com', 'platform.kimi.ai']
   for (const preset of MODEL_PRESETS) {
     expect(sourceHosts).toContain(new URL(preset.source).hostname)
     expect(new URL(preset.source).protocol).toBe('https:')
-    expect(preset.checkedAt).toBe('2026-09-30')
+    // 2026-09-30 is the batch date; an entry added after it carries the day it was checked (never earlier than the batch)
+    expect(preset.checkedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(preset.checkedAt >= '2026-09-30').toBe(true)
     expect(MODEL_KINDS).toContain(preset.kind)
     for (const locale of [zh, en]) {
       expect(locale.catalog.modelKinds[preset.kind]).toBeTruthy()
@@ -261,6 +263,14 @@ test('官方预设数据白名单、来源、独立副本和促销期限；不�
   expect(presetMetadata(findModelPreset('gpt-6-astra')!).capabilities.vision).toBe(true)
   expect(presetMetadata(findModelPreset('gpt-6-astra')!).input_modalities).toEqual(['text', 'image'])
   expect(presetCache(findModelPreset('claude-opus-5-5')!)).toMatchObject({ cache_ratio: '0.05', ttl: { cache_write_5m: '1.25', cache_write_1h: '2' } })
+  // Fable 5.2 (released 2026-11-09): $8 / $40, cache read $0.20 = 0.025x, writes $10 / $16 = 1.25x / 2x, 1M context, 128K output
+  const fable52 = findModelPreset('claude-fable-5-2')!
+  expect(fable52).toMatchObject({ displayName: 'Claude Fable 5.2', vendor: 'Anthropic', checkedAt: '2026-11-09',
+    contextWindow: 1_000_000, maxOutput: 128_000, referencePrice: { input: '8', output: '40' },
+    source: 'https://platform.claude.com/docs/en/models/fable-5-2/overview' })
+  expect(presetCache(fable52)).toMatchObject({ cache_ratio: '0.025', cache_write_ratio: '1.25', ttl: { cache_write_5m: '1.25', cache_write_1h: '2' } })
+  expect(presetMetadata(fable52)).toMatchObject({ context_window: '1000000', max_output: '128000', capabilities: { vision: true, tools: true, reasoning: true, prompt_cache: true } })
+  expect(findModelPreset('claude-fable-5-1')!.referencePrice).toEqual({ input: '10', output: '50' })
   expect(presetMetadata(findModelPreset('qwen3.6-plus')!).capabilities.prompt_cache).toBe(true)
   expect(presetMetadata(findModelPreset('qwen3.6-plus-2026-04-02')!).capabilities.prompt_cache).toBe(false)
   expect(presetMetadata(findModelPreset('kimi-k3')!).max_output).toBe('')

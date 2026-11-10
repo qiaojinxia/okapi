@@ -3820,6 +3820,24 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
   - 变异检查共 31 处（Gemini 清洗的每条规则、转发的每个判断、共用闩锁的几处），30 处被抓住；「画像接管时不碰 beta」第一次没被抓住，补了画像用例；唯一没被抓住的是
     `unknown-keys-kept`，它是等价改动——白名单在构造节点时就只复制认得的字段，收尾的 `retain` 只是第二道保险，去掉它输出不变。
 
+### 11.75 登记 Claude Fable 5.2（2026-11-09）
+
+用户：「Fable 5.2 发布了，查下价格、配置，加到支持列表里」。发布当天对照 platform.claude.com 的模型页（`models/fable-5-2/overview`）、what's new、迁移指南与定价页逐项核对：
+
+- **规格**：模型 ID `claude-fable-5-2`（Google Cloud、Foundry、Claude Platform on AWS 同名，Bedrock 为 `anthropic.claude-fable-5-2`；Foundry 另有快速模式的独立模型 `claude-fable-5-2-fast`）；
+  上下文 1M、最大输出 128K；自适应思考恒开（`thinking` 的 `enabled` / `disabled` 返回 400），强制 `tool_choice`（`any` / `tool`）返回 400，文档要求不传 `temperature` / `top_p` / `top_k`；
+  effort 五档（`low` / `medium` / `high` / `xhigh` / `max`），API 缺省 `high`；`computer_20251124` 在 Bedrock 以外返回 400；要求 30 天数据保留（零留存下不可用）。这些与 Fable 5.1 是同一份合同。
+- **价格**（USD / 百万 token）：输入 8、输出 40，5 分钟缓存写 10、1 小时缓存写 16、缓存读 0.20（输入价的 0.025 倍，与 5.1 同一倍率）；Batch 五折（4 / 20）；快速模式 16 / 80（两倍，不进预设）。
+  比 Fable 5.1（10 / 50）便宜 20%。Claude Mythos 5.2 规格与价格相同，只对通过 Anthropic 验证计划的组织开放，不进预设（5.1 的 Mythos 也没有）。
+- **登记两处**：①前端模型预设（模型表单的「官方预设」，现 33 条）加 `claude-fable-5-2`：核对日期单独记 2026-11-09（其余仍是 2026-09-30，所以 e2e 不再要求全部相同，只要求日期格式正确且不早于批次日期）；
+  ②`model_parameters.rs` 的 Anthropic 精确 ID 表：Fable 5.2 与 Mythos 5.2 并入五档、缺省 `high`、不收采样参数（与 5.1 同一份合同）。
+- **没动**：价目目录快照（LiteLLM，约 3900 条）没有 5.2 这一条——它是社区价表的整体快照，选了预设时本来就不查目录；要补就整体跑 `scripts/refresh-pricing-catalog.py`，会带进上游这段时间的所有变动，另做。
+  请求路径上没有按模型名写死的价格或限制：运行时「支持」仍由管理员在模型定价里建 `claude-fable-5-2`、发布价格并加进渠道的模型列表决定（未定价的请求会被拒）。
+
+**验收**：`model_parameters::tests::fable_and_mythos_5_2_share_the_5_1_contract`（已知、五档、缺省 high、与 5.1 逐字段相同、不收 temperature、`minimal` 档被拒、5.3 不在表里仍透传）与 `native_effort_survives_adaptive_thinking` 的 Fable 5.2 一行；
+前端 `model-config.spec.ts` 的预设白名单用例（33 条、来源域名、核对日期格式、Fable 5.2 的价格 / 缓存倍率 / 规格 / 来源）；`tsc -b`、`oxlint`、clippy 1.99 干净；
+变异检查：预设里改输入价 / 输出价 / 缓存读 / 上下文 / 最大输出 / 核对日期 / 显示名、整条删除，八处都被白名单用例咬住。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

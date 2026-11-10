@@ -28,7 +28,7 @@ export interface ModelPreset {
 }
 
 // Curated facts, not runtime name inference or a complete upstream billing model.
-// Sources were checked 2026-09-30. Missing capabilities/limits are deliberately unknown.
+// Sources were checked 2026-09-30 (an entry added later sets its own checkedAt). Missing capabilities/limits are deliberately unknown.
 // Do not extend aliases by prefixes: snapshots and similarly named models may differ.
 const checkedAt = '2026-09-30'
 const openai = (id: string, displayName: string, contextWindow: number, maxOutput: number,
@@ -75,7 +75,11 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
   openai('gpt-4o', 'GPT-4o', 128_000, 16_384, '2.5', '10', '0.5'),
   openai('gpt-4o-mini', 'GPT-4o mini', 128_000, 16_384, '0.15', '0.6', '0.5'),
   // Rechecked 2026-10-06 against platform.claude.com pricing and per-model pages:
-  // cache read 0.1x except Fable 5.1 (0.025x) and Opus 5.5 (0.05x); writes 1.25x (5m) / 2x (1h).
+  // cache read 0.1x except Fable 5.1 / 5.2 (0.025x) and Opus 5.5 (0.05x); writes 1.25x (5m) / 2x (1h).
+  // Fable 5.2 (released 2026-11-09) was added from its model page and the pricing page the same day:
+  // $8 / $40, cache writes $10 (5m) / $16 (1h), reads $0.20, 1M context, 128K output.
+  { ...claude('claude-fable-5-2', 'Claude Fable 5.2', 1_000_000, 128_000, '8', '40', '0.025', 'https://platform.claude.com/docs/en/models/fable-5-2/overview'),
+    checkedAt: '2026-11-09' },
   claude('claude-fable-5-1', 'Claude Fable 5.1', 1_000_000, 128_000, '10', '50', '0.025', 'https://platform.claude.com/docs/en/models/fable-5-1/overview'),
   claude('claude-opus-5-5', 'Claude Opus 5.5', 1_000_000, 128_000, '4', '20', '0.05', 'https://platform.claude.com/docs/en/models/opus-5-5/overview'),
   claude('claude-sonnet-5-5', 'Claude Sonnet 5.5', 1_000_000, 128_000, '2', '10', '0.1', 'https://platform.claude.com/docs/en/models/sonnet-5-5/overview'),

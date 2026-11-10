@@ -1,5 +1,6 @@
 //! Curated request contracts, not administrator capability declarations.
 //! Checked 2026-10-01 against the providers' docs (see docs/model-parameters.md).
+//! Claude Fable / Mythos 5.2 were added 2026-11-09 from platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2.
 //! Match exact upstream IDs; unknown/custom aliases remain passthrough.
 
 use crate::{ReasoningDirective, UpstreamError};
@@ -221,9 +222,11 @@ pub fn profile(dialect: &str, model: &str, api_base: Option<&str>) -> ParameterP
     if dialect == "anthropic" {
         let model = claude_alias(model);
         let levels: &[&'static str] = match model {
-            "claude-fable-5-1" | "claude-fable-5" | "claude-mythos-5-1" | "claude-mythos-5"
-            | "claude-opus-5-5" | "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7"
-            | "claude-sonnet-5-5" | "claude-sonnet-5" => &["low", "medium", "high", "xhigh", "max"],
+            "claude-fable-5-2" | "claude-fable-5-1" | "claude-fable-5" | "claude-mythos-5-2"
+            | "claude-mythos-5-1" | "claude-mythos-5" | "claude-opus-5-5" | "claude-opus-5"
+            | "claude-opus-4-8" | "claude-opus-4-7" | "claude-sonnet-5-5" | "claude-sonnet-5" => {
+                &["low", "medium", "high", "xhigh", "max"]
+            }
             "claude-opus-4-6" | "claude-sonnet-4-6" => &["low", "medium", "high", "max"],
             "claude-opus-4-5" => &["low", "medium", "high"],
             "claude-sonnet-4-5" | "claude-sonnet-4" | "claude-opus-4" | "claude-haiku-4-5" => {
@@ -473,6 +476,41 @@ mod tests {
         assert!(!profile("anthropic", "claude-haiku-4-5-20990101", None).known);
     }
 
+    /// Fable 5.2 / Mythos 5.2 (released 2026-11-09, platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2):
+    /// all five effort levels with `high` as the API default, adaptive thinking only, so no sampling parameters —
+    /// the same contract as Fable 5.1. A later minor version that is not in the table stays passthrough.
+    #[test]
+    fn fable_and_mythos_5_2_share_the_5_1_contract() {
+        let fable_5_1 = profile("anthropic", "claude-fable-5-1", None);
+        assert!(fable_5_1.known);
+        for model in ["claude-fable-5-2", "claude-mythos-5-2"] {
+            let p = profile("anthropic", model, None);
+            assert!(p.known, "{model}");
+            assert_eq!(
+                p.efforts,
+                ["low", "medium", "high", "xhigh", "max"],
+                "{model}"
+            );
+            assert_eq!(p.default_effort, Some("high"), "{model}");
+            assert_eq!(p, fable_5_1, "{model}");
+            assert_eq!(
+                p.validate(&json!({"temperature": 0.5})),
+                Err("temperature"),
+                "{model}"
+            );
+            assert_eq!(
+                p.validate(&json!({"reasoning_effort": "minimal"})),
+                Err("reasoning_effort"),
+                "{model}"
+            );
+            assert!(
+                p.validate(&json!({"reasoning_effort": "xhigh"})).is_ok(),
+                "{model}"
+            );
+        }
+        assert!(!profile("anthropic", "claude-fable-5-3", None).known);
+    }
+
     #[test]
     fn kimi_fixed_sampling_and_exact_alias() {
         let p = profile("openai", "k3", Some("https://api.kimi.com/coding/v1"));
@@ -598,6 +636,7 @@ mod tests {
         for (model, efforts) in [
             ("claude-sonnet-5-5", all),
             ("claude-opus-5-5", all),
+            ("claude-fable-5-2", all),
             ("claude-opus-4-6", &all[..3]),
         ] {
             for effort in efforts {
