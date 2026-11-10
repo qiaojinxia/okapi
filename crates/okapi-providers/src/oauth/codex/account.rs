@@ -124,6 +124,7 @@ impl AccountHooks for CodexAccount {
             observed_at: now,
             allowed,
             windows,
+            scoped: Vec::new(),
             threshold_window: None,
             plan: known_plan(data.get("plan_type")),
         };

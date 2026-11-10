@@ -5,6 +5,8 @@ import type { UsageResponse } from './api'
 import { useQuotaLabels } from './use-quota-labels'
 
 type Quota = NonNullable<UsageResponse['quotas'][number]['quota']>
+/// 画一条用量条所需的字段；`scope` 有值时是按模型分的周窗口（订阅的 Fable 周限额），标签换成模型名
+type Row = { name: string; used_percent: number; resets_at: number | null; window_secs: number | null; scope?: string }
 
 /// 红黄绿三种颜色表示还剩多少，列表行和抽屉里的条共用，不再按窗口另配颜色：
 /// 用量不到 70%（剩得还多）绿，70% 起（快用完了）黄，90% 起（几乎没了，与渠道额度阈值缺省 90% 对齐）红。
@@ -24,6 +26,11 @@ export function QuotaMeters({ quota, limits, compact = false }: {
   const { t, i18n } = useTranslation()
   const { windowLabel } = useQuotaLabels()
   const now = Date.now()
+  // 账号窗口之后再画按模型分的周窗口：同样的条。它们只展示——渠道配置的百分比上限（`limits`）管的是账号窗口，不适用于某个模型的周限额
+  const rows: Row[] = [
+    ...quota.windows,
+    ...(quota.scoped ?? []).map((window): Row => ({ ...window, name: `scoped:${window.model}`, scope: window.model })),
+  ]
   // 列表行的重置说明：「3小时50分后重置 · 06:59」，跨天带日期
   const resetCompact = (at: number) => {
     const minutes = Math.max(0, Math.round((at * 1000 - now) / 60_000))
@@ -49,16 +56,17 @@ export function QuotaMeters({ quota, limits, compact = false }: {
     return (
       <div className="grid w-full max-w-full grid-cols-[minmax(2.25rem,auto)_minmax(3rem,1fr)_2.25rem_minmax(4.75rem,auto)] items-center gap-x-2.5 gap-y-2.5">
         {quota.allowed === false && <p className="col-span-4 text-destructive">{t('admin:channelQuotaBlocked')}</p>}
-        {quota.windows.map((window) => {
+        {rows.map((window) => {
           const stale = window.resets_at !== null && window.resets_at * 1000 <= now
           const percent = Math.min(100, Math.max(0, window.used_percent))
           const tone = quotaTone(percent)
-          const label = windowLabel(window.window_secs)
+          const label = window.scope ?? windowLabel(window.window_secs)
+          const meterName = window.scope ? `${window.scope} · ${windowLabel(window.window_secs)}` : label
           return (
             <div key={window.name} className="contents">
-              <span className="whitespace-nowrap text-xs font-medium text-muted-foreground/80">{label}</span>
+              <span className="whitespace-nowrap text-xs font-medium text-muted-foreground/80" title={window.scope ? meterName : undefined}>{label}</span>
               <div className="h-[7px] overflow-hidden rounded-full bg-muted shadow-[inset_0_0_0_1px_oklch(0_0_0/0.025)]" role="progressbar"
-                aria-label={t('admin:channelQuotaMeterLabel', { window: label })}
+                aria-label={t('admin:channelQuotaMeterLabel', { window: meterName })}
                 aria-valuemin={0} aria-valuemax={100} aria-valuenow={stale ? undefined : percent}>
                 {!stale && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
               </div>
@@ -82,12 +90,12 @@ export function QuotaMeters({ quota, limits, compact = false }: {
   return (
     <div className="flex flex-col gap-2.5">
       {quota.allowed === false && <p className="text-xs text-destructive">{t('admin:channelQuotaBlocked')}</p>}
-      {quota.windows.map((window) => {
+      {rows.map((window) => {
         const stale = window.resets_at !== null && window.resets_at * 1000 <= now
         const percent = Math.min(100, Math.max(0, window.used_percent))
-        const limit = window.window_secs !== null ? limits?.[String(window.window_secs)] : undefined
+        const limit = window.window_secs !== null && !window.scope ? limits?.[String(window.window_secs)] : undefined
         const tone = quotaTone(percent)
-        const label = windowLabel(window.window_secs)
+        const label = window.scope ? `${window.scope} · ${windowLabel(window.window_secs)}` : windowLabel(window.window_secs)
         return (
           <div key={window.name} className="flex flex-col gap-1">
             <div className="flex items-baseline justify-between gap-2 text-xs">

@@ -132,6 +132,7 @@ fn observations_are_extrapolated_with_the_spend_since_and_the_freshest_one_wins(
                 resets_at: Some(AT + 3_000),
                 window_secs: Some(model::FIVE_HOURS),
             }],
+            scoped: Vec::new(),
             threshold_window: None,
             plan: None,
         },
@@ -271,6 +272,7 @@ fn the_polled_window_cap_uses_the_keep_line_only_for_warm_sessions() {
             resets_at: Some(AT + 3_000),
             window_secs: Some(model::FIVE_HOURS),
         }],
+        scoped: Vec::new(),
         threshold_window: None,
         plan: None,
     };

@@ -55,7 +55,13 @@ Either window reaching its cap stops new attempts. Missing/reset/stale observati
 remain unknown. The historical single-percentage setting remains compatible:
 
 - Claude: the `five_hour` allowance. Weekly usage is also displayed; a custom
-  five-hour threshold does not become a custom weekly threshold.
+  five-hour threshold does not become a custom weekly threshold. Max plans also carry a
+  weekly allowance that applies to one model family (the usage response lists it in
+  `limits[]` as `kind: weekly_scoped` with `scope.model.display_name`, `Fable` today): it
+  is stored in the snapshot's separate `scoped` list and only displayed, as one more bar
+  labelled with the model name in the channel list and the drawer. It never enters
+  `windows`: a spent Fable week must not stop the account from serving other models,
+  and the configured weekly cap does not apply to it.
 - Codex: the longest reported allowance, usually the long-term window. If only one
   window exists, it is used. With absent durations, the plugin prefers the secondary
   allowance. No local calendar or assumed lifetime total substitutes for this data.
@@ -173,7 +179,8 @@ settings cannot silently reactivate limits.
 
 ## Verification
 
-Provider tests cover Claude session thresholds, Codex actual long-term windows,
+Provider tests cover Claude session thresholds, the Fable weekly window being displayed
+but never gating the account, Codex actual long-term windows,
 all-window hard exhaustion, absent/expired observations and old-cache normalization.
 Isolated gateway tests verify general pauses, quota filtering, identity, observation
 without a configured threshold, API authorization, normal fallback, and retired local

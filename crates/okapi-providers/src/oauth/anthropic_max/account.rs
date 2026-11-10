@@ -83,6 +83,7 @@ impl AccountHooks for ClaudeAccount {
             observed_at: now,
             allowed: None,
             windows,
+            scoped: scoped_windows(data),
             threshold_window: Some("five_hour".into()),
             plan: None,
         })
@@ -165,6 +166,50 @@ impl AccountHooks for ClaudeAccount {
     }
 }
 
+const WEEK_SECS: i64 = 604_800;
+
+/// 用量应答的 `limits[]` 里 `kind == "weekly_scoped"` 的项是按模型分的周窗口（`scope.model.display_name`，已用百分比在 `percent`），
+/// 真机 /usage 里的「Current week (Fable)」就是它（2.1.321 二进制）。只收名字带 fable 的，名字只许字母数字与 ` ._-`：
+/// 它只用来展示，不进 `windows`（那会让一个模型族用尽就把整个账号摘掉）。
+fn scoped_windows(data: &Value) -> Vec<quota::ScopedWindow> {
+    data.get("limits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("kind").and_then(Value::as_str) == Some("weekly_scoped"))
+        .filter_map(|item| {
+            let model = item.pointer("/scope/model/display_name")?.as_str()?.trim();
+            let plain = model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'));
+            if !plain || model.len() > 40 || !model.to_ascii_lowercase().contains("fable") {
+                return None;
+            }
+            Some(quota::ScopedWindow {
+                model: model.to_owned(),
+                used_percent: item.get("percent").and_then(quota::percentage)?,
+                resets_at: item.get("resets_at").and_then(reset_epoch),
+                window_secs: Some(WEEK_SECS),
+            })
+        })
+        .collect()
+}
+
+/// 重置时刻：Unix 秒（数字，可能带小数）或 RFC 3339 字符串（CLI 两种都认）。
+fn reset_epoch(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_number() {
+        // 整数部分按文本取，不走浮点转换
+        let text = number.to_string();
+        let whole = text
+            .split_once('.')
+            .map_or(text.as_str(), |(whole, _)| whole);
+        return whole.parse::<i64>().ok().filter(|at| *at > 0);
+    }
+    chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|at| at.timestamp())
+}
+
 /// `/api/oauth/profile` → 档位。CLI 把 `organization_type` 映射成 pro / max / team / enterprise，
 /// Max 的 5x / 20x 只体现在 `rate_limit_tier`（`default_claude_max_5x` / `default_claude_max_20x`）。
 #[must_use]
@@ -189,8 +234,108 @@ pub fn plan_from_profile(profile: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::plan_from_profile;
+    use super::{ClaudeAccount, plan_from_profile};
+    use crate::account::{AccountHooks, quota::ScopedWindow, quota::Snapshot};
     use serde_json::json;
+
+    fn parse(data: &serde_json::Value) -> Snapshot {
+        ClaudeAccount
+            .parse_quota(data, 1_000)
+            .expect("a snapshot with windows")
+    }
+
+    /// Claude Code 2.1.321 的 /usage：`limits[]` 里 `kind: weekly_scoped` 的项是按模型分的周窗口（真机的「Current week (Fable)」）。
+    /// 它只展示：Fable 周限额用尽不能把账号的放行余量变成 0，其它模型照旧可用。
+    #[test]
+    fn the_fable_weekly_window_is_shown_but_never_gates_the_account() {
+        let data = json!({
+            "five_hour": {"utilization": 20, "resets_at": "1970-01-01T00:30:00Z"},
+            "seven_day": {"utilization": 41.5, "resets_at": "1970-01-08T00:00:00Z"},
+            "limits": [
+                {"kind": "session", "percent": 20},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}, "percent": 100, "resets_at": 604_800},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Sonnet"}}, "percent": 90, "resets_at": 604_800},
+            ],
+        });
+        let snapshot = parse(&data);
+        assert_eq!(
+            snapshot
+                .windows
+                .iter()
+                .map(|w| w.name.as_str())
+                .collect::<Vec<_>>(),
+            ["five_hour", "seven_day"],
+            "the Fable bucket is not an account window"
+        );
+        assert_eq!(
+            snapshot.scoped,
+            [ScopedWindow {
+                model: "Fable".into(),
+                used_percent: 100,
+                resets_at: Some(604_800),
+                window_secs: Some(604_800),
+            }],
+            "only the Fable bucket is kept (Sonnet already has its own top-level window)"
+        );
+        assert_eq!(
+            snapshot.headroom(1_000),
+            Some(80),
+            "a spent Fable week must not zero the headroom"
+        );
+        assert_eq!(snapshot.next_reset(1_000), Some(1_800));
+    }
+
+    #[test]
+    fn scoped_windows_accept_both_reset_formats_and_ignore_malformed_rows() {
+        let data = json!({
+            "five_hour": {"utilization": 1, "resets_at": "2030-01-01T00:00:00Z"},
+            "limits": [
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}, "percent": 37.2, "resets_at": "2030-01-08T00:00:00Z"},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable Max"}}, "percent": 12, "resets_at": 1_893_456_000.0},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "fable<script>"}}, "percent": 3},
+                {"kind": "weekly_scoped", "scope": {"model": null}, "percent": 3},
+                {"kind": "weekly_scoped", "percent": 3},
+                "junk",
+                null,
+            ],
+        });
+        let scoped = parse(&data).scoped;
+        assert_eq!(
+            scoped,
+            [
+                ScopedWindow {
+                    model: "Fable".into(),
+                    used_percent: 38,
+                    resets_at: Some(1_894_060_800),
+                    window_secs: Some(604_800),
+                },
+                ScopedWindow {
+                    model: "Fable Max".into(),
+                    used_percent: 12,
+                    resets_at: Some(1_893_456_000),
+                    window_secs: Some(604_800),
+                },
+            ],
+            "a fraction rounds up like the account windows, a malformed row is skipped"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_without_scoped_windows_keeps_its_old_shape() {
+        let snapshot = parse(&json!({"five_hour": {"utilization": 1}}));
+        assert!(snapshot.scoped.is_empty());
+        let stored = serde_json::to_value(&snapshot).unwrap();
+        assert!(
+            stored.get("scoped").is_none(),
+            "an empty list is not written: {stored}"
+        );
+        // 旧记录（没有这个字段）照样读得回来
+        let old: Snapshot =
+            serde_json::from_value(json!({"observed_at": 1, "allowed": null, "windows": []}))
+                .unwrap();
+        assert!(old.scoped.is_empty());
+    }
 
     #[test]
     fn plan_follows_organization_type_and_rate_limit_tier() {

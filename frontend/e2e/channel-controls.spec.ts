@@ -660,6 +660,34 @@ test('upstream quota shows its actual windows without any local period on mobile
   expect(dimensions.content).toBeLessThanOrEqual(dimensions.width)
 })
 
+test('the Fable weekly window is drawn after the account windows in the list row and the drawer, and never takes the weekly cap marker', async ({ page }) => {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const key = { id: 7, status: 1, weight: 10, max_concurrency: 2, cooldown_until: null, failed_count: 0, credential_kind: 1, oauth_refreshable: true }
+  await prepare(page, [{ ...channel, provider: 'anthropic_max', settings: { account_control: { quota_limits: { '604800': 80 } } }, keys: [key] }])
+  await page.route('**/admin/channels/42/usage*', (route) => route.fulfill({ json: { timezone: usage.timezone, quotas: [{ key_id: 7, quota: {
+    observed_at: nowSec, threshold_window: 'five_hour',
+    windows: [
+      { name: 'five_hour', used_percent: 20, window_secs: 18000, resets_at: nowSec + 3600 },
+      { name: 'seven_day', used_percent: 41, window_secs: 604800, resets_at: nowSec + 3 * 86400 },
+    ],
+    scoped: [{ model: 'Fable', used_percent: 37, window_secs: 604800, resets_at: nowSec + 3 * 86400 }],
+  } }] } }))
+  // 列表行：账号的 5 小时 / 7 天之后多一条 Fable 周用量，标签是模型名
+  const row = page.getByRole('row').filter({ hasText: channel.name })
+  await expect(row.getByRole('progressbar', { name: 'Fable · 7天额度用量' })).toHaveAttribute('aria-valuenow', '37')
+  await expect(row.getByText('Fable', { exact: true })).toBeVisible()
+  await expect(row.getByRole('progressbar', { name: '7天额度用量', exact: true })).toHaveAttribute('aria-valuenow', '41')
+  await expect(row.getByRole('progressbar', { name: '5小时额度用量', exact: true })).toHaveAttribute('aria-valuenow', '20')
+  await row.getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await drawer.getByRole('tab', { name: '调度', exact: true }).click()
+  await drawer.locator('#channel-subscription-controls > summary').click()
+  await expect(drawer.getByRole('progressbar', { name: 'Fable · 7天额度用量' })).toHaveAttribute('aria-valuenow', '37')
+  await expect(drawer.getByText('Fable · 7天', { exact: true })).toBeVisible()
+  // 渠道配的 80% 周上限是账号 7 天窗口的：只有那一条画了竖线，Fable 周限额不带
+  await expect(drawer.getByTitle('上限 80%')).toHaveCount(1)
+})
+
 test('default creation leaves all optional sections folded and submits unchanged defaults', async ({ page }) => {
   const drawer = await newChannel(page, 'anthropic', false)
   let saved: Json | undefined

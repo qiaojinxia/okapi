@@ -11,11 +11,25 @@ pub struct Window {
     pub window_secs: Option<i64>,
 }
 
+/// 按模型分的周窗口（订阅的「Fable 周限额」）：只展示，不参与放行 / 冷却 / 预判。
+/// 它用尽只意味着这个模型族暂时不能用，其它模型照旧可以；放进 [`Snapshot::windows`] 会让整个账号被当成用尽。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScopedWindow {
+    /// 上游给的模型桶名称，如 `Fable`。
+    pub model: String,
+    pub used_percent: u8,
+    pub resets_at: Option<i64>,
+    pub window_secs: Option<i64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Snapshot {
     pub observed_at: i64,
     pub allowed: Option<bool>,
     pub windows: Vec<Window>,
+    /// 用量应答里按模型分的周窗口（目前只收 Fable 族）。只给控制台展示；旧记录没有这个字段。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scoped: Vec<ScopedWindow>,
     /// The configurable percentage threshold applies only to this window.
     /// Other reported windows still enforce the upstream's hard exhaustion.
     #[serde(default)]

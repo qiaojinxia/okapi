@@ -22,6 +22,8 @@ export interface UsageResponse {
   quotas: Array<{ key_id: number; quota: {
     observed_at: number; allowed?: boolean | null; threshold_window?: string | null
     windows: Array<{ name: string; used_percent: number; resets_at: number | null; window_secs: number | null }>
+    /// 按模型分的周窗口（订阅的 Fable 周限额）：只展示，不参与放行；旧观测没有这个字段
+    scoped?: Array<{ model: string; used_percent: number; resets_at: number | null; window_secs: number | null }>
   } | null }>
 }
 

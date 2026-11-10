@@ -3838,6 +3838,27 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
 前端 `model-config.spec.ts` 的预设白名单用例（33 条、来源域名、核对日期格式、Fable 5.2 的价格 / 缓存倍率 / 规格 / 来源）；`tsc -b`、`oxlint`、clippy 1.99 干净；
 变异检查：预设里改输入价 / 输出价 / 缓存读 / 上下文 / 最大输出 / 核对日期 / 显示名、整条删除，八处都被白名单用例咬住。
 
+### 11.76 渠道列表显示 Fable 周用量（2026-11-10）
+
+用户：「渠道列表也显示下 fable 用量」。Max 订阅账号除了 5 小时和 7 天两个窗口，还有一条只管 Fable 的周限额，真机 `/usage` 里叫「Current week (Fable)」。
+
+- **数据从哪来**：读 Claude Code 2.1.321 二进制里 `/usage` 的实现——用量应答（`/api/oauth/usage`）多一个 `limits[]` 数组，按模型分的周窗口是其中 `kind: "weekly_scoped"` 的项：
+  `scope.model.display_name`（服务端给的标签，如 `Fable`）、`percent`（0–100）、`resets_at`（Unix 秒的数字，或 RFC 3339 字符串，真机两种都认）。
+  真机再按一份「纳入额外用量的模型」白名单（缺省 `Fable` / `Fable 5` / `Fable 5.1`）筛一遍。没有真实订阅凭证可以拉一份原始应答来对，所以这里照二进制里的读法实现，并对形状做防御性解析：
+  缺字段、畸形的项直接跳过，不影响另外两个窗口。
+- **只展示，不管放行**：`Snapshot` 新增 `scoped` 列表（`ScopedWindow { model, used_percent, resets_at, window_secs }`；空时不写，旧记录读回来是空），**不放进 `windows`**——
+  `windows` 里任何一个窗口 100% 都会让账号整体零余量（`headroom`），`next_reset` 与额度预判也只看 `windows`。Fable 周限额用尽只说明这个模型族暂时不能用，其它模型照旧可用，
+  不能因此把账号摘掉；渠道配的 7 天百分比上限同样不套在它身上。目前只收名字带 fable 的项（名字只许字母数字与 ` ._-`、≤ 40 字符）；Sonnet / Opus 有自己的顶层窗口，不重复收。
+- **界面**：渠道列表行与编辑抽屉里的额度条，在账号的 5 小时 / 7 天之后多一条 Fable 周用量（行内标签是模型名，悬停与读屏名为「Fable · 7天」），颜色规则同其它条；
+  渠道的上限竖线只画在账号 7 天窗口上，Fable 那条不带。
+- **不确定的地方**：线上订阅账号的真实应答里有没有这个 `limits[]` 项、`display_name` 是不是正好叫 `Fable`，部署前核对不了；没有这一项时界面与之前完全一致。
+  上线后看渠道列表行有没有 Fable 那条；没有就读一次某个订阅账号的额度观测（Redis 里 `quota:ck:<key id>` 的 JSON，不含凭证，看有没有 `scoped`）或用量应答的键，再调。
+
+**验收**：provider 单测三条（`the_fable_weekly_window_is_shown_but_never_gates_the_account`：Fable 100% 时账号 `headroom` 仍是 80、`windows` 仍只有两个、Sonnet 项不收；
+`scoped_windows_accept_both_reset_formats_and_ignore_malformed_rows`：小数向上取整、两种重置格式、缺百分比 / 名字带标签 / 非对象的项跳过；`a_snapshot_without_scoped_windows_keeps_its_old_shape`：空列表不写、旧记录读得回来）；
+网关 `account_control` 27 条单测（含额度预判）；前端 `channel-controls.spec.ts` 一条（列表行与抽屉里都出现 `Fable · 7天额度用量`、值 37，账号两个窗口各自的值不变，抽屉里只有账号 7 天窗口一条 80% 上限竖线），
+渠道 / 额度 / OAuth / 模型配置相关 e2e 一并回归；变异检查：不画 Fable 行 / 上限竖线套到 Fable 上 / 行内标签不是模型名 / 抽屉标签不是模型名 / 读屏名缺窗口，五处都被那条用例咬住。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
