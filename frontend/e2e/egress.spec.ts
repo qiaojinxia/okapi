@@ -161,9 +161,9 @@ test('渠道：列表只列出口目标名，类型在悬停提示里；编辑�
   await prepare(page, '/admin/channels')
   const row = page.getByRole('row').filter({ hasText: 'claude-max-a' })
   await expect(row.getByTitle('代理 hk-1', { exact: true })).toHaveText('hk-1')
-  // 状态列短行的标签挂在图标上：左边的标签格是空的，挂在那里鼠标碰不到
-  await expect(row.getByTitle('出口', { exact: true }).locator('svg')).toHaveCount(1)
-  await expect(row.getByTitle('近 24h', { exact: true }).locator('svg')).toHaveCount(1)
+  // 出口在渠道格的第二行：地球图标（悬停是「出口」）+ 目标名；近 24h 那一行是带字的一句，不靠图标
+  await expect(row.locator('[data-slot="channel-egress"]').getByTitle('出口', { exact: true }).locator('svg')).toHaveCount(1)
+  await expect(row.locator('[data-slot="health-24h"]')).toContainText('近 24h')
 
   let bound: Json | undefined
   await page.route('**/admin/channels/42/egress', async (route) => {

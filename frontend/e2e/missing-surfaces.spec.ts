@@ -3378,7 +3378,8 @@ test('渠道列表搜索：q trim 与协议进 URL；空结果可清空', async 
     .toHaveCount(0)
   await expect(page.getByRole('row').filter({ hasText: 'broke-east' }).getByRole('link', { name: '打开供应商控制台' }))
     .toHaveCount(0)
-  await expect(openai.getByText('2 个')).toBeVisible()
+  // 模型数在「调度」格里，窗口不够宽（这里是 1280）时那行文字收起，内容仍在
+  await expect(openai.locator('[data-slot="channel-schedule"]')).toContainText('2 个模型')
   await expect(openai.getByText(/¥110\.50/)).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: 'broke-east' }).getByText(/\$0\.00/)).toBeVisible()
 

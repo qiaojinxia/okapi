@@ -29,22 +29,25 @@ function BrandMark({ brand, className }: { brand: string; className?: string }) 
 }
 
 /// 列表行首的品牌锚点。只负责识别，不重复承担平台名称；名称与档位仍由下面的胶囊完整表达。
-export function ProviderMark({ provider, className }: { provider: string; className?: string }) {
+/// `sm` 给列表行：行是两行文字高（40px），标志比它矮一点（36px）才不顶着上下边。
+export function ProviderMark({ provider, size = 'md', className }: { provider: string; size?: 'md' | 'sm'; className?: string }) {
   const platform = platformOf(provider)
   const Icon = platform.icon ?? Plug
+  const glyph = size === 'sm' ? 'h-[18px] w-[18px]' : 'h-5 w-5'
   return (
     <span
       aria-hidden
       data-provider={provider}
       className={cn(
-        'inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-current/10 shadow-[inset_0_1px_0_oklch(1_0_0/0.28)]',
+        'inline-flex shrink-0 items-center justify-center border border-current/10 shadow-[inset_0_1px_0_oklch(1_0_0/0.28)]',
+        size === 'sm' ? 'h-9 w-9 rounded-[10px]' : 'h-10 w-10 rounded-xl',
         platform.tone,
         className,
       )}
     >
       {platform.brand
-        ? <BrandMark brand={platform.brand} className="h-5 w-5" />
-        : <Icon className="h-5 w-5" strokeWidth={1.8} />}
+        ? <BrandMark brand={platform.brand} className={glyph} />
+        : <Icon className={glyph} strokeWidth={1.8} />}
     </span>
   )
 }
@@ -76,7 +79,8 @@ export function planLabel(plan: string): string {
 ///
 /// 订阅账号写「平台 + 档位」（Claude Pro、Codex Plus）；档位还没探到就写「订阅」，
 /// API 渠道写「API Key」。多把 key 档位不同时都列出（Claude Pro · Max 20x）。
-export function ProviderChip({ provider, plans, className }: { provider: string; plans?: string[]; className?: string }) {
+/// `compact` 给列表行的第二行：和 12px 的说明文字同一行高，矮一号、方一点，不再是一枚抢眼的大胶囊。
+export function ProviderChip({ provider, plans, compact = false, className }: { provider: string; plans?: string[]; compact?: boolean; className?: string }) {
   const { t } = useTranslation()
   const platform = platformOf(provider)
   const known = SUBSCRIPTION.has(provider) && plans !== undefined && plans.length > 0
@@ -84,10 +88,17 @@ export function ProviderChip({ provider, plans, className }: { provider: string;
     ? known
       ? (plans ?? []).map(planLabel).join(' · ')
       : t('admin:providerTypeSubscription')
-    : t('admin:providerTypeApiKey')
+    // 列表行里地方紧：「API Key」缩成「API」，订阅档位照写
+    : compact ? 'API' : t('admin:providerTypeApiKey')
   return (
     <span
-      className={cn('inline-flex h-[22px] items-center whitespace-nowrap rounded-full px-2.5 text-[11px] leading-4 font-semibold', platform.tone, className)}
+      data-slot="provider-chip"
+      className={cn(
+        'inline-flex shrink-0 items-center whitespace-nowrap text-[11px] leading-4',
+        compact ? 'h-[18px] rounded-[5px] px-1.5 font-medium' : 'h-[22px] rounded-full px-2.5 font-semibold',
+        platform.tone,
+        className,
+      )}
       title={known ? `${provider}\n${t('admin:channelPlanHint')}` : provider}
     >
       {`${platform.name} ${kind}`}

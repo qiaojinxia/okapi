@@ -274,51 +274,65 @@ test('渠道列表：地址里手敲 status=enabled 直接生效，数字和别�
   expect(hits.at(-1)).toBe('?limit=10&offset=0')
 })
 
-test('渠道列表：一行五块信息——渠道 / 状态 / 用量 / 额度 / 调度与操作', async ({ page }) => {
+test('渠道列表：一行两层、六块各成一列——渠道 / 状态 / 额度 / 近 30 天 / 调度 / 操作', async ({ page }) => {
+  // 宽屏（1608）下六块信息全部展开；窄一些时三级信息（编号、测试时间、调度文字）让位，见后面的 1280 用例
+  await page.setViewportSize({ width: 1608, height: 900 })
   await prepare(page)
   const alice = rowOf(page, ALICE_MASKED)
   await expect(alice).toBeVisible()
+  await expect(page.locator('thead th')).toHaveText(['', '渠道', '状态', '额度 / 余额', '近 30 天', '调度', '操作'])
 
-  // 渠道格：#ID + 名称、地址、平台 + 档位胶囊、模型数与优先级
+  // 渠道格：第一行名称（这一行唯一的粗体）+ #ID；第二行是平台 / 档位胶囊 + 显式出口
+  await expect(alice.locator('[data-slot="channel-name"]')).toHaveText(ALICE_MASKED)
+  await expect(alice.locator('[data-slot="channel-name"]')).toHaveCSS('font-weight', '600')
   await expect(alice.getByText('#1', { exact: true })).toBeVisible()
-  await expect(alice.getByText('https://api.anthropic.com', { exact: true })).toBeVisible()
-  await expect(alice.getByText('Claude Pro', { exact: true })).toBeVisible()
-  await expect(alice.getByText('2 个模型 · 优先级 0', { exact: true })).toBeVisible()
-  // 订阅账号邮箱就是渠道名时不再另起一行重复
-  await expect(alice.getByText('账号', { exact: true })).toHaveCount(0)
+  const meta = alice.locator('[data-slot="channel-meta"]')
+  await expect(meta.locator('[data-slot="provider-chip"]')).toHaveText('Claude Pro')
+  // 订阅渠道都打官方地址，不逐行重复；邮箱就是渠道名时也不重复账号
+  await expect(alice).not.toContainText('api.anthropic.com')
+  await expect(alice.locator('[data-slot="channel-account"]')).toHaveCount(0)
+  await expect(alice.locator('[data-slot="channel-host"]')).toHaveCount(0)
+  // 出口压缩为地球图标 + 代理名，不重复「代理」二字（类型在悬停提示里）
+  await expect(meta.locator('[data-slot="channel-egress"]').getByTitle('代理 216.167.15.231', { exact: true })).toHaveText('216.167.15.231')
 
-  // 状态格：状态点 + 最近测试同一行，下面是带标签的明细
-  const state = alice.locator('dl')
-  await expect(state.locator('dt').first()).toHaveText('正常')
-  await expect(state.locator('dd').first()).toContainText('1104 ms')
-  await expect(state.locator('dd').first()).toContainText('10-16 22:06')
-  await expect(state).toContainText('近 24h')
-  await expect(state).toContainText('0.0% 错误 · 1 次')
-  // 凭证不占列表；出口压缩为地球图标 + 代理名，不再重复“代理”文字
-  await expect(state).not.toContainText('凭证')
-  await expect(state).not.toContainText('10-24 01:50 到期')
-  await expect(state).toContainText('216.167.15.231')
-  await expect(state).not.toContainText('代理 216.167.15.231')
-  // 旧的「测试」标签行已并进第一行
-  await expect(state.locator('dt', { hasText: /^测试$/ })).toHaveCount(0)
+  // 状态格：第一行状态胶囊 + 最近测试，第二行近 24h；正常的渠道只有这两行
+  const state = alice.locator('[data-slot="channel-status"]')
+  await expect(state).toContainText('正常')
+  await expect(state.locator('[data-slot="last-probe"]')).toContainText('1104 ms')
+  await expect(state.locator('[data-slot="last-probe"]')).toContainText('10-16 22:06')
+  await expect(state.locator('[data-slot="health-24h"]')).toHaveText('近 24h 0.0% 错误 · 1 次')
+  await expect(state.locator('[data-slot="key-state-detail"]')).toHaveCount(0)
+  // 凭证到期属于编辑详情，不占列表
+  await expect(alice).not.toContainText('凭证')
+  await expect(alice).not.toContainText('10-24 01:50 到期')
 
-  // 花费 / 请求 / Token 是同级指标：金额不再加大加粗，也不带冗余的 US 前缀
-  const spend = alice.locator('[data-slot="channel-spend"]')
-  await expect(spend).toHaveText('$314.68')
-  await expect(spend).toHaveCSS('font-size', '13px')
-  await expect(spend).toHaveCSS('font-weight', '500')
-  await expect(alice.locator('[data-slot="channel-usage"]')).toContainText('30 天花费')
-  await expect(alice.locator('[data-slot="channel-usage"]')).toContainText('2,085 次')
-  await expect(alice.locator('[data-slot="channel-usage"]')).toContainText('6.4亿')
-  await expect(alice).not.toContainText('US$314.68')
+  // 额度格：各窗口横排成一组小仪表，窗口名用短写（全称在读屏名与悬停提示里）
   const fiveHour = alice.getByRole('progressbar', { name: '5小时额度用量' })
   const sevenDay = alice.getByRole('progressbar', { name: '7天额度用量' })
   await expect(fiveHour).toHaveAttribute('aria-valuenow', '0')
   await expect(sevenDay).toHaveAttribute('aria-valuenow', '0')
-  await expect(alice).toContainText('5天22小时')
+  await expect(alice.locator('[data-slot="quota-meter"]')).toHaveCount(2)
+  await expect(alice.locator('[data-slot="quota-meter"]').first()).toContainText('5h')
+  await expect(alice.locator('[data-slot="quota-meter"]').nth(1)).toContainText('7d')
+  await expect(alice.locator('[data-slot="quota-reset"]').nth(1)).toHaveText('5天22小时')
 
-  // 调度开关在上，测试 / 编辑 / 更多操作三个图标按钮在下（名字在读屏名与悬停提示里，按钮上没有字）
-  await expect(alice.getByRole('switch', { name: `参与调度：${ALICE_MASKED}` })).toBeChecked()
+  // 近 30 天：金额打头（加粗、不带冗余的 US 前缀），下面一行是次数与 token 总量；不再是三块带标签的小格
+  const usage = alice.locator('[data-slot="channel-usage"]')
+  const spend = alice.locator('[data-slot="channel-spend"]')
+  await expect(spend).toHaveText('$314.68')
+  await expect(spend).toHaveCSS('font-size', '14px')
+  await expect(spend).toHaveCSS('font-weight', '600')
+  await expect(usage).toContainText('2,085 次 · 6.4亿')
+  await expect(usage).not.toContainText('30 天花费')
+  await expect(alice).not.toContainText('US$314.68')
+
+  // 调度格：是否参与调度的开关 + 优先级，下面一行是模型数与所在池
+  const schedule = alice.locator('[data-slot="channel-schedule"]')
+  await expect(schedule.getByRole('switch', { name: `参与调度：${ALICE_MASKED}` })).toBeChecked()
+  await expect(schedule).toContainText('优先级 0')
+  await expect(schedule).toContainText('2 个模型 · default')
+
+  // 操作格：测试 / 编辑 / 更多操作三个图标按钮（名字在读屏名与悬停提示里，按钮上没有字）
   const actions = alice.getByRole('group', { name: '操作', exact: true })
   await expect(actions).toHaveAttribute('data-slot', 'action-group')
   for (const name of ['测试', '编辑', '更多操作']) {
@@ -331,15 +345,23 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量 / 额度 /
   await expect(alice.getByRole('button', { name: '复制', exact: true })).toHaveCount(0)
   await expect(alice.getByRole('button', { name: '删除', exact: true })).toHaveCount(0)
   await expect(alice.getByRole('button', { name: '测试输出', exact: true })).toHaveCount(0)
+
+  // 每一格都是两行文字高：正常的行同高（此前四格各堆四五行，行高一百多且每行不同）
+  const heights = []
+  for (const name of [ALICE_MASKED, 'bob-team', 'spare-compat']) heights.push((await rowOf(page, name).boundingBox())!.height)
+  for (const height of heights) {
+    expect(height).toBeLessThanOrEqual(70)
+    expect(Math.abs(height - heights[0])).toBeLessThanOrEqual(1)
+  }
 })
 
-test('渠道列表：额度条只用红黄绿三种颜色；账号与渠道名不同时补一行账号', async ({ page }) => {
+test('渠道列表：额度条只用红黄绿三种颜色；账号与渠道名不同时在第二行补出账号', async ({ page }) => {
   await prepare(page)
   const bob = rowOf(page, 'bob-team')
   await expect(bob).toContainText('Claude Max 5x')
-  // 邮箱不是渠道名：补一行「账号」
-  await expect(bob.getByText('账号', { exact: true })).toBeVisible()
-  await expect(bob).toContainText(BOB_MASKED)
+  // 邮箱不是渠道名：第二行胶囊后面补出账号（遮过的），「账号」二字只给读屏
+  await expect(bob.locator('[data-slot="channel-account"]')).toHaveText(BOB_MASKED)
+  await expect(bob.locator('[data-slot="channel-meta"]')).toContainText('账号')
   await expect(bob).not.toContainText('bob@hot-shot.com')
   const bobFive = bob.getByRole('progressbar', { name: '5小时额度用量' })
   const bobSeven = bob.getByRole('progressbar', { name: '7天额度用量' })
@@ -355,67 +377,92 @@ test('渠道列表：额度条只用红黄绿三种颜色；账号与渠道名�
   await expect(carol.getByRole('progressbar', { name: '7天额度用量' }).locator('div')).toHaveClass(/bg-warning/)
 })
 
-test('渠道列表：各行额度条起止对齐，剩余时长靠右且各行右缘一致，勾选框与名称同高', async ({ page }) => {
+test('渠道列表：额度仪表横排，各行的同一个窗口上下对齐、等宽，重置说明在各自的条下面；勾选框与名称同高', async ({ page }) => {
   await prepare(page)
-  // 三个订阅渠道共 6 个额度窗口。每个渠道一张自己的网格，剩余时长列有下限，所以不论是「5天22小时」
-  // 还是「50分钟」，条的起点与宽度在所有行都一样（此前按各自文字宽度排，相差好几个像素）
+  // 三个订阅渠道各两个窗口，共 6 条。每个渠道的仪表是一排等宽的格子，所以所有行的 5h 在同一竖列、7d 在同一竖列，
+  // 一眼能上下比（此前每个窗口竖着占一行，三个窗口的账号就是三四行高）
   await expect(page.getByRole('progressbar')).toHaveCount(6)
-  const bars = await page.getByRole('progressbar').all()
   const boxes = []
-  for (const bar of bars) boxes.push((await bar.boundingBox())!)
-  for (const box of boxes) {
-    expect(Math.abs(box.x - boxes[0].x)).toBeLessThanOrEqual(1)
-    expect(Math.abs(box.width - boxes[0].width)).toBeLessThanOrEqual(1)
+  for (const bar of await page.getByRole('progressbar').all()) boxes.push((await bar.boundingBox())!)
+  const five = [boxes[0], boxes[2], boxes[4]], seven = [boxes[1], boxes[3], boxes[5]]
+  for (const column of [five, seven]) {
+    for (const box of column) {
+      expect(Math.abs(box.x - column[0].x)).toBeLessThanOrEqual(1)
+      expect(Math.abs(box.width - column[0].width)).toBeLessThanOrEqual(1)
+    }
   }
-  // 剩余时长靠右：不论是「5天22小时」「15分钟」还是「50分钟」，各行的右缘一致
-  const alice = rowOf(page, ALICE_MASKED)
-  const rightEdge = async (row: ReturnType<typeof rowOf>, text: string) => {
-    const box = (await row.getByText(text, { exact: true }).boundingBox())!
-    return box.x + box.width
+  // 同一行里两个窗口并排、同高同宽
+  expect(Math.abs(five[0].y - seven[0].y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(five[0].width - seven[0].width)).toBeLessThanOrEqual(1)
+  expect(seven[0].x).toBeGreaterThan(five[0].x + five[0].width)
+  // 重置说明在各自那条的正下方，左缘与条对齐
+  const bob = rowOf(page, 'bob-team')
+  const resets = bob.locator('[data-slot="quota-reset"]')
+  await expect(resets).toHaveText(['15分钟', '5天10小时'])
+  const bars = [(await bob.getByRole('progressbar').nth(0).boundingBox())!, (await bob.getByRole('progressbar').nth(1).boundingBox())!]
+  for (const index of [0, 1]) {
+    const reset = (await resets.nth(index).boundingBox())!
+    expect(Math.abs(reset.x - bars[index].x)).toBeLessThanOrEqual(1)
+    expect(reset.y).toBeGreaterThan(bars[index].y)
+    expect(reset.x + reset.width).toBeLessThanOrEqual(bars[index].x + bars[index].width + 1)
   }
-  const edges = [
-    await rightEdge(alice, '5天22小时'),
-    await rightEdge(rowOf(page, 'bob-team'), '15分钟'),
-    await rightEdge(rowOf(page, CAROL_MASKED), '50分钟'),
-  ]
-  expect(Math.max(...edges) - Math.min(...edges)).toBeLessThanOrEqual(1)
   // 勾选框与名称首行垂直居中对齐（行内框落在基线上时会比名字高出两三像素）
+  const alice = rowOf(page, ALICE_MASKED)
   const checkbox = (await alice.getByRole('checkbox').boundingBox())!
   const name = (await alice.getByText(ALICE_MASKED, { exact: true }).first().boundingBox())!
   expect(Math.abs(checkbox.y + checkbox.height / 2 - (name.y + name.height / 2))).toBeLessThanOrEqual(1.5)
 })
 
-test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复时间；停用与未入池各有标识', async ({ page }) => {
+test('渠道列表：部分 key 不可用时状态胶囊转黄并多一行计数 / 恢复时间；停用与未入池各有标识', async ({ page }) => {
   await prepare(page)
   const carol = rowOf(page, CAROL_MASKED)
-  await expect(carol.locator('dt').first()).toHaveText('1/2 可用')
-  await expect(carol).toContainText('冷却 1')
-  await expect(carol).toContainText('约 20 分钟后恢复')
+  const status = carol.locator('[data-slot="channel-status"]')
+  const first = status.locator('> div').first()
+  await expect(first).toContainText('1/2 可用')
   // 最近一次测试失败：写错误码而不是延迟
-  await expect(carol.locator('dd').first()).toContainText('upstream_timeout')
-  // 计数与恢复时间自成一行，不挤进第一行的「错误码 + 时间」里（挤在一起时会随列宽东一个西一个地折行）
-  await expect(carol.locator('dd').first()).not.toContainText('冷却 1')
-  const keyLine = carol.locator('dd', { hasText: '冷却 1' })
-  await expect(keyLine).toContainText('约 20 分钟后恢复')
-  await expect(keyLine).not.toContainText('upstream_timeout')
-  await expect(carol).toContainText('15.0% 错误 · 80 次')
+  await expect(status.locator('[data-slot="last-probe"]')).toContainText('upstream_timeout')
+  // 计数与恢复时间自成一行（只有异常的渠道才有这一行），不挤进第一行的「错误码 + 时间」里
+  const detail = status.locator('[data-slot="key-state-detail"]')
+  await expect(detail).toContainText('冷却 1')
+  await expect(detail).toContainText('约 20 分钟后恢复')
+  await expect(detail).not.toContainText('upstream_timeout')
+  await expect(first).not.toContainText('冷却 1')
+  const health = status.locator('[data-slot="health-24h"]')
+  await expect(health).toContainText('15.0% 错误 · 80 次')
+  // 自上而下三层：状态 → 原因 → 健康
+  const ys = []
+  for (const part of [first, detail, health]) ys.push((await part.boundingBox())!.y)
+  expect(ys[0]).toBeLessThan(ys[1])
+  expect(ys[1]).toBeLessThan(ys[2])
   await expect(carol).not.toContainText('已过期')
+  // 异常的行比正常的行高出一行，本身就是信号
+  expect((await carol.boundingBox())!.height).toBeGreaterThan((await rowOf(page, 'bob-team').boundingBox())!.height + 12)
 
   const openai = rowOf(page, 'openai-main')
-  await expect(openai).toContainText('未入池')
-  await expect(openai).toContainText('直连')
-  // 上游余额：带标签，不和上面的计费金额混在一起
-  await expect(openai).toContainText('余额')
-  await expect(openai).toContainText('$12.34')
-  await expect(openai).toContainText('近 30 天暂无计费调用')
-  await expect(openai.getByText('OpenAI API Key', { exact: true })).toBeVisible()
+  await expect(openai.locator('[data-slot="channel-status"]')).toContainText('未入池')
+  // API 渠道第二行：平台胶囊（「API Key」缩成「API」）+ 上游主机名 + 显式出口
+  await expect(openai.locator('[data-slot="provider-chip"]')).toHaveText('OpenAI API')
+  await expect(openai.locator('[data-slot="channel-host"]')).toHaveText('api.openai.com')
+  await expect(openai.locator('[data-slot="channel-host"]')).toHaveAttribute('title', 'https://api.openai.com/v1')
+  await expect(openai.locator('[data-slot="channel-egress"]')).toContainText('直连')
+  // 上游余额在「额度 / 余额」这一列：金额打头带标签，下面是查询时间；和右边的计费金额不混在一起
+  const balance = openai.locator('[data-slot="channel-balance"]')
+  await expect(balance).toContainText('$12.34')
+  await expect(balance).toContainText('余额')
+  await expect(balance).toContainText('20:45 查询')
+  // 近 30 天没有计费调用：一个破折号（说明留给读屏与悬停），不占一条灰带
+  const usage = openai.locator('[data-slot="channel-usage"]')
+  await expect(usage).toHaveText('—近 30 天暂无计费调用')
+  await expect(usage).toHaveAttribute('title', '近 30 天暂无计费调用')
 
   const spare = rowOf(page, 'spare-compat')
-  await expect(spare.locator('dt').first()).toHaveText('停用')
+  await expect(spare.locator('[data-slot="channel-status"] > div').first()).toContainText('停用')
   await expect(spare.getByRole('switch', { name: '参与调度：spare-compat' })).not.toBeChecked()
   await expect(spare).toContainText('未测过')
   await expect(spare).toContainText('无请求')
-  // 停用的渠道不去查额度
+  // 停用的渠道整体退后一档（名字变灰），也不去查额度
+  await expect(spare.locator('[data-slot="channel-name"]')).toHaveClass(/text-muted-foreground/)
+  await expect(rowOf(page, 'openai-main').locator('[data-slot="channel-name"]')).not.toHaveClass(/text-muted-foreground/)
   await expect(spare.getByRole('progressbar')).toHaveCount(0)
 })
 
@@ -556,17 +603,33 @@ test('渠道列表：窗口缩放时「···」菜单收起；窄屏表格横�
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
-test('渠道列表：1280 宽下五列放得下，不出现横向滚动', async ({ page }) => {
+test('渠道列表：1280 宽下六列放得下，不出现横向滚动；三级信息让位，内容不越出自己的格子', async ({ page }) => {
   await prepare(page)
   const viewport = page.locator('[data-slot="table-viewport"]')
   await expect(viewport).toBeVisible()
   expect(await viewport.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
   await expect(page.getByRole('group', { name: '表格横向浏览' })).toHaveCount(0)
-  // 表头五列：勾选 / 渠道 / 状态 / 用量 / 额度 / 调度 / 操作
-  await expect(page.locator('thead th')).toHaveText(['', '渠道', '状态', '用量 / 额度', '调度 / 操作'])
+  await expect(page.locator('thead th')).toHaveText(['', '渠道', '状态', '额度 / 余额', '近 30 天', '调度', '操作'])
+  const alice = rowOf(page, ALICE_MASKED)
+  // 窄窗口：编号、测试时间、调度文字、token 总量收起（悬停提示与编辑抽屉里都有），开关与动作还在
+  await expect(alice.getByText('#1', { exact: true })).toBeHidden()
+  await expect(alice.locator('[data-slot="last-probe"]')).toHaveText('1104 ms10-16 22:06')
+  await expect(alice.locator('[data-slot="last-probe"] span').last()).toBeHidden()
+  await expect(alice.locator('[data-slot="channel-schedule"]').getByText('优先级')).toBeHidden()
+  await expect(alice.locator('[data-slot="channel-schedule"]').getByRole('switch')).toBeVisible()
+  await expect(alice.getByRole('group', { name: '操作', exact: true })).toBeVisible()
+  // 定宽布局：每一格的内容都截断在自己的列里，不会画到隔壁列上
+  for (const name of [ALICE_MASKED, 'bob-team', CAROL_MASKED, 'openai-main']) {
+    const overflow = await rowOf(page, name).evaluate((row) => [...row.querySelectorAll('td')].map((cell) => {
+      const box = cell.getBoundingClientRect()
+      return Math.max(0, ...[...cell.querySelectorAll('*')].filter((node) => !node.classList.contains('sr-only') && node.getClientRects().length > 0)
+        .map((node) => { const inner = node.getBoundingClientRect(); return inner.width === 0 ? 0 : inner.right - box.right }))
+    }))
+    for (const extra of overflow) expect(extra).toBeLessThanOrEqual(1)
+  }
 })
 
-test('渠道列表：宽屏（1608）下状态逐行对齐，用量指标同排，额度条使用富余宽度', async ({ page }) => {
+test('渠道列表：宽屏（1608）下状态逐行对齐，金额右缘逐行对齐，调度文字展开', async ({ page }) => {
   await page.setViewportSize({ width: 1608, height: 900 })
   await prepare(page)
   const viewport = page.locator('[data-slot="table-viewport"]')
@@ -574,26 +637,25 @@ test('渠道列表：宽屏（1608）下状态逐行对齐，用量指标同排�
   const alice = rowOf(page, ALICE_MASKED)
   const bob = rowOf(page, 'bob-team')
   const carol = rowOf(page, CAROL_MASKED)
-  // 状态格：胶囊等宽（「正常」「1/2 可用」宽度本来不同），所以右边那列文字的起点逐行一致
+  // 状态格：胶囊等宽（「正常」「1/2 可用」宽度本来不同），所以右边那段文字的起点逐行一致
   const starts = []
-  for (const row of [alice, bob, carol]) starts.push((await row.locator('dd').first().boundingBox())!.x)
+  for (const row of [alice, bob, carol]) starts.push((await row.locator('[data-slot="last-probe"]').boundingBox())!.x)
   expect(Math.max(...starts) - Math.min(...starts)).toBeLessThanOrEqual(1)
-  // 用量格吃掉富余的宽度：额度条比窄屏时长得多（1280 宽时只有 60~70px）
+  // 额度条够长：两个窗口时每条一百多像素
   const bar = (await alice.getByRole('progressbar', { name: '5小时额度用量' }).boundingBox())!
-  expect(bar.width).toBeGreaterThanOrEqual(220)
-  const usage = (await alice.locator('[data-slot="channel-usage"]').boundingBox())!
-  const label = (await alice.getByText('5小时', { exact: true }).boundingBox())!
-  expect(Math.abs(usage.x - label.x)).toBeLessThanOrEqual(1)
+  expect(bar.width).toBeGreaterThanOrEqual(100)
+  // 近 30 天：金额在上、次数与 token 在下，整格右对齐——各行金额的右缘在一条线上
   const amount = (await alice.locator('[data-slot="channel-spend"]').boundingBox())!
-  const requests = (await alice.getByText('2,085 次', { exact: true }).boundingBox())!
-  const tokens = (await alice.getByText('6.4亿', { exact: true }).boundingBox())!
-  expect(Math.abs(amount.y - requests.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(amount.y - tokens.y)).toBeLessThanOrEqual(1)
-  expect(requests.x).toBeGreaterThan(amount.x + amount.width)
-  expect(tokens.x).toBeGreaterThan(requests.x + requests.width)
-  // 状态首行文字的末端与用量格的左缘之间留得出空隙（状态列定宽后曾紧贴）
-  const probeText = (await alice.locator('dd').first().locator('xpath=./span[1]').boundingBox())!
-  expect(usage.x - (probeText.x + probeText.width)).toBeGreaterThanOrEqual(24)
+  const other = (await bob.locator('[data-slot="channel-spend"]').boundingBox())!
+  expect(Math.abs(amount.x + amount.width - (other.x + other.width))).toBeLessThanOrEqual(1)
+  const requests = (await alice.getByText(/2,085 次/).boundingBox())!
+  expect(requests.y).toBeGreaterThan(amount.y + amount.height - 2)
+  expect(Math.abs(requests.x + requests.width - (amount.x + amount.width))).toBeLessThanOrEqual(1)
+  // 状态首行文字的末端与额度格的左缘之间留得出空隙
+  const probe = (await alice.locator('[data-slot="last-probe"]').boundingBox())!
+  expect(bar.x - (probe.x + probe.width)).toBeGreaterThanOrEqual(12)
+  // 窗口够宽：调度文字展开
+  await expect(alice.locator('[data-slot="channel-schedule"]').getByText('优先级')).toBeVisible()
 })
 
 test('渠道列表：深色主题下状态点与额度条仍用语义色', async ({ page }) => {
@@ -601,7 +663,7 @@ test('渠道列表：深色主题下状态点与额度条仍用语义色', async
   await prepare(page)
   await expect(page.locator('html')).toHaveClass(/dark/)
   const carol = rowOf(page, CAROL_MASKED)
-  await expect(carol.locator('dt span').first()).toHaveClass(/text-warning/)
+  await expect(carol.locator('[data-slot="channel-status"] span').first()).toHaveClass(/text-warning/)
   await expect(carol.getByRole('progressbar', { name: '5小时额度用量' }).locator('div')).toHaveClass(/bg-destructive/)
 })
 

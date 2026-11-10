@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query'
-import { Clock3, Wallet, type LucideIcon } from 'lucide-react'
 import dayjs from 'dayjs'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -65,9 +64,9 @@ function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'de
   return (
     <span
       className={cn(
-        'inline-flex min-h-6 items-center rounded-md px-2 py-0.5 text-xs leading-4 font-medium whitespace-nowrap',
-        // 宽屏等宽：「正常」「1/2 可用」「没有 key」宽度各不相同，胶囊右边的文字列起点就逐行错位；窄屏省下这点宽度给文字
-        'min-[1420px]:min-w-[4.75rem] min-[1420px]:justify-center',
+        'inline-flex h-5 shrink-0 items-center rounded-md px-2 text-xs leading-4 font-medium whitespace-nowrap',
+        // 等宽：「正常」「1/2 可用」「没有 key」宽度各不相同，不定宽的话胶囊右边那段文字的起点就逐行错位
+        'min-w-[4.75rem] justify-center',
         'before:mr-1.5 before:inline-block before:size-1.5 before:shrink-0 before:rounded-full before:bg-current before:content-[""]',
         color,
         surface,
@@ -104,60 +103,27 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
   }
 }
 
-/// 状态点下面单独一行：部分 key 不可用时的各态计数与最近一把的恢复时间；其余状态没有这一行。
+/// 状态胶囊下面单独一行：部分 key 不可用时的各态计数与最近一把的恢复时间；其余状态没有这一行。
 ///
-/// 单独成行是为了版面稳定：这些小标签数量不定，混在「延迟 + 时间」那一行里会随列宽东一个西一个地折行，
-/// 一个渠道能占五六行；放进自己的一行，折行也是整枚标签为单位，读起来始终是「状态 → 原因 → 健康」三层。
+/// 只有异常的渠道才多出这一行——行高比别人多一截，本身就是「这条有事」的信号。
 export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
   const { t } = useTranslation()
   const state = keyStateOf(keys, enabled)
   if (state.kind !== 'partial') return null
   return (
-    <StatusLine label={t('admin:channelStatusKeys')} className="flex-wrap gap-y-1">
+    <div data-slot="key-state-detail" className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 leading-5">
+      <span className="sr-only">{t('admin:channelStatusKeys')}</span>
       {state.counts.map(([name, n]) => (
-        <Badge key={name} variant="muted" className="min-h-5 rounded-md px-1.5 py-0 text-[11px]" title={state.titles.get(name) ?? ''}>
+        <Badge key={name} variant="muted" className="min-h-[18px] rounded-[5px] px-1.5 py-0 text-[11px]" title={state.titles.get(name) ?? ''}>
           {t(`admin:keyState_${name}`, { n })}
         </Badge>
       ))}
       {state.soonest && state.soonest.isAfter(dayjs()) && (
-        <span className="text-xs text-muted-foreground tabular-nums">
+        <span className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">
           {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(state.soonest.diff(dayjs(), 'minute', true))) })}
         </span>
       )}
-    </StatusLine>
-  )
-}
-
-/// 状态列的补充短行：图标和值放在同一内容列，与上方的延迟左对齐；标签保留给读屏与悬停。
-/// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看状态点，明细只在异常时抢眼。
-/// 字号 13px：比第一行的延迟（14px 加粗）低一档、比时间 / 地址这类 12px 的元信息高一档，三层各有各的字号。
-export function StatusLine({
-  label,
-  title,
-  icon: Icon,
-  className,
-  children,
-}: {
-  label: string
-  title?: string
-  icon?: LucideIcon
-  className?: string
-  children: ReactNode
-}) {
-  return (
-    <>
-      <dt className="flex h-5 items-center whitespace-nowrap text-xs leading-5 text-muted-foreground/75">
-        <span className="sr-only">{label}</span>
-      </dt>
-      <dd className={cn('flex min-w-0 items-center gap-1.5 whitespace-nowrap text-[13px] leading-5', className)} title={title}>
-        {Icon && (
-          <span className="inline-flex shrink-0 text-muted-foreground/70" title={label}>
-            <Icon aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
-          </span>
-        )}
-        {children}
-      </dd>
-    </>
+    </div>
   )
 }
 
@@ -168,22 +134,22 @@ const stampOf = (when: dayjs.Dayjs) => (when.isSame(dayjs(), 'day') ? when.forma
 export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
   const { t } = useTranslation()
   if (probe === null) {
-    return <span className="text-muted-foreground">{t('admin:probeNever')}</span>
+    return <span className="text-xs text-muted-foreground">{t('admin:probeNever')}</span>
   }
   const when = dayjs(probe.at)
+  const failure = probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))
   // 探测的是 /models 这类轻量端点，>2s 已经算慢
   const result = probe.ok ? (
-    <span className={cn('font-medium tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
+    <span className={cn('shrink-0 text-[13px] font-medium tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
   ) : (
-    <span className="font-medium text-destructive">
-      {probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))}
-    </span>
+    <span className="min-w-0 truncate text-[13px] font-medium text-destructive" title={failure}>{failure}</span>
   )
   return (
-    <span className="inline-flex max-w-full flex-wrap items-baseline gap-x-1">
+    <span data-slot="last-probe" className="inline-flex min-w-0 items-baseline gap-x-1.5" title={t('admin:probeAt', { at: when.format('YYYY-MM-DD HH:mm') })}>
       {result}
-      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground/75 tabular-nums" title={when.format('YYYY-MM-DD HH:mm')}>
-        <Clock3 aria-hidden className="h-3 w-3" strokeWidth={1.8} />
+      {/* 测试时间是三级信息：窄窗口这一列放不下就收起（悬停仍看得到），让给延迟 / 失败原因；
+          失败原因比延迟长得多（upstream_timeout），失败时要到超宽屏才并排放时间 */}
+      <span className={cn('hidden min-w-0 truncate text-[11px] text-muted-foreground/75 tabular-nums', probe.ok ? 'min-[1420px]:inline' : 'min-[1800px]:inline')}>
         {stampOf(when)}
       </span>
     </span>
@@ -191,25 +157,24 @@ export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
 }
 
 /// 最近一次上游余额（§11.33）：金额随上游货币；余额 ≤ 0 标红——这条渠道已经打不动了。
+/// 与订阅渠道的额度仪表同处「额度」一列、同是两行高：金额打头，下面一行是查询时间。
 /// 没查过不占位：不是每条渠道都有余额可查。
 export function LastBalance({ balance }: { balance: ChannelBalance | null | undefined }) {
   const { i18n, t } = useTranslation()
   if (balance === null || balance === undefined) return null
   const when = dayjs(balance.at)
   return (
-    <span
-      className="flex w-full items-baseline gap-1.5 whitespace-nowrap"
-      title={t('admin:balanceProbe', { probe: balance.probe })}
-    >
-      <span className="inline-flex items-center text-muted-foreground/75" title={t('admin:channelBalanceLabel')}>
-        <Wallet aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
-        <span className="sr-only">{t('admin:channelBalanceLabel')}</span>
+    <div data-slot="channel-balance" className="flex min-w-0 flex-col gap-0.5" title={t('admin:balanceProbe', { probe: balance.probe })}>
+      <span className="flex items-baseline gap-1.5 leading-5 whitespace-nowrap">
+        <span className={cn('text-sm font-semibold tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
+          {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language, true)}
+        </span>
+        <span className="text-[11px] text-muted-foreground">{t('admin:channelBalanceLabel')}</span>
       </span>
-      <span className={cn('text-[13px] font-medium tracking-normal tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
-        {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language, true)}
+      <span className="text-[11px] leading-5 whitespace-nowrap text-muted-foreground/80 tabular-nums">
+        {t('admin:channelBalanceAt', { at: stampOf(when) })}
       </span>
-      <span className="ml-auto text-xs text-muted-foreground/70 tabular-nums">{stampOf(when)}</span>
-    </span>
+    </div>
   )
 }
 
@@ -248,16 +213,17 @@ export function Health24h({
     <>
       <button
         type="button"
-        className="rounded whitespace-nowrap tabular-nums underline-offset-2 hover:bg-muted/60 hover:underline"
+        data-slot="health-24h"
+        className="-mx-1 max-w-full truncate rounded px-1 text-left text-xs leading-5 whitespace-nowrap text-muted-foreground tabular-nums underline-offset-2 hover:bg-muted/60 hover:text-foreground hover:underline"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >
-        {idle ? (
-          <span className="text-muted-foreground">{t('admin:health24hIdle')}</span>
-        ) : (
-          // 一整句「0.0% 错误 · 1 次」：错误率着色，其余同字色；真空格而不是 flex 间距，读屏与复制都是通顺的一句
+        {/* 一整句「近 24h 0.0% 错误 · 1 次」：只有错误率着色（正常时用正文色、高了转黄转红），其余是说明色；
+            真空格而不是 flex 间距，读屏与复制都是通顺的一句 */}
+        <span className="text-muted-foreground/75 max-[1419px]:sr-only">{t('admin:channelStatus24h')}</span>{' '}
+        {idle ? t('admin:health24hIdle') : (
           <>
-            <span className={cn('font-medium tabular-nums', tone)}>{formatBp(stat.error_rate_bp, i18n.language)}</span>{' '}
+            <span className={cn('font-medium text-foreground tabular-nums', tone)}>{formatBp(stat.error_rate_bp, i18n.language)}</span>{' '}
             {t('admin:health24hErrorRate')} · {t('admin:channelUsageRequests', { n: formatCount(stat.requests, i18n.language) })}
           </>
         )}
@@ -293,26 +259,23 @@ export function useChannelUsage() {
   })
 }
 
-/// 近 30 天用量：三项同字重的指标共用一条浅底带，金额不再压过渠道名与异常状态。
+/// 近 30 天用量：金额打头（这一列扫下来比的就是它），下面一行是次数与 token 总量；整格右对齐，小数点对得齐。
+/// 明细（输入 / 缓存 / 输出、上游成本）在悬停提示里。没有计费调用就是一个破折号，不占一条灰带。
 export function ChannelUsage({ usage, settled = false }: { usage: ChannelUsageRow | undefined; settled?: boolean }) {
   const { t, i18n } = useTranslation()
   if (!usage || usage.requests === 0) {
     if (!settled) return null
     return (
-      <div data-slot="channel-usage" className="flex h-9 w-full items-center rounded-lg bg-muted/35 px-3 text-xs text-muted-foreground">
-        {t('admin:channelUsageEmpty')}
-      </div>
+      <span data-slot="channel-usage" className="block text-right leading-5 text-muted-foreground/70" title={t('admin:channelUsageEmpty')}>
+        <span aria-hidden>—</span>
+        <span className="sr-only">{t('admin:channelUsageEmpty')}</span>
+      </span>
     )
   }
   const lang = i18n.language
   const total = usage.prompt_tokens + usage.completion_tokens
   const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
   const amount = formatMoneyAggregate(usage.amount_micro, lang, false, true)
-  const metrics = [
-    { label: t('admin:channelUsageSpend'), value: amount, spend: true },
-    { label: t('admin:channelUsageRequestsLabel'), value: t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) }), spend: false },
-    { label: t('admin:channelUsageTokensLabel'), value: compact.format(total), spend: false },
-  ]
   const detail = t('admin:channelUsageDetail', {
     days: USAGE_DAYS,
     requests: formatCount(usage.requests, lang),
@@ -323,19 +286,13 @@ export function ChannelUsage({ usage, settled = false }: { usage: ChannelUsageRo
     cost: formatMoneyAggregate(usage.upstream_cost_micro, lang, false, true),
   })
   return (
-    <div data-slot="channel-usage" className="grid h-9 w-full grid-cols-3 divide-x divide-border/60 overflow-hidden rounded-lg bg-muted/35" title={detail}>
-      {metrics.map((metric) => (
-        <span key={metric.label} className="flex min-w-0 flex-col justify-center px-2.5">
-          <span className="truncate text-[11px] leading-3 text-muted-foreground">{metric.label}</span>
-          <span
-            data-slot={metric.spend ? 'channel-spend' : undefined}
-            className="truncate text-[13px] leading-4 font-medium text-foreground tabular-nums"
-            title={metric.value}
-          >
-            {metric.value}
-          </span>
-        </span>
-      ))}
+    <div data-slot="channel-usage" className="flex min-w-0 flex-col items-end gap-0.5" title={detail}>
+      <span data-slot="channel-spend" className="h-5 text-sm leading-5 font-semibold whitespace-nowrap text-foreground tabular-nums">{amount}</span>
+      <span className="h-5 max-w-full truncate text-xs leading-5 whitespace-nowrap text-muted-foreground tabular-nums">
+        {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
+        {/* token 总量窄窗口收起（悬停提示里有完整明细） */}
+        <span className="max-[1419px]:hidden"> · {compact.format(total)}</span>
+      </span>
     </div>
   )
 }
