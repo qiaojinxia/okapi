@@ -314,7 +314,7 @@ test('预设按供应商筛选，数量来自目录；搜索仅限当前供应�
   const d = page.getByRole('dialog'), vendor = d.locator('#m-preset-vendor')
   await expect(vendor).toHaveValue('')
   await expect(vendor.locator('option')).toHaveCount(7)
-  await expect(d.getByText(/当前范围 32 个预设/)).toBeVisible()
+  await expect(d.getByText(/当前范围 33 个预设/)).toBeVisible()
   const list = d.getByRole('listbox').getByRole('option')
   for (const supplier of new Set(MODEL_PRESETS.map((preset) => preset.vendor))) {
     await vendor.selectOption(supplier)
