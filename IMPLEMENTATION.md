@@ -3853,6 +3853,8 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
   渠道的上限竖线只画在账号 7 天窗口上，Fable 那条不带。
 - **不确定的地方**：线上订阅账号的真实应答里有没有这个 `limits[]` 项、`display_name` 是不是正好叫 `Fable`，部署前核对不了；没有这一项时界面与之前完全一致。
   上线后看渠道列表行有没有 Fable 那条；没有就读一次某个订阅账号的额度观测（Redis 里 `quota:ck:<key id>` 的 JSON，不含凭证，看有没有 `scoped`）或用量应答的键，再调。
+  **上线后已核对（2026-11-10 01:52–01:57Z，第三十八次部署后各轮询一轮）**：四把 Anthropic 订阅 key 的额度观测里都出现了 `"scoped":[{"model":"Fable","used_percent":0,"resets_at":…,"window_secs":604800}]`，
+  形状与读二进制得到的一致；Codex 那把没有。
 
 **验收**：provider 单测三条（`the_fable_weekly_window_is_shown_but_never_gates_the_account`：Fable 100% 时账号 `headroom` 仍是 80、`windows` 仍只有两个、Sonnet 项不收；
 `scoped_windows_accept_both_reset_formats_and_ignore_malformed_rows`：小数向上取整、两种重置格式、缺百分比 / 名字带标签 / 非对象的项跳过；`a_snapshot_without_scoped_windows_keeps_its_old_shape`：空列表不写、旧记录读得回来）；
