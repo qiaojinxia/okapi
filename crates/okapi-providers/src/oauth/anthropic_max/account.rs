@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn a_snapshot_without_scoped_windows_keeps_its_old_shape() {
         let snapshot = parse(&json!({"five_hour": {"utilization": 1}}));
-        assert!(snapshot.scoped.is_empty());
+        assert_eq!(snapshot.scoped, vec![]);
         let stored = serde_json::to_value(&snapshot).unwrap();
         assert!(
             stored.get("scoped").is_none(),
@@ -334,7 +334,7 @@ mod tests {
         let old: Snapshot =
             serde_json::from_value(json!({"observed_at": 1, "allowed": null, "windows": []}))
                 .unwrap();
-        assert!(old.scoped.is_empty());
+        assert_eq!(old.scoped, vec![]);
     }
 
     #[test]
