@@ -2,7 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { CheckCircle2, Moon, Sun } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { BrandLockup, BrandMark } from '@/components/brand'
-import { NoticeBanner } from '@/components/notice-banner'
+import { NoticeCenter } from '@/components/notice-center'
 import { PoweredBy } from '@/components/powered-by'
 import { Button } from '@/components/ui/button'
 import { useTheme } from '@/lib/theme'
@@ -63,6 +63,8 @@ export function AuthLayout({
           <span className="lg:hidden">
             <BrandLockup />
           </span>
+          {/* 公告在登录前就要看得到：停服 / 维护通知对还没登录的人同样成立 */}
+          <span className="ml-auto flex items-center lg:ml-0"><NoticeCenter /></span>
           <Button
             variant="ghost"
             size="icon"
@@ -75,8 +77,6 @@ export function AuthLayout({
         </header>
 
         <main className="flex flex-1 flex-col items-center justify-center gap-4 px-4 pb-12">
-          {/* 公告在登录前就要看得到：停服/维护通知对还没登录的人同样成立 */}
-          <NoticeBanner className="w-full max-w-md" />
           <div className="w-full max-w-md animate-fade-up">
             <div className="mb-6 flex flex-col gap-1.5">
               <BrandMark className="mb-3 hidden h-10 w-10 lg:block" />

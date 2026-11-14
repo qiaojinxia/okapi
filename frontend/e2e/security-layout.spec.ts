@@ -16,7 +16,7 @@ async function prepare(page: Page, { language = 'zh-CN', devices = 10, empty = f
     expect(request.method(), '布局回归不得更改真实会话或两步验证').toBe('GET')
     const responses: Record<string, unknown> = {
       '/api/me': { user_id: 1, key_id: 1, role: 1, permissions: [], balance_micro: 49999100, group: 'vip' },
-      '/api/notice': { notice: notice ? { title: 'Test notice', body: 'This banner also occupies part of the available viewport.', level: 'info', updated_at: '2026-09-28T00:00:00Z' } : null },
+      '/api/notices': { data: notice ? [{ id: 'test', title: 'Test notice', body: 'A published notice adds an entry with a red dot to the top bar.', level: 'info', popup: false, updated_at: '2026-09-28T00:00:00Z' }] : [] },
       '/api/me/sessions': { limit: 10, data: empty ? [] : Array.from({ length: devices }, (_, i) => ({
         sid: `fixture-session-${i}`, ip: `203.0.113.${i + 1}`, ua: 'Mozilla/5.0 Chrome/128 (Macintosh)', created_at: 1757000000 - i * 60, current: i === 0,
       })) },
@@ -84,7 +84,7 @@ test('低矮窗口与公告：仅内容区内部滚动，底部记录和操作�
   await prepare(page, { notice: true })
   await page.setViewportSize({ width: 1280, height: 600 })
   await page.goto('/portal/security')
-  await expect(page.getByText('Test notice')).toBeVisible()
+  await expect(page.locator('[data-slot="notice-dot"]')).toBeVisible()
   await expect(page.locator('[data-slot="security-logins"] li')).toHaveCount(3)
   await expectWithinViewport(page)
   const side = page.locator('[data-slot="security-sidebar"]')

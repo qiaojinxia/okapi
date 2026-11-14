@@ -17,7 +17,7 @@ pub struct SetSettingReq {
     pub value: Value,
 }
 
-/// 全局设置写入（如 site_notice / model_rpm_limits）。
+/// 全局设置写入（如 site_notices / model_rpm_limits）。
 pub async fn set_setting(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -62,6 +62,10 @@ pub async fn set_setting(
         && okapi_kernel::policies::ChannelBalancePolicy::parse(&req.value).is_none()
     {
         return Err(AppError::bad_request().with_param("channel_balance_policy"));
+    }
+    // 公告列表整份校验：坏值不落库（公开接口读到坏条目只会悄悄跳过，站长以为发布了）
+    if req.key == super::super::notices::SETTING && !super::super::notices::valid(&req.value) {
+        return Err(AppError::bad_request().with_param("site_notices"));
     }
     // 清理任务按 `(value #>> '{}')::bigint` 读：null / 小数 / 字符串会让它每轮报错且永不清理
     if req.key == "retention_months" && req.value.as_u64().is_none_or(|months| months > 1200) {

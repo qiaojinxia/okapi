@@ -296,61 +296,46 @@ async fn public_pricing_reports_usable_groups() {
     );
 }
 
-/// 站点公告：无鉴权可读；未启用/空正文不透出；level 收敛三档、正文截断、字段白名单。
+/// 站点公告：无鉴权可读；只给已发布的条目和白名单字段，新的在前；库里被手改坏的一条跳过，其余照常。
 #[tokio::test]
-async fn public_notice_whitelists_and_gates() {
+async fn public_notices_list_what_is_published() {
     let env = setup().await;
-    let client = reqwest::Client::new();
-    let fetch = |env: &TestEnv| {
-        let url = format!("http://{}/api/notice", env.addr);
-        let client = client.clone();
-        async move {
-            client
-                .get(url)
-                .send()
-                .await
-                .unwrap()
-                .json::<Value>()
-                .await
-                .unwrap()
-        }
+    let fetch = |addr: SocketAddr| async move {
+        reqwest::get(format!("http://{addr}/api/notices"))
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
     };
+    assert_eq!(fetch(env.addr).await, json!({"data": []}), "没发过公告");
 
-    // 关闭态：即便有正文也不透出（settings 缓存 60s：每次 setup 是新 state，缓存为空）
-    let long_body = "x".repeat(5_000);
-    sqlx::query!(
-        r#"INSERT INTO settings (key, value) VALUES ('site_notice', $1)
-           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
-        json!({ "enabled": false, "title": "维护", "body": long_body, "level": "warning" })
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('site_notices', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
     )
+    .bind(json!([
+        {"id": "maint", "title": "  维护通知 ", "body": "周六 02:00 维护", "level": "warning", "popup": true,
+         "enabled": true, "updated_at": "2026-11-01T00:00:00Z", "secret_field": "must-not-leak"},
+        {"id": "draft", "title": "草稿", "body": "还没发", "enabled": false, "updated_at": "2026-11-05T00:00:00Z"},
+        {"id": "broken", "body": "级别写错", "level": "bogus", "enabled": true, "updated_at": "2026-11-06T00:00:00Z"},
+        {"id": "price", "body": "下月调价", "enabled": true, "updated_at": "2026-11-03T00:00:00Z"},
+    ]))
     .execute(&env.pg)
     .await
     .unwrap();
-    assert!(fetch(&env).await["notice"].is_null(), "未启用不得透出");
-
-    // 启用态：新 state 再读（缓存里已是关闭态，换一个 setup 拿干净缓存）
-    sqlx::query!(
-        r#"UPDATE settings SET value = $1 WHERE key = 'site_notice'"#,
-        json!({ "enabled": true, "title": "  维护通知 ", "body": long_body, "level": "bogus",
-                "updated_at": "2026-09-01T00:00:00Z", "secret_field": "must-not-leak" })
-    )
-    .execute(&env.pg)
-    .await
-    .unwrap();
-    let env2 = setup().await;
-    let body = fetch(&env2).await;
-    let n = &body["notice"];
-    assert_eq!(n["title"], "维护通知", "标题 trim");
-    assert_eq!(n["level"], "info", "未知档位收敛为 info");
+    // 设置缓存 60s：换一个 setup 拿干净缓存
+    let fresh = setup().await;
     assert_eq!(
-        n["body"].as_str().unwrap().chars().count(),
-        4_000,
-        "正文截断到 4000 字"
+        fetch(fresh.addr).await,
+        json!({"data": [
+            {"id": "price", "title": "", "body": "下月调价", "level": "info", "popup": false,
+             "updated_at": "2026-11-03T00:00:00Z"},
+            {"id": "maint", "title": "维护通知", "body": "周六 02:00 维护", "level": "warning", "popup": true,
+             "updated_at": "2026-11-01T00:00:00Z"},
+        ]})
     );
-    assert_eq!(n["updated_at"], "2026-09-01T00:00:00Z");
-    assert!(n.get("secret_field").is_none(), "只透出白名单字段：{n}");
-
-    sqlx::query!("DELETE FROM settings WHERE key = 'site_notice'")
+    sqlx::query("DELETE FROM settings WHERE key = 'site_notices'")
         .execute(&env.pg)
         .await
         .unwrap();

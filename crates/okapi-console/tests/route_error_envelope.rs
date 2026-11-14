@@ -88,7 +88,7 @@ fn public_endpoint(endpoint: &Endpoint) -> bool {
                     | "/api/pricing/models"
                     | "/api/pricing/groups"
                     | "/api/pricing/stats"
-                    | "/api/notice"
+                    | "/api/notices"
                     | "/api/registration"
                     | "/api/setup/status"
                     | "/api/plans"

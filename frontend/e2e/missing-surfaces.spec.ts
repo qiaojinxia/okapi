@@ -2060,35 +2060,120 @@ test('服务质量趋势数据表分页，图表与导出保持完整，换范�
   await expect(pager.getByRole('button', { name: '上一页', exact: true })).toBeDisabled()
 })
 
-test('站点公告：warning 可按 updated_at 关掉；换版再出；critical 不能关', async ({ page }) => {
+const publicNotice = (id: string, extra: Json = {}) => ({ id, title: `公告 ${id}`, body: `正文 ${id}`, level: 'info', popup: false,
+  updated_at: '2026-11-01T00:00:00Z', ...extra })
+
+test('站点公告：设了弹窗的没看过就一条条弹，其余只亮红点；逐条点开才算看过，换版再提醒', async ({ page }) => {
   await prepare(page)
-  let notice = {
-    title: '维护窗口',
-    body: '今晚 02:00 起短暂停服',
-    level: 'warning' as const,
-    updated_at: '2026-09-08T01:00:00Z',
-  }
-  await page.route('**/api/notice', (route) => route.fulfill({ json: { notice } }))
-
+  let notices = [
+    publicNotice('maint', { title: '维护窗口', body: '今晚 02:00 起短暂停服\n预计半小时', level: 'warning', popup: true, updated_at: '2026-11-03T00:00:00Z' }),
+    publicNotice('price', { title: '价格调整', body: '下月起调整部分模型价格', updated_at: '2026-11-02T00:00:00Z' }),
+    publicNotice('stop', { title: '紧急停服', body: '立刻停止调用', level: 'critical', popup: true }),
+  ]
+  await page.route('**/api/notices', (route) => route.fulfill({ json: { data: notices } }))
   await page.goto('/portal')
-  const banner = page.getByRole('status').filter({ hasText: '维护窗口' })
-  await expect(banner).toBeVisible()
-  await expect(banner.getByText('今晚 02:00 起短暂停服')).toBeVisible()
-  await banner.getByRole('button', { name: '关闭' }).click()
-  await expect(banner).toHaveCount(0)
 
-  await page.reload()
-  await expect(page.getByText('维护窗口')).toHaveCount(0)
+  // 两条弹窗公告：新的先弹，关掉（按钮 / Esc）即算看过，接着弹下一条
+  const popup = page.locator('[data-slot="notice-popup"]')
+  await expect(popup).toHaveAccessibleName('维护窗口')
+  await expect(popup).toContainText('今晚 02:00 起短暂停服')
+  await expect(popup).toContainText('还有 1 条')
+  await expect(popup.getByRole('button', { name: '我知道了', exact: true })).toBeFocused()
+  await popup.getByRole('button', { name: '我知道了', exact: true }).click()
+  await expect(popup).toHaveAccessibleName('紧急停服')
+  await expect(popup.getByText(/还有/)).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(popup).toHaveCount(0)
 
-  notice = { ...notice, updated_at: '2026-09-08T03:00:00Z', title: '维护改期', body: '改到明天' }
-  await page.reload()
-  await expect(page.getByRole('status').filter({ hasText: '维护改期' })).toBeVisible()
+  // 不弹窗的那条：入口亮红点
+  const entry = page.getByRole('button', { name: '公告，1 条未读', exact: true })
+  await expect(entry.locator('[data-slot="notice-dot"]')).toHaveCount(1)
+  await entry.click()
+  const list = page.getByRole('dialog', { name: '公告' })
+  const items = list.locator('[data-slot="notice-item"]')
+  // 新的在前
+  await expect(items).toHaveCount(3)
+  await expect(items.nth(0)).toContainText('维护窗口')
+  await expect(items.nth(1)).toContainText('价格调整')
+  await expect(items.nth(2)).toContainText('紧急停服')
+  await expect(list.locator('[data-slot="notice-unread"]')).toHaveCount(1)
+  await expect(items.nth(1).locator('[data-slot="notice-unread"]')).toHaveCount(1)
+  // 点开才算看过：红点消失，正文展开
+  const toggle = items.nth(1).getByRole('button')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(list.locator('[data-slot="notice-unread"]')).toHaveCount(0)
+  await expect(list.getByText('都看过了。', { exact: true })).toBeVisible()
+  await list.getByRole('button', { name: '关闭', exact: true }).last().click()
+  await expect(page.getByRole('button', { name: '公告', exact: true }).locator('[data-slot="notice-dot"]')).toHaveCount(0)
 
-  notice = { title: '紧急停服', body: '立刻停止调用', level: 'critical', updated_at: '2026-09-08T04:00:00Z' }
+  // 记在浏览器里：刷新后不再弹、不再亮
   await page.reload()
-  const alert = page.getByRole('alert').filter({ hasText: '紧急停服' })
-  await expect(alert).toBeVisible()
-  await expect(alert.getByRole('button', { name: '关闭' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '公告', exact: true })).toBeVisible()
+  await expect(popup).toHaveCount(0)
+  expect(JSON.parse((await page.evaluate(() => localStorage.getItem('okapi.notices.read')))!)).toEqual({
+    maint: '2026-11-03T00:00:00Z', price: '2026-11-02T00:00:00Z', stop: '2026-11-01T00:00:00Z',
+  })
+
+  // 站长改了内容重新发布（updated_at 变了）：看过的人再被提醒一次；下线的那条从记录里清掉
+  notices = [{ ...notices[0]!, title: '维护改期', body: '改到明天', updated_at: '2026-11-04T00:00:00Z' }, notices[1]!]
+  await page.reload()
+  await expect(popup).toHaveAccessibleName('维护改期')
+  await popup.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(popup).toHaveCount(0)
+  expect(JSON.parse((await page.evaluate(() => localStorage.getItem('okapi.notices.read')))!)).toEqual({
+    maint: '2026-11-04T00:00:00Z', price: '2026-11-02T00:00:00Z',
+  })
+})
+
+test('站点公告：全部标为已读；没有公告时不显示入口；接口异常不影响页面', async ({ page }) => {
+  await prepare(page)
+  let reply: unknown = { data: [publicNotice('a'), publicNotice('b', { updated_at: '2026-11-02T00:00:00Z' })] }
+  await page.route('**/api/notices', (route) => route.fulfill({ json: reply }))
+  await page.goto('/portal')
+  await expect(page.locator('[data-slot="notice-popup"]')).toHaveCount(0)
+  await page.getByRole('button', { name: '公告，2 条未读', exact: true }).click()
+  const list = page.getByRole('dialog', { name: '公告' })
+  await expect(list.getByText('2 条还没看过，点开即算看过。', { exact: true })).toBeVisible()
+  await list.getByRole('button', { name: '全部标为已读', exact: true }).click()
+  await expect(list.locator('[data-slot="notice-unread"]')).toHaveCount(0)
+  await expect(list.getByRole('button', { name: '全部标为已读', exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: '公告', exact: true })).toBeVisible()
+
+  for (const broken of [{ data: [] }, { notice: null }, { data: 'oops' }, { data: [null, 5, { id: 7 }] }]) {
+    reply = broken
+    const answered = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/notices')
+    await page.reload()
+    // 等这份应答到了、渲染过一拍再看——否则下面几条在「还没拿到应答」时就已经成立
+    await answered
+    await page.waitForTimeout(200)
+    // 页面照常渲染（顶栏还在，不是掉进了出错页），只是没有公告入口
+    await expect(page.getByRole('banner').getByRole('button', { name: '语言', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^公告/ })).toHaveCount(0)
+  }
+})
+
+test('站点公告：登录页同样有入口和弹窗；改版前关掉的那条横幅不再提醒', async ({ page }) => {
+  await prepare(page, { signedIn: false })
+  const notices = [
+    publicNotice('legacy', { title: '改版前发的', popup: true, updated_at: '2026-09-08T01:00:00Z' }),
+    publicNotice('fresh', { title: '维护窗口', popup: true, updated_at: '2026-11-03T00:00:00Z' }),
+  ]
+  await page.route('**/api/notices', (route) => route.fulfill({ json: { data: notices } }))
+  // 改版前只有一条公告，关掉横幅时记的是它的 updated_at
+  await page.addInitScript(() => localStorage.setItem('okapi.notice.dismissed', '2026-09-08T01:00:00Z'))
+  await page.goto('/')
+  const popup = page.locator('[data-slot="notice-popup"]')
+  await expect(popup).toHaveAccessibleName('维护窗口')
+  await expect(popup.getByText(/还有/)).toHaveCount(0)
+  await popup.getByRole('button', { name: '我知道了', exact: true }).click()
+  await expect(popup).toHaveCount(0)
+  await page.getByRole('button', { name: '公告', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: '公告' }).locator('[data-slot="notice-item"]')).toHaveCount(2)
+  await expect(page.getByRole('dialog', { name: '公告' }).locator('[data-slot="notice-unread"]')).toHaveCount(0)
 })
 
 test('API Key 登录：首尾空白 trim 后作为 Bearer 探活 /api/me', async ({ page }) => {

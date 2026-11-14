@@ -74,7 +74,7 @@ async function prepareNotice(page: Page, value: unknown = null, language = 'zh-C
   await prepare(page)
   await page.addInitScript((lang) => localStorage.setItem('okapi.lang', lang), language)
   const state = { value, reads: 0, posts: [] as Json[], readStatus: 200, saveStatus: 200, readGate: Promise.resolve(), saveGate: Promise.resolve() }
-  await page.route('**/admin/settings/site_notice', async (route) => {
+  await page.route('**/admin/settings/site_notices', async (route) => {
     state.reads += 1
     const snapshot = state.value
     await state.readGate
@@ -83,7 +83,7 @@ async function prepareNotice(page: Page, value: unknown = null, language = 'zh-C
   await page.route('**/admin/settings', async (route) => {
     if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
     const body = route.request().postDataJSON() as Json
-    expect(body.key).toBe('site_notice')
+    expect(body.key).toBe('site_notices')
     state.posts.push(body)
     await state.saveGate
     if (state.saveStatus !== 200) return route.fulfill(apiError(state.saveStatus, 'internal_error'))
@@ -932,34 +932,43 @@ test('设置：公告发布带 updated_at、注册赠送 USD→micro、隐私开
   })
 
   await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  await page.getByRole('switch', { name: '启用公告' }).click()
+  await page.getByRole('button', { name: '新建公告', exact: true }).click()
   await page.locator('#notice-title').fill('维护窗口')
   await page.locator('#notice-level').selectOption('warning')
   await page.locator('#notice-body').fill('今晚 02:00 升级')
   await page.getByRole('button', { name: '保存并发布', exact: true }).click()
   await expect.poll(() => posts.length).toBe(2)
-  const notice = posts[1] as { key: string; value: Json }
-  expect(notice.key).toBe('site_notice')
-  expect(notice.value).toMatchObject({
+  const notice = posts[1] as { key: string; value: Json[] }
+  expect(notice.key).toBe('site_notices')
+  expect(notice.value).toHaveLength(1)
+  expect(notice.value[0]).toMatchObject({
     enabled: true,
+    popup: false,
     title: '维护窗口',
     body: '今晚 02:00 升级',
     level: 'warning',
   })
-  expect(typeof notice.value.updated_at).toBe('string')
-  expect(notice.value.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
-  await expect(page.getByRole('button', { name: '保存并发布', exact: true })).toBeDisabled()
+  expect(notice.value[0]!.id).toMatch(/^n-[0-9a-f]{12}$/)
+  expect(notice.value[0]!.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  // 保存成功后抽屉关闭，新公告出现在列表里
+  await expect(page.getByRole('dialog', { name: '新建公告' })).toHaveCount(0)
+  await expect(page.locator('[data-slot="notice-row"]')).toHaveCount(1)
   await dismissToasts(page)
 
-  await page.locator('#notice-title').fill('维护窗口 2')
-  await expect(page.getByRole('button', { name: '保存并发布', exact: true })).toBeEnabled()
+  // 再改这一条：保存失败时抽屉留着，草稿还在
+  await page.locator('[data-slot="notice-row"]').getByRole('button', { name: '编辑', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: '编辑公告' })
+  await editor.locator('#notice-title').fill('维护窗口 2')
+  await expect(editor.getByRole('button', { name: '保存并发布', exact: true })).toBeEnabled()
   await page.route('**/admin/settings', (route) => {
     if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
     return route.fulfill(apiError(500, 'internal_error'))
   })
-  await page.getByRole('button', { name: '保存并发布', exact: true }).click()
+  await editor.getByRole('button', { name: '保存并发布', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(editor.locator('#notice-title')).toHaveValue('维护窗口 2')
+  await editor.getByRole('button', { name: '取消', exact: true }).click()
   await page.route('**/admin/settings', async (route) => {
     if (route.request().isNavigationRequest()) return route.fallback()
     if (route.request().method() === 'POST') {
@@ -1682,227 +1691,207 @@ test('设置通知多路：Webhook 与邮件分行提交，事件从清单勾选
   expect(posts[2]).toEqual({ key: 'notify_channels', value: [] })
 })
 
-test('公告编辑：加载和读取失败期间不能覆盖默认值，非法配置可重试恢复', async ({ page }) => {
+const storedNotice = (id: string, extra: Json = {}) => ({ id, title: `公告 ${id}`, body: `正文 ${id}`, level: 'info', popup: false,
+  enabled: true, updated_at: '2026-11-01T00:00:00.000Z', ...extra })
+async function openNotices(page: Page) {
+  await page.goto('/admin/settings')
+  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
+  return page.getByRole('tabpanel', { name: '站点公告' })
+}
+
+test('公告管理：读取失败或配置不合法时不能新建，重试后恢复', async ({ page }) => {
   const state = await prepareNotice(page)
-  let release: () => void = () => undefined
-  state.readGate = new Promise<void>((resolve) => { release = resolve })
   state.readStatus = 500
-  await page.goto('/admin/settings')
-  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  const panel = page.getByRole('tabpanel', { name: '站点公告' })
-  try {
-    await expect(panel.getByRole('status')).toBeVisible()
-    await expect(panel.locator('input, textarea, select')).toHaveCount(0)
-    expect(state.posts).toHaveLength(0)
-  } finally { release() }
+  const panel = await openNotices(page)
   await expect(panel.getByRole('alert')).toContainText('服务内部错误')
+  await expect(panel.getByRole('button', { name: '新建公告', exact: true })).toBeDisabled()
+  // 改版前的单条形状不是列表：提示去高级设置里看，不拿它当空列表覆盖掉
   state.readStatus = 200
-  for (const value of [{ body: 12 }, { enabled: 'true' }, { level: ['info'] }]) {
-    state.value = value
-    await panel.getByRole('button', { name: '重试' }).click()
-    await expect(panel.getByRole('alert')).toContainText('公告配置格式不正确')
-    await expect(panel.locator('input, textarea, select')).toHaveCount(0)
-  }
+  state.value = { enabled: true, body: '旧的单条形状' }
+  await panel.getByRole('button', { name: '重试', exact: true }).click()
+  await expect(panel.getByRole('alert')).toContainText('公告配置格式不正确')
+  await expect(panel.getByRole('button', { name: '新建公告', exact: true })).toBeDisabled()
   state.value = null
-  await panel.getByRole('button', { name: '重试' }).click()
-  await expect(page.locator('#notice-title')).toHaveValue('')
-  await expect(panel.getByRole('switch')).not.toBeChecked()
-  await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await panel.getByRole('button', { name: '重试', exact: true }).click()
+  await expect(panel.getByText('还没有公告', { exact: true })).toBeVisible()
+  await expect(panel.getByRole('button', { name: '新建公告', exact: true })).toBeEnabled()
   expect(state.posts).toHaveLength(0)
 })
 
-test('公告编辑：草稿实时预览与线上已读隔离，切换分区不丢输入，重大通知不能关闭预览', async ({ page }) => {
-  const original = { enabled: true, title: '线上标题', body: '线上内容', level: 'warning', updated_at: '2026-09-26T08:00:00Z' }
-  const state = await prepareNotice(page, original)
-  await page.addInitScript((version) => localStorage.setItem('okapi.notice.dismissed', version), original.updated_at)
-  let publicReads = 0
-  await page.route('**/api/notice', (route) => { publicReads += 1; return route.fulfill({ json: { notice: original } }) })
-  await page.goto('/admin/settings')
-  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  const preview = page.getByRole('region', { name: '公告草稿预览' })
-  await expect(preview).toContainText('线上内容')
-  await page.locator('#notice-title').fill('  即将维护  ')
-  await page.locator('#notice-body').fill('第一行\n<img src=x onerror=alert(1)>')
-  await expect(preview).toContainText('即将维护')
-  await expect(preview).toContainText('<img src=x onerror=alert(1)>')
-  await expect(preview.locator('img')).toHaveCount(0)
-  await expect(preview.getByRole('status')).toHaveCount(0)
-  await page.getByRole('tab', { name: '注册与风控', exact: true }).click()
-  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  await expect(page.locator('#notice-title')).toHaveValue('  即将维护  ')
-  await preview.getByRole('button', { name: '关闭', exact: true }).focus()
-  await page.keyboard.press('Enter')
-  await expect(preview.getByText('已关闭本次预览')).toBeVisible()
-  await expect(preview.getByRole('button', { name: '恢复预览', exact: true })).toBeFocused()
-  expect(await page.evaluate(() => localStorage.getItem('okapi.notice.dismissed'))).toBe(original.updated_at)
-  await page.keyboard.press('Enter')
-  await expect(preview.getByRole('button', { name: '关闭', exact: true })).toBeFocused()
-  await expect(preview).toContainText('即将维护')
-  await preview.getByRole('button', { name: '关闭', exact: true }).click()
-  await page.locator('#notice-title').fill('新的预览')
-  await expect(preview).toContainText('新的预览')
-  await page.locator('#notice-level').selectOption('critical')
-  await expect(preview.getByRole('button', { name: '关闭', exact: true })).toHaveCount(0)
-  await expect(preview.getByRole('alert')).toHaveCount(0)
-  await expect(preview).toContainText('不会停用服务')
-  expect(publicReads).toBe(1)
-  expect(state.reads).toBe(1)
-  expect(state.posts).toHaveLength(0)
+test('公告管理：可以挂多条，新的在前，列表标出发布状态、级别与弹窗', async ({ page }) => {
+  const state = await prepareNotice(page)
+  const panel = await openNotices(page)
+  await panel.getByRole('button', { name: '新建公告', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: '新建公告' })
+  await drawer.locator('#notice-title').fill('维护窗口')
+  await drawer.locator('#notice-level').selectOption('warning')
+  await drawer.locator('#notice-body').fill('今晚 02:00 升级\n预计半小时')
+  // 预览跟着输入走，正文保留换行
+  await expect(drawer.getByRole('region', { name: '预览' })).toContainText('今晚 02:00 升级')
+  await drawer.getByRole('switch', { name: '弹窗提醒' }).click()
+  await drawer.getByRole('button', { name: '保存并发布', exact: true }).click()
+  await expect.poll(() => state.posts.length).toBe(1)
+  const first = (state.posts[0]!.value as Json[])[0]!
+  expect(first).toMatchObject({ title: '维护窗口', body: '今晚 02:00 升级\n预计半小时', level: 'warning', popup: true, enabled: true })
+  expect(first.id).toMatch(/^n-[0-9a-f]{12}$/)
+  await expect(page.getByRole('status').filter({ hasText: '公告已发布' })).toBeVisible()
+  await expect(drawer).toHaveCount(0)
+  const rows = panel.locator('[data-slot="notice-row"]')
+  await expect(rows).toHaveCount(1)
+  await expect(rows.first()).toContainText('维护窗口')
+  for (const badge of ['已发布', '提醒', '弹窗']) await expect(rows.first().getByText(badge, { exact: true })).toBeVisible()
+
+  // 第二条先不发布：只保存
+  await panel.getByRole('button', { name: '新建公告', exact: true }).click()
+  await drawer.locator('#notice-title').fill('价格调整')
+  await drawer.locator('#notice-body').fill('下月起调整部分模型价格')
+  await drawer.getByRole('switch', { name: '发布' }).click()
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => state.posts.length).toBe(2)
+  const saved = state.posts[1]!.value as Json[]
+  expect(saved.map((item) => item.title)).toEqual(['价格调整', '维护窗口'])
+  expect(saved[0]).toMatchObject({ enabled: false, popup: false, level: 'info' })
+  expect(saved[0]!.id).not.toBe(first.id)
+  // 第一条原样带着，没有被第二次保存改动
+  expect(saved[1]).toEqual(first)
+  await expect(page.getByRole('status').filter({ hasText: '已保存，公告未发布' })).toBeVisible()
+  await expect(rows).toHaveCount(2)
+  await expect(rows.first()).toContainText('价格调整')
+  await expect(rows.first().getByText('未发布', { exact: true })).toBeVisible()
+  await expect(panel.getByText('已发布 1 / 共 2 条', { exact: true })).toBeVisible()
 })
 
-test('公告编辑共享横幅：手机无标题正文占满宽度，关闭记录与重大通知行为正确', async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 800 })
-  await prepareNotice(page)
-  const notice = { title: '', body: '维护安排：https://example.test/' + 'abcdefghij'.repeat(10), level: 'warning', updated_at: 'mobile-warning-v1' }
-  await page.route('**/api/notice', (route) => route.fulfill({ json: { notice } }))
-  await page.goto('/admin/settings')
-  const banner = page.getByRole('status').filter({ hasText: '维护安排：' })
-  await expect(banner).toBeVisible()
-  expect((await banner.locator('p').boundingBox())!.width).toBeGreaterThan((await banner.boundingBox())!.width * 0.75)
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await banner.getByRole('button', { name: '关闭', exact: true }).focus()
-  await page.keyboard.press('Enter')
-  await expect(banner).toHaveCount(0)
-  expect(await page.evaluate(() => localStorage.getItem('okapi.notice.dismissed'))).toBe('mobile-warning-v1')
-  notice.level = 'critical'
-  notice.updated_at = 'mobile-critical-v2'
-  await page.reload()
-  const critical = page.getByRole('alert').filter({ hasText: '维护安排：' })
-  await expect(critical).toBeVisible()
-  await expect(critical.getByRole('button', { name: '关闭', exact: true })).toHaveCount(0)
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+test('公告管理：只改弹窗开关不换时间，改内容或重新发布才换；删除要确认', async ({ page }) => {
+  const live = storedNotice('live', { custom: 'kept', updated_at: '2026-11-02T00:00:00.000Z' })
+  const draft = storedNotice('draft', { enabled: false })
+  const state = await prepareNotice(page, [live, draft])
+  const panel = await openNotices(page)
+  const row = (name: string) => panel.locator('[data-slot="notice-row"]').filter({ hasText: name })
+  const drawer = page.getByRole('dialog', { name: '编辑公告' })
+  const last = () => state.posts.at(-1)!.value as Json[]
+  const find = (id: string) => last().find((item) => item.id === id)!
+
+  await row('公告 live').getByRole('button', { name: '编辑', exact: true }).click()
+  // 没改动时不能保存
+  await expect(drawer.getByRole('button', { name: '保存并发布', exact: true })).toBeDisabled()
+  await drawer.getByRole('switch', { name: '弹窗提醒' }).click()
+  await expect(drawer.getByRole('note')).toHaveText('这次改动不影响已经看过的用户。')
+  await drawer.getByRole('button', { name: '保存并发布', exact: true }).click()
+  await expect.poll(() => state.posts.length).toBe(1)
+  // 高级设置里手加的字段原样留着
+  expect(find('live')).toEqual({ ...live, popup: true })
+  expect(find('draft')).toEqual(draft)
+
+  await row('公告 live').getByRole('button', { name: '编辑', exact: true }).click()
+  await drawer.locator('#notice-body').fill('改过的正文')
+  await expect(drawer.getByRole('note')).toContainText('再次看到未读')
+  await drawer.getByRole('button', { name: '保存并发布', exact: true }).click()
+  await expect.poll(() => state.posts.length).toBe(2)
+  expect(find('live')).toMatchObject({ body: '改过的正文', popup: true, custom: 'kept' })
+  expect(find('live').updated_at).not.toBe(live.updated_at)
+
+  await row('公告 draft').getByRole('button', { name: '编辑', exact: true }).click()
+  await drawer.getByRole('switch', { name: '发布' }).click()
+  await expect(drawer.getByRole('note')).toContainText('再次看到未读')
+  await drawer.getByRole('button', { name: '保存并发布', exact: true }).click()
+  await expect.poll(() => state.posts.length).toBe(3)
+  expect(find('draft')).toMatchObject({ enabled: true })
+  expect(find('draft').updated_at).not.toBe(draft.updated_at)
+
+  await row('公告 live').getByRole('button', { name: '删除', exact: true }).click()
+  const confirm = page.getByRole('alertdialog', { name: '删除公告「公告 live」？' })
+  await confirm.getByRole('button', { name: '取消', exact: true }).click()
+  expect(state.posts).toHaveLength(3)
+  await row('公告 live').getByRole('button', { name: '删除', exact: true }).click()
+  await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await expect.poll(() => state.posts.length).toBe(4)
+  expect(last().map((item) => item.id)).toEqual(['draft'])
+  await expect(page.getByRole('status').filter({ hasText: '公告已删除' })).toBeVisible()
+  await expect(panel.locator('[data-slot="notice-row"]')).toHaveCount(1)
 })
 
 test('公告编辑：空正文不能发布，emoji 按字符计数，超长输入保留且禁止提交', async ({ page }) => {
   const state = await prepareNotice(page)
-  await page.goto('/admin/settings')
-  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  const panel = page.getByRole('tabpanel', { name: '站点公告' })
-  await panel.getByRole('switch').check()
-  const submit = panel.getByRole('button', { name: '保存并发布', exact: true })
-  await expect(submit).toBeDisabled()
-  await expect(page.locator('#notice-body')).toHaveAccessibleDescription(/发布前请填写公告正文/)
-  await page.locator('#notice-body').fill('  \n  ')
-  await expect(submit).toBeDisabled()
-  await page.locator('#notice-title').fill('😀'.repeat(80))
-  await page.locator('#notice-body').fill('😀'.repeat(4000))
-  await expect(page.locator('#notice-title-count')).toHaveText('80 / 80 字')
-  await expect(page.locator('#notice-body-count')).toHaveText('4000 / 4000 字')
-  await expect(submit).toBeEnabled()
-  await page.locator('#notice-title').fill('😀'.repeat(81))
-  await page.locator('#notice-body').fill('😀'.repeat(4001))
-  await expect(page.locator('#notice-title')).toHaveValue('😀'.repeat(81))
-  await expect(page.locator('#notice-body')).toHaveValue('😀'.repeat(4001))
-  await expect(page.locator('#notice-title')).toHaveAttribute('aria-invalid', 'true')
-  await expect(page.locator('#notice-body')).toHaveAccessibleDescription(/超出的内容已保留/)
-  await expect(submit).toBeDisabled()
+  const panel = await openNotices(page)
+  await panel.getByRole('button', { name: '新建公告', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: '新建公告' })
+  const publish = drawer.getByRole('button', { name: '保存并发布', exact: true })
+  await expect(publish).toBeDisabled()
+  await expect(drawer.locator('#notice-body')).toHaveAccessibleDescription(/发布前请填写公告正文/)
+  await drawer.locator('#notice-body').fill('   ')
+  await expect(publish).toBeDisabled()
+  // 不发布的草稿可以没有正文
+  await drawer.getByRole('switch', { name: '发布' }).click()
+  await expect(drawer.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  await drawer.getByRole('switch', { name: '发布' }).click()
+  await drawer.locator('#notice-title').fill('🙂'.repeat(80))
+  await expect(drawer.locator('#notice-title-count')).toHaveText('80 / 80 字')
+  await drawer.locator('#notice-body').fill('正文')
+  await expect(publish).toBeEnabled()
+  await drawer.locator('#notice-title').fill('🙂'.repeat(81))
+  await expect(drawer.locator('#notice-title')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.locator('#notice-title-error')).toContainText('最多 80 字')
+  await expect(publish).toBeDisabled()
+  await drawer.locator('#notice-title').fill('标题')
+  const long = '文'.repeat(4001)
+  await drawer.locator('#notice-body').fill(long)
+  await expect(drawer.locator('#notice-body')).toHaveValue(long)
+  await expect(drawer.locator('#notice-body-count')).toHaveText('4001 / 4000 字')
+  await expect(publish).toBeDisabled()
   expect(state.posts).toHaveLength(0)
-  await page.locator('#notice-title').fill('😀'.repeat(80))
-  await page.locator('#notice-body').fill('😀'.repeat(4000))
-  await submit.click()
-  await expect.poll(() => state.posts.length).toBe(1)
-  expect(state.posts[0].value).toMatchObject({ title: '😀'.repeat(80), body: '😀'.repeat(4000), enabled: true })
 })
 
-test('公告编辑：保存未启用内容、发布和下线操作清楚，取消恢复最近保存版本并保留扩展字段', async ({ page }) => {
-  const state = await prepareNotice(page, { enabled: false, title: '未发布标题', body: '旧内容', level: 'info', extra_option: { future: true } })
-  await page.goto('/admin/settings')
-  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  const panel = page.getByRole('tabpanel', { name: '站点公告' })
-  await page.locator('#notice-title').fill('  保存的标题  ')
-  await page.locator('#notice-body').fill('  新内容\n第二行  ')
-  await expect(panel).toContainText('有未保存的修改')
-  await panel.getByRole('button', { name: '保存', exact: true }).click()
-  await expect.poll(() => state.posts.length).toBe(1)
-  expect(state.posts[0].value).toMatchObject({ enabled: false, title: '保存的标题', body: '新内容\n第二行', extra_option: { future: true } })
-  expect((state.posts[0].value as Json).updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
-  await expect(page.locator('#notice-title')).toHaveValue('保存的标题')
-  await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
-  await dismissToasts(page)
-  await panel.getByRole('switch').check()
-  await panel.getByRole('button', { name: '保存并发布', exact: true }).click()
-  await expect.poll(() => state.posts.length).toBe(2)
-  await expect(panel.getByRole('button', { name: '保存并发布', exact: true })).toBeDisabled()
-  await dismissToasts(page)
-  await panel.getByRole('switch').uncheck()
-  await expect(panel.getByRole('button', { name: '保存并下线', exact: true })).toBeEnabled()
-  expect(state.posts).toHaveLength(2)
-  await panel.getByRole('button', { name: '取消', exact: true }).click()
-  await expect(panel.getByRole('switch')).toBeChecked()
-  await expect(page.locator('#notice-title')).toHaveValue('保存的标题')
-  await panel.getByRole('switch').uncheck()
-  await panel.getByRole('button', { name: '保存并下线', exact: true }).click()
-  await expect.poll(() => state.posts.length).toBe(3)
-  expect(state.posts[2].value).toMatchObject({ enabled: false, title: '保存的标题', body: '新内容\n第二行', extra_option: { future: true } })
-  await expect(panel.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
-  expect(state.reads).toBe(1)
-})
-
-test('公告编辑：保存时锁定表单，失败保留原始草稿，重试成功后取消不退回旧值', async ({ page }) => {
-  const state = await prepareNotice(page, { enabled: true, title: '旧标题', body: '旧正文', level: 'warning' })
-  await page.goto('/admin/settings')
-  await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-  const panel = page.getByRole('tabpanel', { name: '站点公告' })
-  await page.locator('#notice-title').fill('  新标题  ')
-  await page.locator('#notice-body').fill('新正文')
-  let release: () => void = () => undefined
+test('公告编辑：保存时锁定表单，失败保留草稿，重试成功后抽屉关闭', async ({ page }) => {
+  const state = await prepareNotice(page, [storedNotice('a')])
+  let release = () => {}
   state.saveGate = new Promise<void>((resolve) => { release = resolve })
   state.saveStatus = 500
-  await panel.getByRole('button', { name: '保存并发布', exact: true }).click()
+  const panel = await openNotices(page)
+  await panel.getByRole('button', { name: '新建公告', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: '新建公告' })
+  await drawer.locator('#notice-title').fill('不能丢的草稿')
+  await drawer.locator('#notice-body').fill('正文也要留着')
+  await drawer.getByRole('button', { name: '保存并发布', exact: true }).click()
   try {
     await expect.poll(() => state.posts.length).toBe(1)
-    for (const id of ['notice-title', 'notice-body', 'notice-level']) await expect(page.locator(`#${id}`)).toBeDisabled()
-    await expect(panel.getByRole('switch')).toBeDisabled()
-    await expect(panel.getByRole('button', { name: '取消', exact: true })).toBeDisabled()
-    await expect(panel.getByRole('button', { name: '保存并发布', exact: true })).toHaveAttribute('aria-busy', 'true')
-    await page.getByRole('tab', { name: '注册与风控', exact: true }).click()
-    await page.getByRole('tab', { name: '站点公告', exact: true }).click()
-    await expect(page.locator('#notice-title')).toHaveValue('  新标题  ')
-    await expect(page.locator('#notice-title')).toBeDisabled()
+    await expect(drawer.getByRole('button', { name: '保存并发布', exact: true })).toHaveAttribute('aria-busy', 'true')
+    for (const id of ['notice-title', 'notice-level', 'notice-body']) await expect(drawer.locator(`#${id}`)).toBeDisabled()
   } finally { release() }
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
-  await expect(page.locator('#notice-title')).toBeEnabled()
-  await expect(page.locator('#notice-title')).toHaveValue('  新标题  ')
-  await dismissToasts(page)
+  await expect(drawer.locator('#notice-title')).toHaveValue('不能丢的草稿')
+  await expect(drawer.locator('#notice-body')).toHaveValue('正文也要留着')
+  // 失败的那次没有进列表
+  await expect(panel.locator('[data-slot="notice-row"]')).toHaveCount(1)
   state.saveStatus = 200
-  await panel.getByRole('button', { name: '保存并发布', exact: true }).click()
+  await dismissToasts(page)
+  await drawer.getByRole('button', { name: '保存并发布', exact: true }).click()
   await expect.poll(() => state.posts.length).toBe(2)
-  expect(state.posts[1].value).toMatchObject({ title: '新标题', body: '新正文', enabled: true })
-  await expect(page.locator('#notice-title')).toHaveValue('新标题')
-  await page.locator('#notice-title').fill('其他修改')
-  await panel.getByRole('button', { name: '取消', exact: true }).click()
-  await expect(page.locator('#notice-title')).toHaveValue('新标题')
-  await expect(panel.getByRole('button', { name: '保存并发布', exact: true })).toBeDisabled()
+  await expect(drawer).toHaveCount(0)
+  await expect(panel.locator('[data-slot="notice-row"]')).toHaveCount(2)
   expect(state.reads).toBe(1)
 })
 
 for (const width of [320, 390, 1280]) {
-  test(`公告编辑：${width}px 预览内部滚动，长内容不横向溢出，移动控件可触达`, async ({ page }) => {
+  test(`公告管理：${width}px 列表与编辑抽屉不横向溢出，移动端控件可触达`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 })
     const english = width === 390
-    await prepareNotice(page, null, english ? 'en' : 'zh-CN')
+    const long = 'https://example.test/' + 'long-path-'.repeat(60)
+    await prepareNotice(page, [storedNotice('long', { title: `长标题 ${long}`.slice(0, 80), body: `${long}\n维护安排`, popup: true, level: 'critical' }), storedNotice('short')], english ? 'en' : 'zh-CN')
     await page.goto('/admin/settings')
-    await page.getByRole('tab', { name: english ? 'Site notice' : '站点公告', exact: true }).click()
-    const preview = page.getByRole('region', { name: english ? 'Draft preview' : '公告草稿预览' })
-    await page.locator('#notice-title').fill(english ? 'Scheduled maintenance' : '服务维护通知')
-    await page.locator('#notice-level').selectOption('warning')
-    await page.locator('#notice-body').fill('https://example.test/' + 'long-path-'.repeat(160) + '\n维护安排\n'.repeat(25))
-    const content = preview.getByRole('group')
-    expect(await content.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true)
-    // 校验实际滚动视口，避免入场 transform 的亚像素误差（320.00003px）误报。
-    expect(await content.evaluate((node) => node.clientHeight)).toBeLessThanOrEqual(320)
-    expect(await content.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+    await page.getByRole('tab', { name: english ? 'Site notices' : '站点公告', exact: true }).click()
+    const panel = page.getByRole('tabpanel', { name: english ? 'Site notices' : '站点公告' })
+    await expect(panel.locator('[data-slot="notice-row"]')).toHaveCount(2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await panel.locator('[data-slot="notice-row"]').first().getByRole('button', { name: english ? 'Edit' : '编辑', exact: true }).click()
+    const drawer = page.getByRole('dialog', { name: english ? 'Edit notice' : '编辑公告' })
+    await expect(drawer.locator('#notice-body')).toBeVisible()
+    expect(await drawer.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+    const preview = drawer.getByRole('region', { name: english ? 'Preview' : '预览' })
+    expect(await preview.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
     if (width < 768) {
-      expect((await content.locator('p').boundingBox())!.width).toBeGreaterThan((await content.boundingBox())!.width * 0.75)
-      for (const id of ['notice-title', 'notice-level']) expect((await page.locator(`#${id}`).boundingBox())!.height).toBeGreaterThanOrEqual(44)
-      expect((await preview.getByRole('button', { name: english ? 'Close' : '关闭', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
-    } else {
-      expect((await preview.boundingBox())!.x).toBeGreaterThan((await page.locator('#notice-title').boundingBox())!.x)
+      for (const id of ['notice-title', 'notice-level']) expect((await drawer.locator(`#${id}`).boundingBox())!.height).toBeGreaterThanOrEqual(44)
     }
-    await page.locator('#notice-body').fill(english ? 'Scheduled maintenance: 02:00–02:30 UTC.\nRequests may be briefly interrupted. Please retry after maintenance.\nWe will update this notice when service is restored.' : '维护时间：02:00–02:30（UTC）。\n期间请求可能短暂中断，建议稍后重试。\n维护完成后，我们会更新此公告。')
     if (english) await page.evaluate(() => document.documentElement.classList.add('dark'))
-    await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' }))
-    await page.screenshot({ path: `test-results/notice-${width}.png`, fullPage: true, animations: 'disabled' })
+    await page.screenshot({ path: `test-results/notice-${width}.png`, animations: 'disabled' })
   })
 }

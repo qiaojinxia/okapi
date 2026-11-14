@@ -113,9 +113,10 @@ for (const viewport of [{ width: 1024, height: 768 }, { width: 1366, height: 768
     await expect(trend.getByRole('table')).toBeVisible()
     await page.screenshot({ path: test.info().outputPath('dashboard-flow-expanded.png'), animations: 'disabled' })
     await page.getByRole('button', { name: '费用明细', exact: true }).click()
-    await page.route('**/api/notice', (route) => route.fulfill({ json: { notice: { title: '维护通知', body: '本次通知与统计卡片同时显示，图表仍需保持在首屏。', level: 'info', updated_at: '2026-10-02T00:00:00Z' } } }))
+    // 有公告时顶栏多一个带红点的入口，不占页面高度，图表仍在首屏
+    await page.route('**/api/notices', (route) => route.fulfill({ json: { data: [{ id: 'maint', title: '维护通知', body: '本次通知与统计卡片同时显示，图表仍需保持在首屏。', level: 'info', popup: false, updated_at: '2026-10-02T00:00:00Z' }] } }))
     await page.reload()
-    await expect(page.getByText('维护通知', { exact: true })).toBeVisible()
+    await expect(page.locator('[data-slot="notice-dot"]')).toBeVisible()
     await checkLayout()
   })
 }

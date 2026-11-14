@@ -150,7 +150,7 @@ pub struct Preset {
 }
 
 /// `settings.playground_presets` → 白名单收口：缺 name / model 的条目丢弃、文本截断、数值夹到合法区间。
-/// settings 写入口是泛型 key/value，不能假设值形状（与 `site_notice` 同一立场）。
+/// settings 写入口是泛型 key/value，不能假设值形状（与 `site_notices` 同一立场）。
 #[must_use]
 pub fn sanitize_presets(raw: Option<&Value>) -> Vec<Preset> {
     let Some(items) = raw.and_then(Value::as_array) else {

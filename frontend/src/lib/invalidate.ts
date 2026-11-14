@@ -18,7 +18,7 @@ export function invalidateEgress(client: QueryClient): Promise<void> {
 
 /// 由某个设置派生出来的视图：设置改了它们也得刷新。
 const DERIVED_FROM_SETTING: Record<string, readonly Key[]> = {
-  site_notice: [qk.notice],
+  site_notices: [qk.notices],
   registration_policy: [qk.registrationPolicy],
   oauth_providers: [qk.oauthProviders],
   playground_presets: [qk.playgroundPresets],

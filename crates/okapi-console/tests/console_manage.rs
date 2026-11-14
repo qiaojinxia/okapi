@@ -906,6 +906,67 @@ async fn admin_list_surface_covers_every_resource() {
         .await
         .unwrap();
 
+    // ---- 公告列表：整份校验后才落库；发布的立刻出现在公开接口（本机按键失效，不等 60s 缓存） ----
+    let notice = |id: &str, body: &str, enabled: bool| {
+        json!({"id": id, "title": "标题", "body": body, "level": "info", "popup": true,
+            "enabled": enabled, "updated_at": "2026-11-13T00:00:00Z"})
+    };
+    for bad in [
+        json!({"enabled": true, "body": "旧的单条形状"}),
+        json!([{"title": "没有 id", "updated_at": "2026-11-13T00:00:00Z"}]),
+        json!([{"id": "a", "updated_at": "不是时间"}]),
+        json!([{"id": "a", "updated_at": "2026-11-13T00:00:00Z", "level": "urgent"}]),
+        json!([{"id": "a", "updated_at": "2026-11-13T00:00:00Z", "popup": "yes"}]),
+        json!([notice("same", "一", true), notice("same", "二", true)]),
+        json!([{"id": "a", "updated_at": "2026-11-13T00:00:00Z", "body": "文".repeat(4001)}]),
+    ] {
+        let (status, body) = req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/settings",
+            t,
+            Some(json!({"key":"site_notices","value":bad})),
+        )
+        .await;
+        assert_eq!(status, 400, "site_notices={bad} 必须拒绝");
+        assert_eq!(body["error"]["param"], "site_notices");
+    }
+    let public = || async {
+        reqwest::get(format!("http://{}/api/notices", env.console))
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    assert_eq!(public().await, json!({"data": []}), "坏值一条都没落库");
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"site_notices","value":[notice("live", "已发布", true), notice("draft", "草稿", false)]})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let listed = public().await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed["data"][0]["id"], "live");
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"site_notices","value":[]})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(public().await, json!({"data": []}), "清空后立刻不再展示");
+    sqlx::query("DELETE FROM settings WHERE key = 'site_notices'")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
     // ---- 权限分级：普通用户对管理面一律 403 ----
     for path in [
         "/admin/models",

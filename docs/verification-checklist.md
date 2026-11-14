@@ -104,7 +104,7 @@
 | 兑换码（manage + portal） | 批量生成、核销、绑用户、限 IP | A C | `console_redemption`（并发恰一成功、过期拒绝、IP 上限）、e2e `redemptions.spec` | 多次核销 `max_uses` backlog |
 | `kernel/ssrf.rs`（2026-11-01 前在 console，之后经 gateway） | 上游 URL 校验：`api_base`、`settings.oauth_token_url`、Vertex 服务账号 `token_uri`（凭证三个写入口） | C | 单元；`console_ssrf`（三种地址各自的 400 参数与放行） | — |
 | SPA 托管 / 内容协商 | `/admin/*` 同挂 API 与 SPA | A | `console_spa_navigation` | — |
-| 公告 / settings | `site_notice` 公开端点、设置读写 | A | `console_portal_pages::public_notice_whitelists_and_gates`、`console_ops::settings_get_and_leaderboard`、e2e smoke 公告 | — |
+| 公告 / settings | `site_notices` 公开端点（列表）、设置读写与整份校验 | A | `console_portal_pages::public_notices_list_what_is_published`、`console_manage`（公告列表校验）、`console_ops::settings_get_and_leaderboard`、e2e smoke 公告 | — |
 | `playground.rs` | Playground 同源流式中继 + 站点预设（§11.39） | A B C | `console_playground`（中继强制流式回 SSE、逐块透出与记账落同一 key、无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口）；单元 `force_stream` / `sanitize_presets` | 中继直调数据面处理器，鉴权 / 限流 / 计费全部复用 gateway，不另测 |
 
 ### 2.4 worker 角色、mail、migrate
@@ -589,7 +589,7 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | 运维 DLQ | 只截过图 | 全选只含待处理；重投 / 丢弃经 `alertdialog`，体 `{ids}` |
 | 充值兑换卡 | 只有下单 e2e | trim 后 POST `/api/me/redeem`；成功态套餐/分组/有效期；`redemption_invalid` 文案 |
 | 运维退款 / 对账 / 保留 | 熔断已有 | 先查后退 `reason` trim；单用户 `{user_id}` / 全部 `{all,limit}`；缩短保留期二次确认 |
-| 设置 | SMTP / 高级搜索已有 | 公告 `site_notice` 带 `updated_at`；注册 `0.29`→290000 micro；隐私即时 POST；MCP 写入抽屉 bool |
+| 设置 | SMTP / 高级搜索已有 | 公告 `site_notices`（列表，每条带 `id` 与 `updated_at`）；注册 `0.29`→290000 micro；隐私即时 POST；MCP 写入抽屉 bool |
 | 门户密钥 | smoke 只覆盖删除确认 | 新建 `/auth/keys` 带 `group_code` + `ip_allowlist`；停用 PATCH `status`；删除手输名称 |
 
 未纳入：`screenshots.spec.ts`；第 3 节第 11 条产品决策。通知渠道卡、后端 `GET /v1/models` 与 `GET /admin/pools/{code}` 见本轮续记。

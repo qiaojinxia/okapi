@@ -185,39 +185,11 @@ fn default_limit() -> i64 {
     50
 }
 
-/// GET /api/notice：站点公告（无鉴权，登录页也要显示）。
+/// GET /api/notices：已发布的站点公告（无鉴权，登录页也要显示），新的在前。
 ///
-/// 存 `settings.site_notice`（吸收判据②：能用现有表表达就不新增表），经 60s 进程缓存
-/// 读取——发布后一分钟内全站可见，足够。对外只透出四个白名单字段并做类型收口：
-/// settings 的写入口是泛型 key/value，不能假设值形状；`level` 收敛到三档枚举，
-/// 正文截断到 4000 字——公告是横幅，不是文章。
-pub async fn notice(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let raw = state.setting_cached("site_notice").await;
-    let Some(v) = raw.as_ref() else {
-        return Ok(Json(json!({ "notice": Value::Null })));
-    };
-    let enabled = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-    let body = v
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if !enabled || body.is_empty() {
-        return Ok(Json(json!({ "notice": Value::Null })));
-    }
-    let level = match v.get("level").and_then(Value::as_str) {
-        Some("warning") => "warning",
-        Some("critical") => "critical",
-        _ => "info",
-    };
-    let clipped: String = body.chars().take(4000).collect();
-    Ok(Json(json!({
-        "notice": {
-            "title": v.get("title").and_then(Value::as_str).unwrap_or_default().trim(),
-            "body": clipped,
-            "level": level,
-            // 前端用它做"已读"锚点：重新发布（updated_at 变）会再次弹出
-            "updated_at": v.get("updated_at").and_then(Value::as_str).unwrap_or_default(),
-        }
-    })))
+/// 存 `settings.site_notices`（一个列表，见 [`crate::notices`]），经 60s 进程缓存读取——
+/// 发布后本机立刻可见（写入时按键失效），其余副本一分钟内跟上。只透出已发布的条目和白名单字段。
+pub async fn notices(State(state): State<AppState>) -> Json<Value> {
+    let raw = state.setting_cached(crate::notices::SETTING).await;
+    Json(json!({ "data": crate::notices::published(raw.as_ref().as_ref()) }))
 }

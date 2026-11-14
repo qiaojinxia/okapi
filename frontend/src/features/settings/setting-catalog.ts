@@ -42,7 +42,7 @@ const CATALOG: Record<string, SettingMeta> = {
   smtp: { label: 'admin:smtpTitle', description: 'admin:settingSmtpDesc', group: 'identity', editor: 'auto', section: 'smtp' },
   site_url: { label: 'admin:settingSiteUrl', description: 'admin:settingSiteUrlDesc', group: 'identity', editor: 'auto' },
   registration_policy: { label: 'admin:regTitle', description: 'admin:settingRegistrationDesc', group: 'identity', editor: 'auto', section: 'registration' },
-  site_notice: { label: 'admin:noticeTitle', description: 'admin:settingNoticeDesc', group: 'identity', editor: 'auto', section: 'notice' },
+  site_notices: { label: 'admin:noticeTitle', description: 'admin:settingNoticeDesc', group: 'identity', editor: 'auto', section: 'notice' },
   playground_presets: { label: 'admin:settingPlaygroundPresets', description: 'admin:settingPlaygroundPresetsDesc', group: 'identity', editor: 'auto' },
   model_rpm_limits: { label: 'admin:settingModelLimits', description: 'admin:settingModelLimitsDesc', group: 'traffic', editor: 'limits' },
   margin_breaker: { label: 'admin:marginBreakerTitle', description: 'admin:settingMarginBreakerDesc', group: 'traffic', editor: 'auto' },

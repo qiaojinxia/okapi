@@ -151,7 +151,7 @@ export const qk = {
   playgroundCatalog: (userId: number | undefined) => [...publicPricing, 'playground', userId] as const,
   playgroundParameters: (userId: number | undefined, keyId: number | null, model: string) =>
     ['playground-parameters', userId, keyId, model] as const,
-  notice: ['public-notice'] as const,
+  notices: ['public-notices'] as const,
   /// 站点聊天预设（公开，§11.39）。
   playgroundPresets: ['playground-presets'] as const,
   logs: (params: string) => [...logs, params] as const,

@@ -31,9 +31,9 @@ async function prepare(page: Page, notice = false) {
     }
     const json = url.pathname === '/api/me' ? {
       user_id: 1, key_id: 1, role: 100, group: 'default', permissions: ['*'], balance_micro: 0,
-    } : url.pathname === '/api/notice' ? { notice: notice ? {
-      title: '维护通知', body: '这是列表上方的公告，用于检查剩余可视空间。', level: 'info', updated_at: 'fixture-notice',
-    } : null } : { data: [] }
+    } : url.pathname === '/api/notices' ? { data: notice ? [{
+      id: 'maint', title: '维护通知', body: '有公告时顶栏多一个入口，用于检查列表的可视空间不受影响。', level: 'info', popup: false, updated_at: '2026-10-02T00:00:00Z',
+    }] : [] } : { data: [] }
     return route.fulfill({ json })
   })
   return hits
@@ -77,7 +77,7 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
     await prepare(page, true)
     await page.goto('/admin/codes?limit=20')
     await expect(page.locator('tbody tr')).toHaveCount(20)
-    await expect(page.getByText('维护通知', { exact: true })).toBeVisible()
+    await expect(page.locator('[data-slot="notice-dot"]')).toBeVisible()
     const pager = page.getByRole('navigation', { name: '分页' })
     await expect(pager).toBeInViewport({ ratio: 1 })
     const table = page.getByRole('table')
@@ -92,8 +92,9 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
       scrollY,
     }))).toEqual({ width: true, height: true, scrollY: 0 })
     await page.screenshot({ path: `test-results/redemptions-${viewport.width}.png`, animations: 'disabled' })
-    // 关闭公告释放高度，分页仍在当前视口中。
-    await page.getByRole('main').getByRole('button', { name: '关闭', exact: true }).click()
+    // 公告在顶栏的入口里，不占页面高度：打开再关上，分页仍在当前视口中。
+    await page.getByRole('button', { name: '公告，1 条未读', exact: true }).click()
+    await page.getByRole('dialog', { name: '公告' }).getByRole('button', { name: '关闭', exact: true }).last().click()
     await expect(pager).toBeInViewport({ ratio: 1 })
   })
 }

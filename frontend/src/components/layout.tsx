@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { BrandLockup } from '@/components/brand'
-import { NoticeBanner } from '@/components/notice-banner'
+import { NoticeCenter } from '@/components/notice-center'
 import { PoweredBy } from '@/components/powered-by'
 import { NavLink, SidebarNav } from '@/components/sidebar-nav'
 import type { NavGroup, NavItem } from '@/components/sidebar-nav'
@@ -198,8 +198,6 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
         />
         <main id="main-content" tabIndex={-1} className={cn('flex flex-1 flex-col scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8', fitViewport && 'min-h-0')}>
           <div className={cn('mx-auto flex w-full max-w-[1600px] flex-col gap-4', fitViewport && 'min-h-0 flex-1 [&>*]:shrink-0')}>
-            {/* 站点公告置于所有页面内容之上：换页不丢，关掉即记住 */}
-            <NoticeBanner />
             <div key={pathname} className={cn('animate-fade-up', fitViewport && 'min-h-0 flex-1')}>
               {children}
             </div>
@@ -324,6 +322,9 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
       )}
 
       <span className="mx-1 hidden h-5 w-px bg-border sm:block" aria-hidden />
+
+      {/* 站点公告：有已发布的才出现，没看过的亮红点 */}
+      <NoticeCenter />
 
       {/* 新手引导常驻顶栏：总览卡关掉之后，"Base URL 填什么"这类问题仍要有地方查 */}
       {onHelp && (

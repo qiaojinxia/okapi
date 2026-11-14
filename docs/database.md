@@ -653,7 +653,7 @@ CREATE TABLE audit_logs (                             -- 管理操作审计（�
 
 -- settings.streaming_policy = {idle_timeout_secs: 1..480 (默认 120), heartbeat_secs: 1..60 (默认 15)}；
 -- 上游事件空闲与客户端心跳独立，总请求预算 8min，超时部分产出走现有结算。
-CREATE TABLE settings (                               -- 全局 KV（site_notice / registration_policy / model_rpm_limits / 内容审计三态 ...）
+CREATE TABLE settings (                               -- 全局 KV（site_notices / registration_policy / model_rpm_limits / 内容审计三态 ...）
     key        VARCHAR(128) PRIMARY KEY,
     value      JSONB NOT NULL,
     updated_by BIGINT,

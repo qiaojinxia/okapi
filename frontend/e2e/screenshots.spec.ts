@@ -144,31 +144,30 @@ test('截图：门户与管理端主要页面', async ({ page, request }) => {
   await page.screenshot({ path: `${OUT}/admin-audit.png` })
   await shot(page, '/portal/security', 'portal-security')
 
-  // 站点公告：发布一条提醒级，看登录页与门户顶部的横幅；截完即下架
+  // 站点公告：发布一条带弹窗的提醒，看门户进站时的弹窗与后台的公告列表；截完即下架
   const auth = { authorization: `Bearer ${apiKey}` }
   await request.post('/admin/settings', {
     headers: auth,
     data: {
-      key: 'site_notice',
-      value: {
-        enabled: true,
+      key: 'site_notices',
+      value: [{
+        id: 'shot',
         title: '9 月 5 日 02:00–03:00 维护',
         body: '期间 API 可能出现 1–2 分钟中断。\n价格无变动。',
         level: 'warning',
-        updated_at: `shot-${Date.now()}`,
-      },
+        popup: true,
+        enabled: true,
+        updated_at: new Date().toISOString(),
+      }],
     },
   })
-  await page.evaluate(() => localStorage.removeItem('okapi.notice.dismissed'))
+  await page.evaluate(() => localStorage.removeItem('okapi.notices.read'))
   await shot(page, '/portal', 'portal-notice')
   await page.goto('/admin/settings')
-  await page.getByRole('main').getByRole('tab', { name: /站点公告|Site notice/ }).click()
+  await page.getByRole('main').getByRole('tab', { name: /站点公告|Site notices/ }).click()
   await page.waitForTimeout(800)
   await page.screenshot({ path: `${OUT}/admin-settings-notice.png`, fullPage: true })
-  await request.post('/admin/settings', {
-    headers: auth,
-    data: { key: 'site_notice', value: { enabled: false, title: '', body: '', level: 'info' } },
-  })
+  await request.post('/admin/settings', { headers: auth, data: { key: 'site_notices', value: [] } })
 
   // 清理本轮兑的 key，别让演示超管的 key 列表随截图次数无限增长
   await request.delete(`/api/me/keys/${keyId}`, { headers: auth })
