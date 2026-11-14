@@ -1191,6 +1191,7 @@ export default {
     excludedWindowLimit: '{{window}} 窗口已用 {{used}}%，达到上限 {{limit}}%',
     excludedResetsAt: '，{{time}} 重置',
     excluded_local_tokens: '本地 token 上限已满',
+    excluded_local_cost: '成本上限已满',
     excluded_channel_disabled: '渠道已停用',
     excluded_invalid_policy: '渠道账号控制配置无效',
     excluded_unavailable: '读取渠道配置失败',

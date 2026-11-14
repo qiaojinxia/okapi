@@ -306,7 +306,7 @@ async fn settlement_lands_record_event_snapshot_key_usage_and_outbox_consistentl
 #[tokio::test]
 async fn replaying_a_settled_request_writes_nothing() {
     let bed = bed().await;
-    let tokens_before = okapi_store::channel_usage::token_snapshot(&bed.pg, bed.user_id, "total")
+    let tokens_before = okapi_store::channel_usage::local_usage(&bed.pg, bed.user_id, "total")
         .await
         .unwrap()
         .tokens;
@@ -346,7 +346,7 @@ async fn replaying_a_settled_request_writes_nothing() {
     assert_eq!(bed.wallet_snapshot().await, 10_000 - 240, "快照只扣一次");
     assert_eq!(bed.key_used().await.0, 240, "key 用量只加一次");
     assert_eq!(
-        okapi_store::channel_usage::token_snapshot(&bed.pg, bed.user_id, "total")
+        okapi_store::channel_usage::local_usage(&bed.pg, bed.user_id, "total")
             .await
             .unwrap()
             .tokens,

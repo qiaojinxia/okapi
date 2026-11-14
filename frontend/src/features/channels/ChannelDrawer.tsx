@@ -31,10 +31,13 @@ type CreateStep = 'conn' | 'models' | 'auth'
 
 export function ChannelDrawer({
   channel,
+  focus,
   onClose,
   onDone,
 }: {
   channel: ChannelRow | undefined
+  /** 打开时直接到某一段：`limits` = 调度页里展开的「额度上限」（列表行菜单的入口）。 */
+  focus?: 'limits'
   onClose: () => void
   onDone: () => void
 }) {
@@ -43,7 +46,7 @@ export function ChannelDrawer({
   const isEdit = channel !== undefined
   const f = useChannelForm(channel)
   const { canManagePools, form, account, authorization, accountReady, costMilli, models, setModels, credential, setCredential, oauthInput, rotationKeyId, settings, controlValid, concurrency, concurrencyValid, priority, newPools, egressBinding, oauth, importToken, endpointValid, setUnknownModels } = f
-  const [tab, setTab] = useState<EditTab>('conn')
+  const [tab, setTab] = useState<EditTab>(focus === 'limits' ? 'sched' : 'conn')
   const [step, setStep] = useState<CreateStep>('conn')
   const loginFlow = !isEdit && oauth && !importToken
   const login = useOAuthLogin({
@@ -275,7 +278,7 @@ export function ChannelDrawer({
         <div className="channel-editor">
           {tab === 'conn' && <ConnectionSection f={f} channel={channel} rotate={rotate} onDone={onDone} />}
           {tab === 'models' && <ModelsSection f={f} channel={channel} discover={discover} onDone={onDone} />}
-          {tab === 'sched' && <ScheduleSection f={f} channel={channel} onDone={onDone} />}
+          {tab === 'sched' && <ScheduleSection f={f} channel={channel} limitsOpen={focus === 'limits'} onDone={onDone} />}
           {tab === 'behavior' && <BehaviorSection f={f} channel={channel} />}
         </div>
       ) : (

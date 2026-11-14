@@ -3861,6 +3861,53 @@ Anthropic API-key 渠道转发 beta。README「明确不做」的（长尾供应
 网关 `account_control` 27 条单测（含额度预判）；前端 `channel-controls.spec.ts` 一条（列表行与抽屉里都出现 `Fable · 7天额度用量`、值 37，账号两个窗口各自的值不变，抽屉里只有账号 7 天窗口一条 80% 上限竖线），
 渠道 / 额度 / OAuth / 模型配置相关 e2e 一并回归；变异检查：不画 Fable 行 / 上限竖线套到 Fable 上 / 行内标签不是模型名 / 抽屉标签不是模型名 / 读屏名缺窗口，五处都被那条用例咬住。
 
+### 11.77 渠道额度上限：任何渠道都能按成本 / Token 封顶（2026-11-13）
+
+用户：「渠道没有限制额度功能」。查下来确实如此：订阅渠道能按上游窗口设百分比上限（`quota_limits`），折在「调度 → 订阅额度与授权」里；
+API key 渠道在界面上什么上限都设不了。早先那套「请求数 / Token / 成本」的本地限额在 10 月初整套停用了（`usage`，只读入、不生效），
+接替它的 `local_tokens` 后端对任何渠道都生效，界面却只在订阅渠道露出；金额这一项干脆没有了。key 级的 `daily_spend_cap_micro` 网关一直在判，但没有接口也没有界面能设。
+
+- **策略**：`account_control` 多一项 `local_cost: { cap_micro, period }`，和 `local_tokens: { cap, period }` 并列，任何渠道都能设；周期共用一个
+  `LocalPeriod`：`total`（缺省，累计总量、不重置）/ `day` / `week` / `month`（机器时区的自然周期，周一起；Token 上限从此也能按月）。
+  `cap_micro` 取 1 到 2^53−1，0、小数、未知周期都拒绝。
+- **数什么**：成本数的是这条渠道已落账的**上游成本**（`billing_records.upstream_cost_micro` = 模型标价 × 渠道相对成本系数，媒体端点同样有），
+  不是向用户收的钱——站长要管的是「这条渠道花了我多少」；成本未知（NULL，例如带未定价的服务端工具）的请求按 0 计，不因此把渠道挡掉
+  （停用的那套是「窗口里有一条成本未知就整条渠道不放行」，这是它难用的原因之一）。
+- **存储**：`channel_token_totals` 加一列 `cost_micro`，仍由 `billing_records` 的插入触发器在同一事务里累加（成功 2 与流式中断 5；NULL 与负数加 0），
+  所以累计值不受账单保留期影响；按周期的读数现算：留存账单 + 归档回执（回执带着 `upstream_cost_micro`），在保留锁下读。
+  迁移 `0006_channel_cost_totals.sql`：加列、换触发器函数、把现有账单与回执的成本回填进去（线上有真实数据，不回填的话「累计」会从部署那一刻算起，
+  和同一行里含历史的 Token 累计对不上）。`okapi_store::channel_usage::local_usage(pool, channel, period)` 一次读回 Token 与成本（原 `token_snapshot`）。
+- **判定**：`account_control::local_block`——先成本后 Token，周期相同只读一次，没设上限的渠道不产生查询；选路前的筛选（`retain_available`）与每次尝试前的
+  `admit_with` 都判。到上限 → 候选被排除，诊断里的原因是 `local_cost` / `local_tokens`，按周期的上限带 `resets_at`（周期结束时刻）；
+  候选因此全空时这个时刻进 `Retry-After`（和上游额度的窗口重置走同一条路）。读不到用量按挡下处理（`local_usage_unavailable`），不当成没到上限。
+  只拦新请求：在途请求结算后才计入，所以可能略超——和 `local_tokens` 一贯的口径相同。**没加缓存**：每次判定读一次库（累计是主键查一行，
+  周期是按 `(channel_id, created_at)` 索引的聚合），量大的站点按月聚合会偏重，到时再给读数加短缓存；现有集成测试依赖「落账后下一次判定立刻看到」。
+- **管理接口**：`GET /admin/channels/{id}/usage` 多返回 `cost_usage { cost_micro, window_start, window_end }`，`token_usage` 形状不变；两项各按自己的周期给
+  （查询参数 `cost_period` / `token_period`，缺省是已配置上限的周期，没配就是累计总量）。保存仍走渠道的 `settings.account_control`，`Policy::parse` 校验。
+- **界面**：抽屉「调度」页里把额度相关的并成一段**「额度上限」**（所有渠道都有）：订阅渠道先是「上游订阅额度」（各窗口百分比上限 + 观测到的用量条，原样搬来），
+  再是「本站记录的用量」（成本上限 / 周期、Token 上限 / 周期，已有渠道在输入框下显示本周期已记录多少）；API key 渠道只有后者。
+  折叠时摘要写明设了什么（`5小时额度 ≤ 80% · 成本 ≤ $50（每月）`），没设是「未设上限」。授权续期单独成段（原先嵌在「订阅额度与授权」里）。
+  列表行「···」菜单多一项「额度上限」，直接打开抽屉到这一段并展开。金额按精确小数解析（最多 6 位），不四舍五入。
+- **列表**：「额度 / 余额」列——订阅渠道的用量条上，配了百分比上限的窗口画一道刻度（此前只在抽屉里画）；设了成本 / Token 上限的渠道多一组「已用 / 上限」仪表
+  （`成本 · 每月 63%`、`$31.87 / $50.00`），到了上限变红并写「已满，X 后恢复」。只有订阅渠道和设了上限的渠道才查用量，上限从列表行自带的设置读，保存后立刻跟着变。
+- **日志**：请求诊断「跳过的候选」认 `local_cost`（「成本上限已满」），按周期的本地上限后面带重置时间。
+- **回滚**：`account_control` 是 `deny_unknown_fields`，旧版二进制遇到带 `local_cost`（或 `local_tokens.period = month`）的渠道会判成策略无效、整条渠道不可用——
+  回滚前先把这些键从渠道设置里去掉；迁移 0006 回滚要删列并换回旧触发器函数、去掉 `_sqlx_migrations` 里的第 6 行（旧版迁移器不认识它）。
+- **没做**：key 级的 `rpm_limit` / `daily_spend_cap_micro` 仍然没有界面（它们按向用户收的金额、UTC 日计，口径和这里不同，没有混在一起）；
+  「累计」没有「从某天起重新计」的按钮，上游充值后调高上限即可；`docs/provider-architecture.md` 里「本地 Token 上限只在订阅渠道显示」那句没改（该文件有未提交的本地改动）。
+
+**验收**：策略单测（`local_caps_default_to_none_and_keep_their_own_periods`、坏值拒绝）；集成 `channel_controls` 22 条，新增五条——
+`local_cost_limit_gates_an_api_key_channel_on_recorded_upstream_cost`（只数已知上游成本，差一微美元不挡，别的渠道不受影响）、
+`periodic_local_caps_count_only_the_current_window_and_survive_archiving`（日 / 周 / 月：400 天前的账单不占本周期、归档成回执后读数不变、两项都到报成本）、
+`a_settled_request_trips_the_daily_cost_cap_and_the_client_is_told_when_it_resets`（真实链路：结算落成本 → 下一条 503 + `Retry-After` + 诊断带 `resets_at` → 调高上限即恢复）、
+`a_capped_channel_is_not_used_while_its_usage_cannot_be_read`、触发器用例加成本；管理接口用例加校验与 `cost_usage` / 周期参数。
+相关套件一并回归（网关单测、`egress_proxies`、`pg_settlement`、`quota_forecast`、`schema_shape`、`migrations`、`gateway_oauth_channels`、`gateway_images_contract`、`gateway_token_count`、`gateway_messages` 等 12 组全过）；
+`cargo +1.99.0 clippy --workspace --all-targets -D warnings` 干净。迁移的升级路径单独验过：停在 0005、已有账单与回执的库灌 0006，回填值与触发器口径一致、Token 累计不变、新账单两项都累加。
+前端 `channel-controls.spec.ts` 34 条（新增五条：任何渠道设成本 / Token 上限、列表「已用 / 上限」与清空即移除、到上限的提示、行菜单直达、百分比刻度只画在对应窗口）、`channel-list.spec.ts` 菜单项；
+全量 e2e 793 过，另 5 条是沙盒里固定失败的老用例（按预览端口推地址的三条、读仓库相对路径的一条、窄屏表格那条）。
+变异检查：后端 15 处（判定取等、拿 Token 当成本、不判成本、两项混用周期、不带重置时刻、重置时刻不进 `Retry-After`、读不到却放行、周期读数漏回执 / 不限窗口、累计成本读成 0、触发器多算失败记录 / 不挡负数、0 上限放行、接口两处周期取错）、
+前端 17 处，全部被用例咬住（前端有两处起初漏网：列表行的刻度画到 Fable 窗口上、授权续期折起后错误消失，已各补一条断言）。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

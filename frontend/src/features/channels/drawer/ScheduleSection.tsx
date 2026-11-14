@@ -7,10 +7,12 @@ import { ChannelControlEditor } from '@/features/channels/ChannelControlEditor'
 import type { ChannelForm } from './use-channel-form'
 import { KeySchedule } from './key-panels'
 
-/// 「调度」：优先级、相对成本、每把 key 的并发与权重、账号级控制。
-export function ScheduleSection({ f, channel, onDone }: {
+/// 「调度」：优先级、相对成本、每把 key 的并发与权重、账号级控制（额度上限、暂停、授权续期）。
+export function ScheduleSection({ f, channel, limitsOpen, onDone }: {
   f: ChannelForm
   channel: ChannelRow | undefined
+  /** 「额度上限」一开始就展开（从列表行菜单直接进来时）。 */
+  limitsOpen?: boolean
   onDone: () => void
 }) {
   const { t } = useTranslation()
@@ -59,7 +61,7 @@ export function ScheduleSection({ f, channel, onDone }: {
       {isEdit && <KeySchedule channel={channel} onDone={onDone} />}
       <ChannelControlEditor value={settings.account_control}
         onChange={(account_control) => setSettings((s) => ({ ...s, account_control }))}
-        onValidChange={setControlValid} provider={form.provider} channelId={channel?.id}
+        onValidChange={setControlValid} provider={form.provider} channelId={channel?.id} limitsOpen={limitsOpen}
         concurrencyValid={concurrencyValid}
         summaryPrefix={!isEdit && newConcurrency ? t('admin:channelConcurrencySummary', { count: newConcurrency }) : undefined}
         refreshable={isEdit ? channel.keys.some((key) => key.credential_kind === 1 && key.oauth_refreshable !== false) : !importToken}>

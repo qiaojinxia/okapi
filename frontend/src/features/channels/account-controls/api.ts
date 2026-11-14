@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
-import type { ChannelSettings } from '../types'
+import type { ChannelSettings, LocalPeriod } from '../types'
 
 export interface AuthorizationControls {
   code_format: 'code_state' | 'callback_url'
@@ -15,10 +15,11 @@ export interface AccountCapabilities {
   authorization?: AuthorizationControls | null
   subscription: { quota_scope: 'session' | 'total'; window_secs: number | null; quota_windows?: number[] } | null
 }
-export type TokenPeriod = 'total' | 'day' | 'week'
 export interface UsageResponse {
   timezone: string
   token_usage?: { tokens: number; window_start: string | null; window_end: string | null }
+  /// 本站记录的上游成本（微美元）；旧服务端没有这个字段
+  cost_usage?: { cost_micro: number; window_start: string | null; window_end: string | null }
   quotas: Array<{ key_id: number; quota: {
     observed_at: number; allowed?: boolean | null; threshold_window?: string | null
     windows: Array<{ name: string; used_percent: number; resets_at: number | null; window_secs: number | null }>
@@ -36,11 +37,12 @@ export function useAccountCapabilities(provider: string) {
   return { ...query, descriptor, capabilities: descriptor?.account }
 }
 
-export function useAccountUsage(channelId: number | undefined, period: TokenPeriod, enabled: boolean) {
+/// 用量各按自己的周期查：列表行和抽屉用同样的周期时共用一份缓存。
+export function useAccountUsage(channelId: number | undefined, periods: { tokens: LocalPeriod; cost: LocalPeriod }, enabled: boolean) {
   return useQuery({
-    queryKey: qk.channelControlUsage(channelId, period),
+    queryKey: qk.channelControlUsage(channelId, periods.tokens, periods.cost),
     enabled: channelId !== undefined && enabled,
-    queryFn: () => apiFetch<UsageResponse>(`/admin/channels/${channelId}/usage?token_period=${period}`),
+    queryFn: () => apiFetch<UsageResponse>(`/admin/channels/${channelId}/usage?token_period=${periods.tokens}&cost_period=${periods.cost}`),
     refetchInterval: 30_000,
   })
 }

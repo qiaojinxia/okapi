@@ -409,15 +409,20 @@ pub async fn channel_providers(
 
 #[derive(Deserialize)]
 pub struct ChannelUsageQuery {
-    token_period: Option<okapi_gateway::account_control::policy::TokenPeriod>,
+    token_period: Option<okapi_gateway::account_control::policy::LocalPeriod>,
+    cost_period: Option<okapi_gateway::account_control::policy::LocalPeriod>,
 }
 
+/// GET /admin/channels/{id}/usage：这条渠道的账号控制策略、订阅额度观测，以及本地已记录的用量。
+/// `token_usage` / `cost_usage` 各按自己的周期给：查询参数指定的，否则是已配置上限的周期，都没有就是累计总量
+/// （抽屉里换周期时预览用）。只读本站账单，从不向上游发推理请求。
 pub async fn channel_usage(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(channel): Path<i64>,
     Query(query): Query<ChannelUsageQuery>,
 ) -> Result<Json<Value>, AppError> {
+    use okapi_gateway::account_control::policy::LocalPeriod;
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
     ensure_channel_owner(&state, channel, &actor, scope).await?;
     let settings: Value =
@@ -429,20 +434,21 @@ pub async fn channel_usage(
             .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
     let policy = okapi_gateway::account_control::policy::Policy::parse(&settings)
         .map_err(|param| AppError::bad_request().with_param(param))?;
-    let token_usage = okapi_store::channel_usage::token_snapshot(
-        &state.pg,
-        channel,
-        query.token_period.map_or_else(
-            || {
-                policy
-                    .local_tokens
-                    .as_ref()
-                    .map_or("total", |limit| limit.period.name())
-            },
-            |period| period.name(),
-        ),
-    )
-    .await?;
+    let token_period = query
+        .token_period
+        .or_else(|| policy.local_tokens.as_ref().map(|limit| limit.period))
+        .unwrap_or(LocalPeriod::Total);
+    let cost_period = query
+        .cost_period
+        .or_else(|| policy.local_cost.as_ref().map(|limit| limit.period))
+        .unwrap_or(LocalPeriod::Total);
+    let token_usage =
+        okapi_store::channel_usage::local_usage(&state.pg, channel, token_period.name()).await?;
+    let cost_usage = if cost_period == token_period {
+        token_usage.clone()
+    } else {
+        okapi_store::channel_usage::local_usage(&state.pg, channel, cost_period.name()).await?
+    };
     let keys: Vec<i64> =
         sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id=$1 ORDER BY id")
             .bind(channel)
@@ -453,9 +459,15 @@ pub async fn channel_usage(
     for key in keys {
         quotas.push(json!({"key_id":key,"quota":okapi_gateway::account_control::quota::read(&state,key).await}));
     }
-    Ok(Json(
-        json!({"policy":policy,"quotas":quotas,"token_usage":token_usage,"timezone":okapi_store::timezone::machine_timezone()?}),
-    ))
+    Ok(Json(json!({
+        "policy": policy,
+        "quotas": quotas,
+        "token_usage": {"tokens": token_usage.tokens, "window_start": token_usage.window_start,
+            "window_end": token_usage.window_end},
+        "cost_usage": {"cost_micro": cost_usage.cost_micro, "window_start": cost_usage.window_start,
+            "window_end": cost_usage.window_end},
+        "timezone": okapi_store::timezone::machine_timezone()?,
+    })))
 }
 
 #[derive(Deserialize)]

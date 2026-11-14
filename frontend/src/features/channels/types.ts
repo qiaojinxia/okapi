@@ -168,6 +168,9 @@ export interface CodexClientGate {
   max_version?: string
 }
 
+/** `total` never resets; the others are calendar periods in the server's timezone. */
+export type LocalPeriod = 'total' | 'day' | 'week' | 'month'
+
 export interface AccountControl {
   /** Historical local caps are read for the retirement notice and removed on save. */
   usage?: { period?: 'hour' | 'day' | 'week' | 'month'; requests?: number | null; tokens?: number | null; cost_micro?: number | null }
@@ -179,7 +182,10 @@ export interface AccountControl {
   quota_keep_limits?: Record<string, number>
   /** Request-level quota forecast: `shadow` (default) only records diagnostics, `enforce` excludes accounts a cold start would push over the line. */
   quota_forecast?: 'off' | 'shadow' | 'enforce'
-  local_tokens?: { cap: number; period?: 'total' | 'day' | 'week' } | null
+  /** Cap on the input plus output tokens this channel has on record. Any channel can set it. */
+  local_tokens?: { cap: number; period?: LocalPeriod } | null
+  /** Cap on the upstream cost this channel has on record, in micro-USD. Any channel can set it. */
+  local_cost?: { cap_micro: number; period?: LocalPeriod } | null
   rate_limit_cooldown_secs: number
   failure_threshold: number
   failure_cooldown_secs: number

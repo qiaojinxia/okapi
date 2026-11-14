@@ -1197,6 +1197,7 @@ export default {
     excludedWindowLimit: '{{window}} window at {{used}}% used, limit {{limit}}%',
     excludedResetsAt: ', resets {{time}}',
     excluded_local_tokens: 'Local token cap reached',
+    excluded_local_cost: 'Cost cap reached',
     excluded_channel_disabled: 'Channel disabled',
     excluded_invalid_policy: 'Invalid account-control settings on the channel',
     excluded_unavailable: 'Could not read channel settings',

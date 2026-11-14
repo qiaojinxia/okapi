@@ -15,6 +15,7 @@ The optional `settings.account_control` object contains:
 ```json
 {
   "quota_limits": { "18000": 85, "604800": 90 },
+  "local_cost": { "cap_micro": 50000000, "period": "month" },
   "local_tokens": { "cap": 10000000, "period": "total" },
   "rate_limit_cooldown_secs": 60,
   "failure_threshold": 3,
@@ -31,12 +32,49 @@ two hours. This threshold is a channel health policy, not the number of retries
 allowed for one HTTP request. Credential-invalid states and safe failover remain
 authoritative. One account's pause never disables other channels.
 
+## Usage caps (every channel)
+
+Any channel, API key or subscription, can carry two optional caps on what this site has
+recorded for it. Each has its own period:
+
+- `local_cost`: `cap_micro` is in micro-USD and is compared with the channel's recorded
+  upstream cost, the list price of each settled request times the channel's relative
+  procurement cost (`billing_records.upstream_cost_micro`). What customers were charged is
+  not part of it, and a request whose cost is unknown (an unpriced server tool, for
+  example) adds nothing.
+- `local_tokens`: `cap` is compared with recorded input plus output tokens, with cache and
+  reasoning counted as the subsets they are, never twice.
+
+`period` is `total` (the default: the lifetime total, which never resets), `day`, `week`
+(weeks start on Monday) or `month`, calendar periods in the machine's timezone. A channel
+at either cap takes no new requests; other channels carry on and normal fallback applies.
+It comes back when the period ends, or as soon as the cap is raised or removed. Requests
+already running when the cap is reached are settled afterwards and can run slightly over.
+Usage outside this site, such as a native client on the same account, is not counted.
+
+When the cap is periodic, the request diagnostics record `local_cost` or `local_tokens`
+together with `resets_at`, the end of the period; if no other channel can serve the
+request, the 503 carries that moment as `Retry-After`. When both caps are reached the
+reason is `local_cost`. Usage that cannot be read fails closed with
+`local_usage_unavailable`: a capped channel is not used while its usage is unknown.
+
+A billing insert trigger keeps the lifetime totals (`channel_token_totals.tokens` and
+`cost_micro`) in the same transaction; idempotent settlement replay never inserts another
+bill. Retention and refunds do not undo upstream usage already spent. Daily, weekly and
+monthly reads combine retained bills and archived receipts under the retention lock.
+Billing data is not an upstream subscription entitlement.
+
+The drawer keeps these under **额度上限 / Usage caps** on the scheduling tab, for every
+provider, together with the subscription percentages described below. The channel list
+shows used against cap for a capped channel and marks a configured percentage on the
+window it governs; the row menu opens the section directly.
+
 ## Subscription-only controls
 
-Only plugins declaring subscription capabilities expose subscription quota and
+Only plugins declaring subscription capabilities expose the upstream percentage caps and
 renewal options. The current registrations are Claude Code (`anthropic_max`) and
-Codex (`codex`). API-key channels display the general controls without subscription
-fields. Defaults remain folded, and configured values appear in the section summary.
+Codex (`codex`). API-key channels display the usage caps and the general controls without
+subscription fields. Defaults remain folded, and configured values appear in the section summary.
 
 The per-channel **Automatic renewal** switch saves `refresh_mode: "managed"`
 when enabled and `"external"` when disabled. Disabling blocks background,
@@ -44,7 +82,7 @@ request-time and manual refresh; upstream quota queries remain independent.
 Access-token-only credentials show a manual-update notice instead of the switch.
 The default renewal margin stays in a folded advanced section. Subscription
 summaries show the effective renewal state, including token-only credentials.
-Usage observations are fetched only while the subscription section is expanded;
+Usage observations are fetched only while the usage caps section is expanded;
 query failures offer a retry without resetting any form draft.
 
 Each upstream allowance has its own optional percentage cap. `quota_limits`
@@ -71,18 +109,10 @@ times are displayed from the account response. Any fresh reported window at full
 exhaustion, or a fresh upstream `allowed=false`, blocks admission even if the custom
 percentage threshold is disabled. Missing/expired data remains unknown, never 0%.
 
-The quota APIs do not provide authoritative USD/token allowances. Dollar limits
-remain hidden. The optional **local token limit** explicitly uses this channel's
-recorded input plus output tokens, including cache/reasoning as subsets without
-counting them twice. It does not include native-client usage outside this channel.
-The default `total` period includes recorded history and never automatically resets;
-`day` and `week` use machine-timezone calendar boundaries (weeks start Monday).
-New requests stop at the cap; requests already running can exceed it.
-
-A billing insert trigger updates the lifetime totals in the same transaction; idempotent
-settlement replay never inserts another bill. Retention and refunds do not undo
-upstream tokens already used. Daily/weekly reads combine retained bills and receipts
-under the retention lock. Billing data is not an upstream subscription entitlement.
+The quota APIs do not provide authoritative USD/token allowances, so no dollar figure is
+ever presented as what the supplier allows. A dollar or token cap on a subscription channel
+is the local cap described under [Usage caps](#usage-caps-every-channel): this site's own
+record of the channel, at API-equivalent prices.
 
 ## Shared creation flow
 
@@ -133,6 +163,8 @@ diagnostics, in [quota-forecast.md](quota-forecast.md):
   line is ignored, and a keep line without a placement line has no effect.
 
 Older binaries reject these keys (unknown fields), so remove them before rolling back.
+The same holds for `local_cost` and for `"period": "month"` on `local_tokens`: a binary from
+before them treats the channel's policy as invalid and stops using the channel.
 
 ## Renewal ownership
 
@@ -163,9 +195,10 @@ observation queries, common settings, token limits, quota observations and renew
 settings into separate modules; adding an account hook needs no provider-name
 branches in these components.
 `GET /admin/channels/{id}/usage` returns policy, sanitized quota observations,
-`token_usage` and server timezone, requiring channel read permission plus scoped
-ownership. Optional `token_period=total|day|week` previews the selected local period.
-It never initiates supplier inference.
+`token_usage`, `cost_usage` and server timezone, requiring channel read permission plus
+scoped ownership. Each usage is given for its own period: the configured cap's, or `total`
+without one; optional `token_period` and `cost_period` (`total|day|week|month`) preview
+another period. It never initiates supplier inference.
 
 ## Historical local budgets
 
@@ -173,9 +206,11 @@ Historical combined request/token/cost admission has been retired. The old `usag
 configuration is deserialized for compatibility but never governs admission or appears
 in the active policy response. The drawer explains retirement and removes `usage` on
 save, preserving other plugin settings. Billing data and historical counter rows are
-not deleted; inference no longer writes those local request counters. The new
-`local_tokens` setting opts into token-only limits explicitly; old inactive `usage`
-settings cannot silently reactivate limits.
+not deleted; inference no longer writes those local request counters. `local_cost` and
+`local_tokens` are separate, explicit settings; old inactive `usage` settings cannot
+silently reactivate limits. Unlike the retired cost cap, `local_cost` does not block a
+channel because one of its requests has an unknown cost, takes no per-attempt lock and
+writes no counter of its own.
 
 ## Verification
 

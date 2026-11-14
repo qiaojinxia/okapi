@@ -10,8 +10,8 @@ use super::{
 };
 use okapi_kernel::sched_redis::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
 use okapi_providers::UpstreamError;
-use okapi_store::ChannelCandidate;
-use policy::{ForecastMode, Policy};
+use okapi_store::{ChannelCandidate, channel_usage::LocalUsage};
+use policy::{ForecastMode, LocalPeriod, Policy};
 use std::{future::Future, sync::Arc};
 
 pub async fn policy(state: &AppState, channel: i64) -> Result<Arc<Policy>, UpstreamError> {
@@ -161,18 +161,58 @@ const fn headroom_tier(headroom: Option<u8>) -> u8 {
     }
 }
 
-async fn token_blocked(
+/// 候选被渠道自己的本地上限挡下：是哪一项，以及它的周期何时结束（累计上限没有结束时刻）。
+#[derive(Clone, Debug)]
+struct LocalBlock {
+    reason: &'static str,
+    resets_at: Option<i64>,
+}
+
+impl LocalBlock {
+    fn new(reason: &'static str, usage: &LocalUsage) -> Self {
+        Self {
+            reason,
+            resets_at: usage.window_end.map(|at| at.timestamp()),
+        }
+    }
+}
+
+async fn local_usage(
+    state: &AppState,
+    channel: i64,
+    period: LocalPeriod,
+) -> Result<LocalUsage, UpstreamError> {
+    okapi_store::channel_usage::local_usage(&state.pg, channel, period.name())
+        .await
+        .map_err(|_| blocked("local_usage_unavailable"))
+}
+
+/// 渠道的本地上限（`local_cost` / `local_tokens`）到了没有：读这条渠道已落账的用量，周期内到了上限就不再接新请求。
+/// 只拦新请求——在途请求结算后才计入，所以可能略超。两项上限各有周期，周期相同只读一次；
+/// 没设上限的渠道不产生查询。两项都到了时报成本。
+async fn local_block(
     state: &AppState,
     channel: i64,
     policy: &Policy,
-) -> Result<bool, UpstreamError> {
-    let Some(limit) = &policy.local_tokens else {
-        return Ok(false);
-    };
-    let usage = okapi_store::channel_usage::token_snapshot(&state.pg, channel, limit.period.name())
-        .await
-        .map_err(|_| blocked("token_usage_unavailable"))?;
-    Ok(usage.tokens >= limit.cap)
+) -> Result<Option<LocalBlock>, UpstreamError> {
+    let mut cost_usage = None;
+    if let Some(limit) = &policy.local_cost {
+        let usage = local_usage(state, channel, limit.period).await?;
+        if usage.cost_micro >= limit.cap_micro {
+            return Ok(Some(LocalBlock::new("local_cost", &usage)));
+        }
+        cost_usage = Some((limit.period, usage));
+    }
+    if let Some(limit) = &policy.local_tokens {
+        let usage = match cost_usage {
+            Some((period, usage)) if period == limit.period => usage,
+            _ => local_usage(state, channel, limit.period).await?,
+        };
+        if usage.tokens >= limit.cap {
+            return Ok(Some(LocalBlock::new("local_tokens", &usage)));
+        }
+    }
+    Ok(None)
 }
 
 /// Pre-filter before sticky promotion; blocked account affinity never overrides admission.
@@ -222,7 +262,8 @@ pub async fn retain_available(
     let mut available = std::collections::HashSet::with_capacity(candidates.len());
     let mut headroom = std::collections::HashMap::new();
     let mut resets = std::collections::HashMap::new();
-    let mut token_limits = std::collections::HashMap::new();
+    let mut local_blocks: std::collections::HashMap<i64, Result<Option<LocalBlock>, String>> =
+        std::collections::HashMap::new();
     for candidate in candidates.iter() {
         let policy = match policies.entry(candidate.channel_id) {
             std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
@@ -240,17 +281,36 @@ pub async fn retain_available(
                 continue;
             }
         };
-        let is_token_blocked = match token_limits.entry(candidate.channel_id) {
-            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-            std::collections::hash_map::Entry::Vacant(entry) => *entry.insert(
-                token_blocked(state, candidate.channel_id, &policy)
-                    .await
-                    .unwrap_or(true),
-            ),
+        // 读不到用量按挡下处理：设了上限的渠道，不知道用了多少就不放行
+        let local = match local_blocks.entry(candidate.channel_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry
+                .insert(
+                    local_block(state, candidate.channel_id, &policy)
+                        .await
+                        .map_err(|error| reason(&error)),
+                )
+                .clone(),
         };
-        if is_token_blocked {
-            exclude(candidate, "local_tokens", None);
-            continue;
+        match local {
+            Ok(None) => {}
+            Ok(Some(block)) => {
+                if let Some(at) = block.resets_at {
+                    earliest_reset = Some(earliest_reset.map_or(at, |seen| seen.min(at)));
+                }
+                exclude(
+                    candidate,
+                    block.reason,
+                    block
+                        .resets_at
+                        .map(|at| serde_json::json!({ "resets_at": at })),
+                );
+                continue;
+            }
+            Err(reason) => {
+                exclude(candidate, &reason, None);
+                continue;
+            }
         }
         // 缓存还热的会话可以用到保留线；其余按放置线（没配保留线时两者相同）
         let warm = shape.is_some_and(|s| s.warm_key == Some(candidate.channel_key_id));
@@ -407,8 +467,8 @@ pub async fn admit_with(
     warm: bool,
 ) -> Result<(), UpstreamError> {
     let policy = policy(state, channel).await?;
-    if token_blocked(state, channel, &policy).await? {
-        return Err(blocked("local_tokens"));
+    if let Some(block) = local_block(state, channel, &policy).await? {
+        return Err(blocked(block.reason));
     }
     if let Some(key) = key
         && let Some(quota) = quota::read(state, key).await

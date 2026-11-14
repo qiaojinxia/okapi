@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { RotateCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
@@ -16,23 +17,47 @@ export function quotaTone(percent: number) {
   return { bar: 'bg-success', text: 'text-foreground' }
 }
 
-/// 订阅额度各窗口的用量条。`limits` 是渠道配置的百分比上限（窗口秒数 → 百分比），
-/// 画成一条竖线，站长能一眼看出离自动停用还有多远。`compact` 用于列表行。
-export function QuotaMeters({ quota, limits, compact = false }: {
-  quota: Quota
-  limits?: Record<string, number | null | undefined>
-  compact?: boolean
+/// 列表行里的一个小仪表，三层：「名字 + 百分比 / 细条 / 一行说明」。
+/// 15 + 3 + 6 + 3 + 15 = 42px：正好是两行文字（20 + 2 + 20）的高度，有仪表的行不比别的行高。
+/// `percent` 为 null 表示读数已过期（不画条，百分比处是破折号）；`marker` 在条上画一道上限刻度。
+export function CompactMeter({ slot, label, title, meterLabel, percent, marker, markerTitle, footer, footerTitle }: {
+  slot: string
+  label: string
+  title: string
+  meterLabel: string
+  percent: number | null
+  marker?: number
+  markerTitle?: string
+  footer: ReactNode
+  footerTitle?: string
 }) {
+  const tone = quotaTone(percent ?? 0)
+  return (
+    <div data-slot={slot} className="flex min-w-0 flex-col gap-[3px]">
+      <div className="flex h-[15px] items-end justify-between gap-1.5 leading-[15px]">
+        <span className="truncate text-[11px] text-muted-foreground" title={title}>{label}</span>
+        <span className={cn('shrink-0 text-xs font-semibold tabular-nums', percent === null ? 'text-muted-foreground' : tone.text)}>
+          {percent === null ? '—' : `${percent}%`}
+        </span>
+      </div>
+      <div className="relative h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={meterLabel}
+        aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}>
+        {percent !== null && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
+        {typeof marker === 'number' && marker > 0 && marker < 100 && (
+          <div data-slot="quota-limit-marker" className="absolute inset-y-0 w-0.5 bg-foreground/60" style={{ left: `${marker}%` }} title={markerTitle} />
+        )}
+      </div>
+      <span data-slot="quota-reset" className="flex h-[15px] min-w-0 items-center gap-1 text-[11px] leading-[15px] text-muted-foreground/80 tabular-nums" title={footerTitle}>
+        {footer}
+      </span>
+    </div>
+  )
+}
+
+/// 「3小时50分」这样的剩余时长，和它的完整说明（带具体时刻，跨天带日期）；列表行里的重置 / 恢复时间都用它。
+export function useResetSpan() {
   const { t, i18n } = useTranslation()
-  const { windowLabel, shortWindowLabel } = useQuotaLabels()
-  const now = Date.now()
-  // 账号窗口之后再画按模型分的周窗口：同样的条。它们只展示——渠道配置的百分比上限（`limits`）管的是账号窗口，不适用于某个模型的周限额
-  const rows: Row[] = [
-    ...quota.windows,
-    ...(quota.scoped ?? []).map((window): Row => ({ ...window, name: `scoped:${window.model}`, scope: window.model })),
-  ]
-  // 列表行的重置说明：「3小时50分后重置 · 06:59」，跨天带日期
-  const resetCompact = (at: number) => {
+  return (at: number, now = Date.now()) => {
     const minutes = Math.max(0, Math.round((at * 1000 - now) / 60_000))
     const d = Math.floor(minutes / 1440), h = Math.floor((minutes % 1440) / 60), m = minutes % 60
     const span = d > 0 ? t('admin:channelQuotaSpanDH', { d, h }) : h > 0 ? t('admin:channelQuotaSpanHM', { h, m }) : t('admin:channelQuotaSpanM', { m })
@@ -43,6 +68,24 @@ export function QuotaMeters({ quota, limits, compact = false }: {
       : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
     return { span, full: t('admin:channelQuotaResetCompact', { span, at: clock }) }
   }
+}
+
+/// 订阅额度各窗口的用量条。`limits` 是渠道配置的百分比上限（窗口秒数 → 百分比），
+/// 画成一条竖线，站长能一眼看出离自动停用还有多远。`compact` 用于列表行。
+export function QuotaMeters({ quota, limits, compact = false }: {
+  quota: Quota
+  limits?: Record<string, number | null | undefined>
+  compact?: boolean
+}) {
+  const { t, i18n } = useTranslation()
+  const { windowLabel, shortWindowLabel } = useQuotaLabels()
+  const resetSpan = useResetSpan()
+  const now = Date.now()
+  // 账号窗口之后再画按模型分的周窗口：同样的条。它们只展示——渠道配置的百分比上限（`limits`）管的是账号窗口，不适用于某个模型的周限额
+  const rows: Row[] = [
+    ...quota.windows,
+    ...(quota.scoped ?? []).map((window): Row => ({ ...window, name: `scoped:${window.model}`, scope: window.model })),
+  ]
   const resetIn = (at: number) => {
     const minutes = Math.max(0, Math.round((at * 1000 - now) / 60_000))
     const format = new Intl.RelativeTimeFormat(i18n.language, { numeric: 'auto', style: 'narrow' })
@@ -61,34 +104,22 @@ export function QuotaMeters({ quota, limits, compact = false }: {
           {rows.map((window) => {
             const stale = window.resets_at !== null && window.resets_at * 1000 <= now
             const percent = Math.min(100, Math.max(0, window.used_percent))
-            const tone = quotaTone(percent)
             // 仪表上的窗口名用短写（5h / 7d），和状态列的「近 24h」同一种写法；全称在悬停提示与读屏名里
             const fullLabel = windowLabel(window.window_secs)
-            const label = window.scope ?? shortWindowLabel(window.window_secs)
             const meterName = window.scope ? `${window.scope} · ${fullLabel}` : fullLabel
-            const reset = !stale && window.resets_at !== null ? resetCompact(window.resets_at) : null
+            const reset = !stale && window.resets_at !== null ? resetSpan(window.resets_at, now) : null
+            // 渠道配的百分比上限管的是账号窗口，按模型分的周限额不带。仪表最下一行只放剩余时长，具体重置时刻进悬停提示
+            const limit = window.window_secs !== null && !window.scope ? limits?.[String(window.window_secs)] : undefined
             return (
-              // 15 + 3 + 6 + 3 + 15 = 42px：正好是两行文字（20 + 2 + 20）的高度，有额度条的行不比别的行高
-              <div key={window.name} data-slot="quota-meter" className="flex min-w-0 flex-col gap-[3px]">
-                <div className="flex h-[15px] items-end justify-between gap-1.5 leading-[15px]">
-                  <span className="truncate text-[11px] text-muted-foreground" title={meterName}>{label}</span>
-                  <span className={cn('shrink-0 text-xs font-semibold tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
-                    {stale ? '—' : `${percent}%`}
-                  </span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar"
-                  aria-label={t('admin:channelQuotaMeterLabel', { window: meterName })}
-                  aria-valuemin={0} aria-valuemax={100} aria-valuenow={stale ? undefined : percent}>
-                  {!stale && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
-                </div>
-                {/* 行内只放剩余时长，具体重置时刻进悬停提示 */}
-                <span data-slot="quota-reset" className="flex h-[15px] min-w-0 items-center gap-1 text-[11px] leading-[15px] text-muted-foreground/80 tabular-nums" title={reset?.full}>
-                  {stale ? t('admin:channelQuotaRefreshing') : reset ? <>
-                    <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-2.5 w-2.5 shrink-0 opacity-80" />
-                    <span className="truncate">{reset.span}</span>
-                  </> : '\u00a0'}
-                </span>
-              </div>
+              <CompactMeter key={window.name} slot="quota-meter" label={window.scope ?? shortWindowLabel(window.window_secs)} title={meterName}
+                meterLabel={t('admin:channelQuotaMeterLabel', { window: meterName })} percent={stale ? null : percent}
+                marker={typeof limit === 'number' ? limit : undefined}
+                markerTitle={typeof limit === 'number' ? t('admin:channelQuotaLimitMarker', { percent: limit }) : undefined}
+                footerTitle={reset?.full}
+                footer={stale ? t('admin:channelQuotaRefreshing') : reset ? <>
+                  <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-2.5 w-2.5 shrink-0 opacity-80" />
+                  <span className="truncate">{reset.span}</span>
+                </> : '\u00a0'} />
             )
           })}
         </div>

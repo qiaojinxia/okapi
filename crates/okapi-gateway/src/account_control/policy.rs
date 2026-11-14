@@ -3,21 +3,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+/// 本地上限的周期：`total` 是累计总量、从不重置；其余是机器时区的自然日 / 周（周一起）/ 月。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TokenPeriod {
+pub enum LocalPeriod {
     #[default]
     Total,
     Day,
     Week,
+    Month,
 }
 
-impl TokenPeriod {
+impl LocalPeriod {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Total => "total",
             Self::Day => "day",
             Self::Week => "week",
+            Self::Month => "month",
         }
     }
 }
@@ -27,7 +30,17 @@ impl TokenPeriod {
 pub struct TokenLimit {
     pub cap: i64,
     #[serde(default)]
-    pub period: TokenPeriod,
+    pub period: LocalPeriod,
+}
+
+/// 成本上限：这条渠道在周期内已落账的上游成本（微美元，标价 × 渠道的相对成本系数）到 `cap_micro`
+/// 就不再接新请求。成本未知的请求不计入。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostLimit {
+    pub cap_micro: i64,
+    #[serde(default)]
+    pub period: LocalPeriod,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -111,6 +124,8 @@ pub struct Policy {
     /// 额度预判：缺省 `shadow`（只记诊断）；`enforce` 才据此排除候选；`off` 关掉。
     pub quota_forecast: ForecastMode,
     pub local_tokens: Option<TokenLimit>,
+    /// 本地成本上限，任何渠道都能设；缺省没有。
+    pub local_cost: Option<CostLimit>,
     pub rate_limit_cooldown_secs: i64,
     pub failure_threshold: i64,
     pub failure_cooldown_secs: i64,
@@ -128,6 +143,7 @@ impl Default for Policy {
             quota_keep_limits: BTreeMap::new(),
             quota_forecast: ForecastMode::default(),
             local_tokens: None,
+            local_cost: None,
             rate_limit_cooldown_secs: 60,
             failure_threshold: 3,
             failure_cooldown_secs: 60,
@@ -150,6 +166,10 @@ impl Policy {
                 .local_tokens
                 .as_ref()
                 .is_some_and(|limit| !(1..=9_007_199_254_740_991).contains(&limit.cap))
+            || policy
+                .local_cost
+                .as_ref()
+                .is_some_and(|limit| !(1..=9_007_199_254_740_991).contains(&limit.cap_micro))
             || policy.quota_limits.len() > 8
             || policy.quota_limits.iter().any(|(seconds, percent)| {
                 !(1..=31_536_000).contains(seconds) || !(1..=100).contains(percent)
@@ -189,6 +209,10 @@ mod tests {
             json!({"request_limit":100}),
             json!({"local_tokens":{"cap":0}}),
             json!({"local_tokens":{"cap":1,"period":"hour"}}),
+            json!({"local_cost":{"cap_micro":0}}),
+            json!({"local_cost":{"cap_micro":1.5}}),
+            json!({"local_cost":{"cap_micro":1,"period":"hour"}}),
+            json!({"local_cost":{"cap":1}}),
             json!({"quota_limits":{"18000":101}}),
             json!({"quota_limits":{"0":50}}),
             json!({"quota_keep_limits":{"18000":101}}),
@@ -220,5 +244,40 @@ mod tests {
         assert_eq!(echoed["quota_keep_limits"], json!({"18000": 95}));
         let off = Policy::parse(&json!({"account_control":{"quota_forecast":"off"}})).unwrap();
         assert_eq!(off.quota_forecast, ForecastMode::Off);
+    }
+
+    /// 本地上限缺省都没有；成本与 Token 各有自己的周期，缺省是累计总量；保存时整份回传不丢字段。
+    #[test]
+    fn local_caps_default_to_none_and_keep_their_own_periods() {
+        let policy = Policy::parse(&json!({})).unwrap();
+        assert!(policy.local_cost.is_none() && policy.local_tokens.is_none());
+        let policy = Policy::parse(&json!({"account_control":{
+            "local_cost":{"cap_micro":50_000_000,"period":"month"},
+            "local_tokens":{"cap":1_000_000}
+        }}))
+        .unwrap();
+        let cost = policy.local_cost.as_ref().unwrap();
+        assert_eq!(
+            (cost.cap_micro, cost.period),
+            (50_000_000, LocalPeriod::Month)
+        );
+        assert_eq!(
+            policy.local_tokens.as_ref().unwrap().period,
+            LocalPeriod::Total
+        );
+        let echoed = serde_json::to_value(&policy).unwrap();
+        assert_eq!(
+            echoed["local_cost"],
+            json!({"cap_micro": 50_000_000, "period": "month"})
+        );
+        assert_eq!(
+            echoed["local_tokens"],
+            json!({"cap": 1_000_000, "period": "total"})
+        );
+        // Token 上限从此也能按月
+        assert!(
+            Policy::parse(&json!({"account_control":{"local_tokens":{"cap":1,"period":"month"}}}))
+                .is_ok()
+        );
     }
 }

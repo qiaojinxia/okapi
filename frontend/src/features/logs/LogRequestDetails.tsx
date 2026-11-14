@@ -43,7 +43,8 @@ export function LogRequestDetails({ row }: { row: {
       case 'exhausted': return t('logs:excludedExhausted')
       case 'threshold': return t('logs:excludedThreshold', { headroom: e.headroom_percent, threshold: e.threshold_percent })
       case 'window_limit': return t('logs:excludedWindowLimit', { window: e.window ?? '—', used: e.used_percent, limit: e.limit_percent }) + resets
-      default: return t(`logs:excluded_${e.reason}`, { defaultValue: e.reason })
+      // 按周期的本地上限（成本 / Token）带着周期结束的时刻
+      default: return t(`logs:excluded_${e.reason}`, { defaultValue: e.reason }) + resets
     }
   }
   const chain = models.join(' → ')

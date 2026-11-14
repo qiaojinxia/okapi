@@ -1368,6 +1368,14 @@ usage is read from `billing_records`, and is not a new customer ledger. Expired 
 are pruned in bounded 1000-row batches after 45 days. See
 [channel-account-controls.md](channel-account-controls.md) for limits and semantics.
 
+`channel_token_totals` holds one row per channel with its lifetime `tokens` and, since
+migration 0006, `cost_micro` (the sum of `upstream_cost_micro`; unknown and negative costs
+add nothing). The `billing_channel_tokens` insert trigger on `billing_records` maintains
+both for settled (2) and interrupted-stream (5) records, so the totals outlive retention.
+The channel's `local_cost` / `local_tokens` caps read this row for the `total` period and
+aggregate retained bills plus archived receipts for calendar periods. Migration 0006
+backfills `cost_micro` from the bills and receipts that exist when it runs.
+
 ### Egress proxies (migration 0037, IMPLEMENTATION §11.41)
 
 Proxies are first-class resources. A channel binds its egress through three columns,

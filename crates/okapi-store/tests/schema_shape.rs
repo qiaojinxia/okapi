@@ -87,6 +87,8 @@ const REQUIRED: &[(&str, &[&str])] = &[
         "channels",
         &["egress_mode", "egress_proxy_id", "egress_group_code"],
     ),
+    // 渠道的累计用量（0006 加了成本）：渠道的累计上限读这一行
+    ("channel_token_totals", &["tokens", "cost_micro"]),
 ];
 
 /// 必须**不**存在：已被池取代的中间态。搬回来会让可见性同时有两处实现。

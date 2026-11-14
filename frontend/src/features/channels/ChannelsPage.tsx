@@ -2,6 +2,7 @@ import {
   Activity,
   Copy,
   Ellipsis,
+  Gauge,
   ExternalLink,
   Globe,
   MessageSquareText,
@@ -96,7 +97,7 @@ export function ChannelsPage() {
   const statusFilter = search.status ?? ''
   const [draft, setDraft] = useDraft(query)
   const [drawer, setDrawer] = useState<
-    { mode: 'create' } | { mode: 'edit'; channel: ChannelRow } | null
+    { mode: 'create' } | { mode: 'edit'; channel: ChannelRow; focus?: 'limits' } | null
   >(null)
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
@@ -500,12 +501,13 @@ export function ChannelsPage() {
                     </div>
                   </div>
                 </Td>
-                {/* 额度：订阅账号是各窗口的用量仪表，API 渠道是上游余额；都没有就是一个破折号 */}
+                {/* 额度：订阅账号是各窗口的用量仪表，设了成本 / Token 上限的渠道是「已用 / 上限」，API 渠道还有上游余额；都没有就是一个破折号 */}
                 <Td className="py-3 align-top">
                   <div data-slot="channel-quota" className="flex min-w-0 flex-col gap-1.5">
                     <ChannelQuotaCell
                       channelId={c.id}
                       provider={c.provider}
+                      control={c.settings?.account_control}
                       enabled={enabled}
                       fallback={c.last_balance ? null : <span aria-hidden className="leading-5 text-muted-foreground/70">—</span>}
                     />
@@ -576,6 +578,9 @@ export function ChannelsPage() {
                             {t('admin:balanceQuery')}
                           </MenuItem>
                         )}
+                        <MenuItem icon={Gauge} onSelect={() => setDrawer({ mode: 'edit', channel: c, focus: 'limits' })}>
+                          {t('admin:channelLimitsTitle')}
+                        </MenuItem>
                         <MenuItem icon={Copy} onSelect={() => duplicate.mutate(c)}>
                           {t('admin:duplicate')}
                         </MenuItem>
@@ -641,6 +646,7 @@ export function ChannelsPage() {
       {drawer !== null && (
         <ChannelDrawer
           channel={editingChannel}
+          focus={drawer.mode === 'edit' ? drawer.focus : undefined}
           onClose={() => setDrawer(null)}
           onDone={invalidate}
         />

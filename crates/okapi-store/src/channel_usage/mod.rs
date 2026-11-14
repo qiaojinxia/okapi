@@ -4,48 +4,59 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{PgPool, Postgres, Transaction};
 
+/// What one channel has on record for one period: input plus output tokens and the
+/// upstream cost of its settled requests. A request whose cost is unknown adds no cost.
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]
-pub struct TokenSnapshot {
+pub struct LocalUsage {
     pub tokens: i64,
+    pub cost_micro: i64,
+    /// `None` for `total`, which has no window and never resets.
     pub window_start: Option<DateTime<Utc>>,
     pub window_end: Option<DateTime<Utc>>,
 }
 
 /// Lifetime totals survive retention; calendar windows use retained bills and
 /// receipts under the same retention lock. No request/token estimation is used.
-pub async fn token_snapshot(
+pub async fn local_usage(
     pool: &PgPool,
     channel: i64,
     period: &str,
-) -> Result<TokenSnapshot, StoreError> {
+) -> Result<LocalUsage, StoreError> {
     if period == "total" {
-        let tokens = sqlx::query_scalar::<_, i64>("SELECT COALESCE((SELECT LEAST(tokens,9223372036854775807)::bigint FROM channel_token_totals WHERE channel_id=$1),0)")
-            .bind(channel).fetch_one(pool).await?;
-        return Ok(TokenSnapshot {
-            tokens,
-            window_start: None,
-            window_end: None,
-        });
+        // An aggregate without GROUP BY yields its one row for a channel that has no totals yet.
+        return Ok(sqlx::query_as::<_, LocalUsage>(
+            r"SELECT COALESCE(MAX(LEAST(tokens,9223372036854775807)),0)::bigint AS tokens,
+                     COALESCE(MAX(LEAST(cost_micro,9223372036854775807)),0)::bigint AS cost_micro,
+                     NULL::timestamptz AS window_start, NULL::timestamptz AS window_end
+                FROM channel_token_totals WHERE channel_id=$1",
+        )
+        .bind(channel)
+        .fetch_one(pool)
+        .await?);
     }
     let interval = match period {
         "day" => "1 day",
         "week" => "1 week",
-        _ => return Err(StoreError::InvalidData("token_period")),
+        "month" => "1 month",
+        _ => return Err(StoreError::InvalidData("usage_period")),
     };
     let zone = timezone::machine_timezone()?;
     let mut tx = crate::history::read(pool).await?;
-    let usage = sqlx::query_as::<_, TokenSnapshot>(r"
+    let usage = sqlx::query_as::<_, LocalUsage>(r"
         WITH bounds AS (SELECT date_trunc($2,now() AT TIME ZONE $3) AS start),
         period_window AS (SELECT start AT TIME ZONE $3 AS window_start,
             (start+$4::text::interval) AT TIME ZONE $3 AS window_end FROM bounds),
         facts AS (
-            SELECT greatest(prompt_tokens,0)::bigint + greatest(completion_tokens,0)::bigint AS tokens
+            SELECT greatest(prompt_tokens,0)::bigint + greatest(completion_tokens,0)::bigint AS tokens,
+                   greatest(COALESCE(upstream_cost_micro,0),0)::numeric AS cost
               FROM billing_records,period_window WHERE channel_id=$1 AND log_type IN (2,5)
                 AND created_at>=window_start AND created_at<window_end
             UNION ALL
-            SELECT channel_receipt_tokens(usage_details) FROM billing_record_receipts,period_window
+            SELECT channel_receipt_tokens(usage_details),greatest(COALESCE(upstream_cost_micro,0),0)::numeric
+              FROM billing_record_receipts,period_window
               WHERE channel_id=$1 AND created_at>=window_start AND created_at<window_end)
         SELECT LEAST(COALESCE((SELECT SUM(tokens) FROM facts),0),9223372036854775807)::bigint AS tokens,
+            LEAST(COALESCE((SELECT SUM(cost) FROM facts),0),9223372036854775807)::bigint AS cost_micro,
             window_start,window_end FROM period_window
     ").bind(channel).bind(period).bind(zone).bind(interval).fetch_one(&mut *tx).await?;
     tx.commit().await?;

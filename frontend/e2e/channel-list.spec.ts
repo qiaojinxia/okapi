@@ -480,7 +480,7 @@ test('渠道列表：供应商控制台入口平时收起，悬停整行或键�
   await expect(link).toHaveCSS('opacity', '1')
 })
 
-test('渠道列表：「···」菜单收纳试聊 / 余额 / 复制 / 删除，键盘可开可关', async ({ page }) => {
+test('渠道列表：「···」菜单收纳试聊 / 余额 / 额度上限 / 复制 / 删除，键盘可开可关', async ({ page }) => {
   await prepare(page)
   const openai = rowOf(page, 'openai-main')
   const more = openai.getByRole('button', { name: '更多操作', exact: true })
@@ -490,8 +490,8 @@ test('渠道列表：「···」菜单收纳试聊 / 余额 / 复制 / 删除�
   const menu = page.getByRole('menu')
   await expect(menu).toBeVisible()
   await expect(more).toHaveAttribute('aria-expanded', 'true')
-  // openai 有余额接口：四项都在；删除排在分隔线之后
-  await expect(menu.getByRole('menuitem')).toHaveText(['测试输出', '查上游余额', '复制', '删除'])
+  // openai 有余额接口：五项都在；删除排在分隔线之后
+  await expect(menu.getByRole('menuitem')).toHaveText(['测试输出', '查上游余额', '额度上限', '复制', '删除'])
   // 打开后焦点落在第一项
   await expect(menu.getByRole('menuitem', { name: '测试输出', exact: true })).toBeFocused()
   await page.keyboard.press('ArrowDown')
@@ -508,7 +508,7 @@ test('渠道列表：「···」菜单收纳试聊 / 余额 / 复制 / 删除�
   // 没有余额接口的协议不列「查上游余额」
   const alice = rowOf(page, ALICE_MASKED)
   await alice.getByRole('button', { name: '更多操作', exact: true }).click()
-  await expect(page.getByRole('menu').getByRole('menuitem')).toHaveText(['测试输出', '复制', '删除'])
+  await expect(page.getByRole('menu').getByRole('menuitem')).toHaveText(['测试输出', '额度上限', '复制', '删除'])
   // 点菜单外收起
   await page.locator('#main-content').getByRole('heading', { name: '渠道' }).click()
   await expect(page.getByRole('menu')).toHaveCount(0)

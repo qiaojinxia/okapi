@@ -10,15 +10,15 @@ export function RenewalControls({ draft, refreshable }: { draft: ControlDraft; r
   const summary = t(!refreshable ? 'admin:channelTokenOnlySummary'
     : policy.refresh_mode === 'external' ? 'admin:channelRefreshOff' : 'admin:channelRefreshOn')
   return (
-    <OptionalSection id="channel-authorization-options" title={t('admin:channelAuthorizationTitle')} summary={summary}>
+    <OptionalSection id="channel-authorization-options" title={t('admin:channelAuthorizationTitle')} summary={summary}
+      error={!refreshValid ? t('admin:channelControlNumberInvalid') : undefined}>
       {refreshable ? <>
         <Switch label={t('admin:channelRefreshEnabled')} checked={policy.refresh_mode === 'managed'}
           description={t(policy.refresh_mode === 'external' ? 'admin:channelRefreshExternalHint' : 'admin:channelRefreshManagedHint')}
           onChange={setRenewal} />
         {policy.refresh_mode === 'managed' && (
           <OptionalSection id="channel-renewal-advanced" title={t('admin:channelRefreshAdvanced')}
-            summary={t('admin:channelRefreshMarginSummary', { seconds: numbers.refresh_margin_secs })}
-            error={!refreshValid ? t('admin:channelControlNumberInvalid') : undefined}>
+            summary={t('admin:channelRefreshMarginSummary', { seconds: numbers.refresh_margin_secs })}>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="channel-refresh-margin">{t('admin:channelRefreshMargin')}</Label>
               <Input id="channel-refresh-margin" inputMode="numeric" value={numbers.refresh_margin_secs}

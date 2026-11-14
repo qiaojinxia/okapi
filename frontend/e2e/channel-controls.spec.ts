@@ -7,7 +7,8 @@ type Json = Record<string, unknown>
 const usage = { timezone: 'America/Los_Angeles', usage: {
   window_start: '2026-10-01T07:00:00Z', window_end: '2026-10-02T07:00:00Z',
   requests: 12, tokens: 456, cost_micro: 1_234_567, unknown_cost_requests: 0,
-}, token_usage: { tokens: 456, window_start: null, window_end: null }, quotas: [] }
+}, token_usage: { tokens: 456, window_start: null, window_end: null },
+  cost_usage: { cost_micro: 1_234_567, window_start: null, window_end: null }, quotas: [] }
 const channel = { id: 42, name: 'controlled-channel', provider: 'openai', api_base: 'https://api.openai.com/v1',
   status: 1, priority: 0, models: ['mock-model'], keys: [], pools: ['default'], pool_members: [],
   cost_milli: 1000, last_test: null, last_balance: null,
@@ -68,7 +69,7 @@ async function newChannel(page: Page, provider = 'openai', expandLimits = true) 
   return drawer
 }
 
-test('API channels have only common controls and submit validated concurrency and pause settings', async ({ page }) => {
+test('API channels have usage caps and common controls but no subscription fields, and submit validated concurrency and pause settings', async ({ page }) => {
   const drawer = await newChannel(page)
   let saved: Json | undefined
   await page.route('**/admin/channels', async (route) => {
@@ -78,9 +79,14 @@ test('API channels have only common controls and submit validated concurrency an
   })
   await expect(drawer.locator('#d-provider option[value="anthropic_max"]')).toHaveText('Claude Code（订阅）')
   await expect(drawer.locator('#d-provider option[value="codex"]')).toHaveText('Codex（订阅）')
-  for (const id of ['channel-subscription-controls', 'channel-quota-threshold', 'channel-limit-tokens', 'channel-limit-cost', 'channel-limit-requests', 'channel-usage-period']) {
+  // 额度上限任何渠道都有（成本 / Token）；上游窗口百分比和授权续期只属于订阅渠道，已停用的旧字段不再出现
+  for (const id of ['channel-quota-limits', 'channel-limit-cost', 'channel-cost-period', 'channel-limit-tokens', 'channel-token-period']) {
+    await expect(drawer.locator(`#${id}`)).toHaveCount(1)
+  }
+  for (const id of ['channel-quota-18000', 'channel-quota-604800', 'channel-authorization-options', 'channel-quota-threshold', 'channel-limit-requests', 'channel-usage-period']) {
     await expect(drawer.locator(`#${id}`)).toHaveCount(0)
   }
+  await expect(drawer.locator('[data-slot="channel-upstream-limits"]')).toHaveCount(0)
   const submit = drawer.getByRole('button', { name: '新建', exact: true })
   await drawer.locator('#d-concurrency').fill('2147483648')
   await expect(submit).toBeDisabled()
@@ -98,6 +104,133 @@ test('API channels have only common controls and submit validated concurrency an
     failure_threshold: 4, rate_limit_cooldown_secs: 300, failure_cooldown_secs: 90,
   } } })
   expect((saved!.settings as Json).account_control).not.toHaveProperty('usage')
+})
+
+test('any channel can cap its recorded cost and tokens, each with its own period', async ({ page }) => {
+  const drawer = await newChannel(page, 'openai', false)
+  let saved: Json | undefined
+  await page.route('**/admin/channels', async (route) => {
+    if (route.request().method() === 'GET') return route.fallback()
+    saved = route.request().postDataJSON()
+    return route.fulfill({ json: { channel_id: 42, channel_key_id: 7 } })
+  })
+  const summary = drawer.locator('#channel-quota-limits > summary')
+  await expect(summary).toContainText('额度上限')
+  await expect(summary).toContainText('未设上限')
+  await summary.click()
+  const submit = drawer.getByRole('button', { name: '新建', exact: true })
+  await expect(submit).toBeEnabled()
+  // 金额不四舍五入：0、负数、超过 6 位小数、超出安全整数的都拒绝
+  for (const bad of ['0', '-1', 'abc', '1.2345678', '9007199254.740993']) {
+    await drawer.locator('#channel-limit-cost').fill(bad)
+    await expect(drawer.locator('#channel-limit-cost')).toHaveAttribute('aria-invalid', 'true')
+    await expect(submit).toBeDisabled()
+  }
+  // 折起来错误仍然看得见
+  await summary.click()
+  await expect(drawer.getByRole('alert')).toContainText('成本上限请输入')
+  await summary.click()
+  await drawer.locator('#channel-limit-cost').fill('12.5')
+  await expect(drawer.getByRole('alert')).toHaveCount(0)
+  await drawer.locator('#channel-cost-period').selectOption('month')
+  await drawer.locator('#channel-limit-tokens').fill('2000000')
+  await drawer.locator('#channel-token-period').selectOption('day')
+  await expect(summary).toContainText('成本 ≤ $12.5（每月） · Token ≤ 2000000（每日）')
+  // 新建时还没有账单，不显示已记录的用量
+  await expect(drawer.locator('[data-slot="channel-cost-used"]')).toHaveCount(0)
+  await submit.click()
+  await expect.poll(() => saved).toMatchObject({ settings: { account_control: {
+    local_cost: { cap_micro: 12_500_000, period: 'month' }, local_tokens: { cap: 2_000_000, period: 'day' },
+  } } })
+})
+
+test('a capped channel shows used against cap in its list row and in the drawer, and emptying the field removes the cap', async ({ page }) => {
+  const account_control = { local_cost: { cap_micro: 5_000_000, period: 'month' }, local_tokens: { cap: 1000, period: 'total' } }
+  await prepare(page, [{ ...channel, settings: { account_control } }])
+  const asked: string[] = []
+  await page.route('**/admin/channels/42/usage*', (route) => {
+    asked.push(new URL(route.request().url()).search)
+    return route.fulfill({ json: { timezone: usage.timezone, quotas: [],
+      token_usage: { tokens: 456, window_start: null, window_end: null },
+      cost_usage: { cost_micro: 1_234_567, window_start: '2026-11-01T07:00:00Z', window_end: '2099-12-01T08:00:00Z' } } })
+  })
+  let saved: Json | undefined
+  await page.route('**/admin/channels/42', async (route) => {
+    saved = route.request().postDataJSON()
+    return route.fulfill({ json: { ok: true } })
+  })
+  // 列表行：各按自己的周期查一次，画成「已用 / 上限」
+  const row = page.getByRole('row').filter({ hasText: channel.name })
+  await expect(row.getByRole('progressbar', { name: '成本 · 每月上限用量' })).toHaveAttribute('aria-valuenow', '24')
+  await expect(row.getByRole('progressbar', { name: 'Token · 累计上限用量' })).toHaveAttribute('aria-valuenow', '45')
+  await expect(row.locator('[data-slot="cap-meter"]')).toHaveCount(2)
+  await expect(row.locator('[data-slot="cap-meter"]').first()).toContainText('$1.23 / $5.00')
+  await expect(row.locator('[data-slot="cap-meter"]').nth(1)).toContainText('456 / 1000')
+  expect(asked[0]).toBe('?token_period=total&cost_period=month')
+  const drawer = await openScheduling(page)
+  const summary = drawer.locator('#channel-quota-limits > summary')
+  await expect(summary).toContainText('成本 ≤ $5（每月） · Token ≤ 1000（累计）')
+  await summary.click()
+  await expect(drawer.locator('#channel-limit-cost')).toHaveValue('5')
+  await expect(drawer.locator('#channel-cost-period')).toHaveValue('month')
+  await expect(drawer.locator('[data-slot="channel-cost-used"]')).toHaveText('该周期已记录 US$1.2346')
+  await expect(drawer.locator('[data-slot="channel-tokens-used"]')).toHaveText('该周期已记录 456 Token')
+  // 换个周期预览：按新周期重新查
+  await drawer.locator('#channel-cost-period').selectOption('day')
+  await expect.poll(() => asked.at(-1)).toBe('?token_period=total&cost_period=day')
+  await drawer.locator('#channel-limit-cost').fill('')
+  await drawer.getByRole('button', { name: '保存', exact: true }).last().click()
+  await expect.poll(() => saved).toMatchObject({ settings: { account_control: { local_cost: null, local_tokens: { cap: 1000, period: 'total' } } } })
+})
+
+test('a channel that has reached its cost cap says so in the list row, with when it comes back', async ({ page }) => {
+  const account_control = { local_cost: { cap_micro: 5_000_000, period: 'day' } }
+  await prepare(page, [{ ...channel, settings: { account_control } }])
+  await page.route('**/admin/channels/42/usage*', (route) => route.fulfill({ json: { timezone: usage.timezone, quotas: [],
+    token_usage: { tokens: 456, window_start: null, window_end: null },
+    cost_usage: { cost_micro: 5_000_001, window_start: new Date(Date.now() - 3_600_000).toISOString(),
+      window_end: new Date(Date.now() + 3 * 3_600_000 + 30 * 60_000).toISOString() } } }))
+  const row = page.getByRole('row').filter({ hasText: channel.name })
+  const meter = row.locator('[data-slot="cap-meter"]')
+  await expect(meter).toHaveCount(1)
+  await expect(row.getByRole('progressbar', { name: '成本 · 每日上限用量' })).toHaveAttribute('aria-valuenow', '100')
+  await expect(meter).toContainText(/已满，3小时\d+分后恢复/)
+})
+
+test('the row menu opens a channel straight at its usage caps, already expanded', async ({ page }) => {
+  await prepare(page, [{ ...channel, settings: {} }])
+  const row = page.getByRole('row').filter({ hasText: channel.name })
+  await row.getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '额度上限', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.getByRole('tab', { name: '调度', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(drawer.locator('#channel-quota-limits')).toHaveAttribute('open', '')
+  await expect(drawer.locator('#channel-limit-cost')).toBeVisible()
+  // 展开着进来，已记录的用量跟着查出来
+  await expect(drawer.locator('[data-slot="channel-cost-used"]')).toHaveText('该周期已记录 US$1.2346')
+  await drawer.getByRole('button', { name: '取消', exact: true }).click()
+  // 普通的「编辑」照旧从接入信息开始，额度上限是折着的
+  await row.getByRole('button', { name: '编辑', exact: true }).click()
+  await expect(drawer.getByRole('tab', { name: '接入信息', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await drawer.getByRole('tab', { name: '调度', exact: true }).click()
+  await expect(drawer.locator('#channel-quota-limits')).not.toHaveAttribute('open')
+})
+
+test('subscription rows mark the configured percentage cap on the meter of that window only', async ({ page }) => {
+  const nowSec = Math.floor(Date.now() / 1000)
+  await prepare(page, [{ ...channel, provider: 'anthropic_max', settings: { account_control: { quota_limits: { '18000': 85 } } },
+    keys: [{ ...keyRow(7), credential_kind: 1 }] }])
+  await page.route('**/admin/channels/42/usage*', (route) => route.fulfill({ json: { timezone: usage.timezone, quotas: [{ key_id: 7, quota: {
+    observed_at: nowSec, windows: [
+      { name: 'five_hour', used_percent: 20, window_secs: 18000, resets_at: nowSec + 3600 },
+      { name: 'seven_day', used_percent: 41, window_secs: 604800, resets_at: nowSec + 3 * 86400 },
+    ] } }] } }))
+  const row = page.getByRole('row').filter({ hasText: channel.name })
+  await expect(row.locator('[data-slot="quota-meter"]')).toHaveCount(2)
+  await expect(row.getByTitle('上限 85%')).toHaveCount(1)
+  await expect(row.locator('[data-slot="quota-meter"]').first().getByTitle('上限 85%')).toHaveCount(1)
+  // 没设成本 / Token 上限的渠道不多画仪表
+  await expect(row.locator('[data-slot="cap-meter"]')).toHaveCount(0)
 })
 
 function poolRow(code: string) {
@@ -293,7 +426,7 @@ test('editing removes retired local budgets and the retired proxy_url, preservin
   const drawer = page.getByRole('dialog')
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
   await expect(drawer.getByRole('note')).toContainText('原有本地累计额度限制已停用')
-  await expect(drawer.locator('#channel-subscription-controls')).toHaveCount(0)
+  await expect(drawer.locator('[data-slot="channel-upstream-limits"]')).toHaveCount(0)
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => saved).toMatchObject({ settings: { extensions: {} } })
   expect((saved!.settings as Json).account_control).not.toHaveProperty('usage')
@@ -314,7 +447,7 @@ test('OAuth creation separates upstream percentage and authorization from common
   await drawer.locator('#channel-schedule-options > summary').click()
   await drawer.locator('#d-priority').fill('17')
   await drawer.locator('#d-cost').fill('0.25')
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.getByLabel('5小时额度使用上限（%）', { exact: true })).toBeVisible()
   await drawer.locator('#channel-quota-18000').fill('85')
   await drawer.locator('#channel-quota-604800').fill('70')
@@ -367,12 +500,13 @@ test('provider switching hides subscription controls and preserves common settin
   await gotoStep(drawer, '接入')
   await drawer.locator('#d-provider').selectOption('codex')
   await nextStep(drawer)
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.getByLabel('周额度使用上限（%）', { exact: true })).toBeVisible()
   await drawer.locator('#channel-quota-18000').fill('85')
   await gotoStep(drawer, '接入')
   await drawer.locator('#d-provider').selectOption('openai')
-  await expect(drawer.locator('#channel-subscription-controls')).toHaveCount(0)
+  await expect(drawer.locator('[data-slot="channel-upstream-limits"]')).toHaveCount(0)
+  await expect(drawer.locator('#channel-authorization-options')).toHaveCount(0)
   await expect(drawer.locator('#channel-failure_threshold')).toHaveValue('5')
   await expect(drawer.locator('#d-concurrency')).toHaveValue('4')
   await drawer.locator('#d-provider').selectOption('anthropic_max')
@@ -382,21 +516,25 @@ test('provider switching hides subscription controls and preserves common settin
 
 test('subscription percentage and refresh numbers validate before authorization even when folded', async ({ page }) => {
   const drawer = await newChannel(page, 'codex')
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   // 调度填错就进不了登录授权那一步
   const authorize = drawer.getByRole('button', { name: '下一步', exact: true })
   for (const bad of ['0', '101', '1.5']) {
     await drawer.locator('#channel-quota-18000').fill(bad)
     await expect(authorize).toBeDisabled()
   }
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.getByRole('alert')).toContainText('用量百分比请输入')
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await drawer.locator('#channel-quota-18000').fill('90')
   await drawer.locator('#channel-authorization-options > summary').click()
   await drawer.locator('#channel-renewal-advanced > summary').click()
   await drawer.locator('#channel-refresh-margin').fill('119')
   await expect(authorize).toBeDisabled()
+  // 授权续期折起来，错误同样留在外面
+  await drawer.locator('#channel-authorization-options > summary').click()
+  await expect(drawer.getByRole('alert')).toContainText('请输入字段提示范围内的整数')
+  await drawer.locator('#channel-authorization-options > summary').click()
   await drawer.getByRole('switch', { name: '自动续期', exact: true }).uncheck()
   await expect(authorize).toBeEnabled()
   await expect(drawer.locator('#channel-refresh-margin')).toHaveCount(0)
@@ -423,9 +561,8 @@ test('an access-token import queries quota without offering automatic renewal', 
   await drawer.locator('#d-cred').fill('sk-ant-oat01-fixture')
   await nextStep(drawer)
   await expect(drawer.getByRole('button', { name: '移除 mock-model', exact: true })).toBeVisible()
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await drawer.locator('#channel-quota-18000').fill('80')
-  await drawer.locator('#channel-local-token-controls > summary').click()
   await expect(drawer.locator('#channel-token-period')).toHaveValue('total')
   const submit = drawer.getByRole('button', { name: '新建', exact: true })
   for (const bad of ['0', '-1', '1.5', '9007199254740992']) {
@@ -434,7 +571,6 @@ test('an access-token import queries quota without offering automatic renewal', 
   }
   await drawer.locator('#channel-limit-tokens').fill('1000000')
   await drawer.locator('#channel-token-period').selectOption('week')
-  await expect(drawer.locator('#channel-limit-cost')).toHaveCount(0)
   await drawer.locator('#channel-authorization-options > summary').click()
   await expect(drawer.getByRole('switch', { name: '自动续期', exact: true })).toHaveCount(0)
   await expect(drawer.locator('#channel-refresh-margin')).toHaveCount(0)
@@ -451,7 +587,7 @@ test('subscription controls use plugin metadata rather than provider name', asyn
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
   const drawer = page.getByRole('dialog')
   await toModelsStep(drawer)
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.getByLabel('2小时额度使用上限（%）', { exact: true })).toBeVisible()
   await expect(drawer.getByRole('switch', { name: '自动续期', exact: true })).toHaveCount(0)
 })
@@ -489,7 +625,7 @@ test('a newly registered account plugin drives channel options, authorization an
   await expect(drawer.getByRole('navigation', { name: '新建渠道的步骤' }).getByRole('button')).toHaveCount(2)
   await drawer.locator('#d-cred').fill('third_access_fixture')
   await nextStep(drawer)
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await drawer.locator('#channel-quota-7200').fill('80')
   await drawer.locator('#channel-authorization-options > summary').click()
   await expect(drawer.getByRole('switch', { name: '自动续期', exact: true })).toHaveCount(0)
@@ -517,9 +653,9 @@ test('folded subscription observations defer queries and recover errors without 
   const listed = requests
   const drawer = await openScheduling(page)
   expect(requests).toBe(listed)
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await drawer.locator('#channel-quota-18000').fill('83')
-  const section = drawer.locator('#channel-subscription-controls')
+  const section = drawer.locator('#channel-quota-limits')
   // TanStack retries are finite; advance the fixture clock rather than waiting in real time.
   await page.clock.runFor(10_000)
   await expect(section.getByRole('alert')).toContainText('服务内部错误')
@@ -527,7 +663,7 @@ test('folded subscription observations defer queries and recover errors without 
   await section.getByRole('button', { name: '重试', exact: true }).click()
   await expect(section.getByText('该周期已记录 456 Token', { exact: false })).toHaveCount(1)
   await expect(drawer.locator('#channel-quota-18000')).toHaveValue('83')
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await page.clock.runFor(50)
   const before = requests
   await page.clock.fastForward(45_000)
@@ -570,7 +706,10 @@ test('a non-subscription quota hook does not expose subscription configuration',
     { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: true, refresh: false, subscription: null } },
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  await expect(page.getByRole('dialog').locator('#channel-subscription-controls')).toHaveCount(0)
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.locator('#channel-quota-limits')).toHaveCount(1)
+  await expect(drawer.locator('[data-slot="channel-upstream-limits"]')).toHaveCount(0)
+  await expect(drawer.locator('#channel-authorization-options')).toHaveCount(0)
 })
 
 for (const provider of ['anthropic_max', 'codex']) {
@@ -590,7 +729,6 @@ for (const provider of ['anthropic_max', 'codex']) {
     })
     const openRenewal = async () => {
       const drawer = await openScheduling(page)
-      await drawer.locator('#channel-subscription-controls > summary').click()
       await drawer.locator('#channel-authorization-options > summary').click()
       return drawer
     }
@@ -618,7 +756,6 @@ for (const provider of ['anthropic_max', 'codex']) {
     await drawer.getByRole('tab', { name: '接入信息', exact: true }).click()
     await expect(drawer.getByRole('button', { name: '立即刷新凭证', exact: true })).toBeVisible()
     await drawer.getByRole('tab', { name: '调度', exact: true }).click()
-    await drawer.locator('#channel-subscription-controls > summary').click()
     await drawer.locator('#channel-authorization-options > summary').click()
     toggle = drawer.getByRole('switch', { name: '自动续期', exact: true })
     await toggle.uncheck()
@@ -652,7 +789,7 @@ test('external authorization management hides manual refresh and preserves subsc
   const drawer = page.getByRole('dialog')
   await expect(drawer.getByRole('button', { name: '立即刷新凭证', exact: true })).toHaveCount(0)
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.locator('#channel-quota-604800')).toHaveValue('75')
   await drawer.locator('#channel-quota-604800').fill('80')
   await drawer.getByRole('button', { name: '保存', exact: true }).last().click()
@@ -672,7 +809,7 @@ test('upstream quota shows its actual windows without any local period on mobile
   await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '编辑', exact: true }).click()
   const drawer = page.getByRole('dialog')
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   const monthly = drawer.getByRole('progressbar', { name: '30天额度用量' })
   await expect(monthly).toHaveAttribute('aria-valuenow', '45')
   await expect(drawer.getByText('45%', { exact: true })).toBeVisible()
@@ -707,10 +844,12 @@ test('the Fable weekly window is drawn after the account windows in the list row
   await expect(row.getByText('Fable', { exact: true })).toBeVisible()
   await expect(row.getByRole('progressbar', { name: '7天额度用量', exact: true })).toHaveAttribute('aria-valuenow', '41')
   await expect(row.getByRole('progressbar', { name: '5小时额度用量', exact: true })).toHaveAttribute('aria-valuenow', '20')
+  // 行里的上限刻度同样只画在账号 7 天窗口上
+  await expect(row.getByTitle('上限 80%')).toHaveCount(1)
   await row.getByRole('button', { name: '编辑', exact: true }).click()
   const drawer = page.getByRole('dialog')
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
-  await drawer.locator('#channel-subscription-controls > summary').click()
+  await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.getByRole('progressbar', { name: 'Fable · 7天额度用量' })).toHaveAttribute('aria-valuenow', '37')
   await expect(drawer.getByText('Fable · 7天', { exact: true })).toBeVisible()
   // 渠道配的 80% 周上限是账号 7 天窗口的：只有那一条画了竖线，Fable 周限额不带

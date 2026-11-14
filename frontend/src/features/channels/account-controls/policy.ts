@@ -1,4 +1,5 @@
-import type { AccountControl } from '../types'
+import { keyQuotaMicro, keyQuotaText } from '@/features/portal-keys/KeyLimitsFields'
+import type { AccountControl, LocalPeriod } from '../types'
 
 export const defaults: AccountControl = {
   quota_aware: false, quota_threshold_pct: 90,
@@ -19,3 +20,12 @@ export function parseLimit(text: string): number | undefined | null {
   const value = Number(trimmed)
   return Number.isSafeInteger(value) && value > 0 ? value : null
 }
+
+export const LOCAL_PERIODS: readonly LocalPeriod[] = ['total', 'day', 'week', 'month']
+
+/** Dollars as typed to micro-USD. Empty means unlimited; anything but an exact positive amount with at most six decimals is invalid, never rounded. */
+export function parseCostLimit(text: string): number | undefined | null {
+  if (text.trim() === '') return undefined
+  return keyQuotaMicro(text) ?? null
+}
+export const costLimitText = (micro: number): string => keyQuotaText(micro)

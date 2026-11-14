@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { AccountControl } from '../types'
-import type { AccountCapabilities, TokenPeriod } from './api'
-import { commonNumbers, defaults, parseLimit } from './policy'
+import type { AccountControl, LocalPeriod } from '../types'
+import type { AccountCapabilities } from './api'
+import { commonNumbers, costLimitText, defaults, parseCostLimit, parseLimit } from './policy'
 
 export function useControlDraft(value: AccountControl | undefined, capabilities: AccountCapabilities | undefined,
   refreshable: boolean, onChange: (value: AccountControl) => void, onValidChange: (valid: boolean) => void) {
@@ -10,7 +10,9 @@ export function useControlDraft(value: AccountControl | undefined, capabilities:
   const subscription = capabilities?.subscription
   const [quotaDrafts, setQuotaDrafts] = useState<Record<string, string>>(() => Object.fromEntries(Object.entries(value?.quota_limits ?? {}).map(([seconds, cap]) => [seconds, String(cap)])))
   const [tokenDraft, setTokenDraft] = useState(() => value?.local_tokens ? String(value.local_tokens.cap) : '')
-  const [tokenPeriod, setTokenPeriod] = useState<TokenPeriod>(() => value?.local_tokens?.period ?? 'total')
+  const [tokenPeriod, setTokenPeriod] = useState<LocalPeriod>(() => value?.local_tokens?.period ?? 'total')
+  const [costDraft, setCostDraft] = useState(() => value?.local_cost ? costLimitText(value.local_cost.cap_micro) : '')
+  const [costPeriod, setCostPeriod] = useState<LocalPeriod>(() => value?.local_cost?.period ?? 'total')
   const quotaWindows = subscription?.quota_windows ?? (subscription?.window_secs ? [subscription.window_secs] : [])
   const legacyWindow = subscription?.window_secs ?? quotaWindows.at(-1)
   const quotaText = (seconds: number) => quotaDrafts[String(seconds)] ?? (policy.quota_aware && seconds === legacyWindow ? String(policy.quota_threshold_pct) : '')
@@ -26,10 +28,14 @@ export function useControlDraft(value: AccountControl | undefined, capabilities:
     const limit = parseLimit(quotaText(seconds))
     return limit !== null && (limit === undefined || limit <= 100)
   })
+  // 本地上限任何渠道都能设，所以不看是不是订阅渠道
   const tokenLimit = parseLimit(tokenDraft)
-  const tokenValid = !subscription || tokenLimit !== null
+  const tokenValid = tokenLimit !== null
+  const costLimit = parseCostLimit(costDraft)
+  const costValid = costLimit !== null
   const refreshValid = !subscription || !capabilities?.refresh || !refreshable || policy.refresh_mode !== 'managed' || validNumber('refresh_margin_secs', 120, 3600)
-  useEffect(() => { onValidChange(commonValid && quotaValid && tokenValid && refreshValid) }, [commonValid, quotaValid, tokenValid, refreshValid, onValidChange])
+  const valid = commonValid && quotaValid && tokenValid && costValid && refreshValid
+  useEffect(() => { onValidChange(valid) }, [valid, onValidChange])
   const changeNumber = (name: keyof typeof numbers, text: string, min: number, max: number) => {
     setNumbers((current) => ({ ...current, [name]: text }))
     const number = Number(text)
@@ -55,14 +61,24 @@ export function useControlDraft(value: AccountControl | undefined, capabilities:
     const cap = parseLimit(text)
     if (cap !== null) onChange({ ...policy, local_tokens: cap === undefined ? null : { cap, period: tokenPeriod } })
   }
-  const changePeriod = (period: TokenPeriod) => {
+  const changeTokenPeriod = (period: LocalPeriod) => {
     setTokenPeriod(period)
     if (tokenLimit !== null && tokenLimit !== undefined) onChange({ ...policy, local_tokens: { cap: tokenLimit, period } })
+  }
+  const changeCost = (text: string) => {
+    setCostDraft(text)
+    const cap = parseCostLimit(text)
+    if (cap !== null) onChange({ ...policy, local_cost: cap === undefined ? null : { cap_micro: cap, period: costPeriod } })
+  }
+  const changeCostPeriod = (period: LocalPeriod) => {
+    setCostPeriod(period)
+    if (costLimit !== null && costLimit !== undefined) onChange({ ...policy, local_cost: { cap_micro: costLimit, period } })
   }
   const setRenewal = (enabled: boolean) => onChange({ ...policy, refresh_mode: enabled ? 'managed' : 'external' })
   const commonChanged = commonNumbers.some(([name]) => policy[name] !== defaults[name])
   return { policy, legacyUsage, numbers, validNumber, commonValid, commonChanged,
     quotaWindows, quotaText, quotaValid, changeQuota, tokenDraft, tokenPeriod, tokenValid,
-    changeTokens, changePeriod, refreshValid, changeNumber, setRenewal }
+    changeTokens, changeTokenPeriod, costDraft, costPeriod, costValid, changeCost, changeCostPeriod,
+    refreshValid, changeNumber, setRenewal }
 }
 export type ControlDraft = ReturnType<typeof useControlDraft>

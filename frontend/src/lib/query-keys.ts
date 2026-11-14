@@ -48,7 +48,7 @@ export const qk = {
   setting: (key: string) => ['setting', key] as const,
   adminLeaderboard: (days: number) => ['admin', 'leaderboard', days] as const,
   channelProviders: ['channel-provider-capabilities'] as const,
-  channelControlUsage: (id: number | undefined, period: string) => ['channel-control-usage', id, period] as const,
+  channelControlUsage: (id: number | undefined, tokenPeriod: string, costPeriod: string) => ['channel-control-usage', id, tokenPeriod, costPeriod] as const,
   adminChannels,
   adminChannelsPage: (q: string, provider: string, status: string, page: Page) => paged([...adminChannels, q, provider, status] as const, page),
   adminPricingRules,
