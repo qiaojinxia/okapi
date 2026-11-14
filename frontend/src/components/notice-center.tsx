@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, ChevronDown, Info, Megaphone, X } from 'lucide-react'
+import { ChevronDown, Mail, MailOpen, Mailbox, X } from 'lucide-react'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
@@ -95,12 +95,12 @@ function markRead(read: Notice[], all: Notice[]) {
   listeners.forEach((listener) => listener())
 }
 
-const TONE = {
-  info: { wrap: 'border-primary/30 bg-primary/5', icon: Info, iconCls: 'text-primary' },
-  warning: { wrap: 'border-warning/40 bg-warning/10', icon: Megaphone, iconCls: 'text-warning' },
-  critical: { wrap: 'border-destructive/40 bg-destructive/10', icon: AlertTriangle, iconCls: 'text-destructive' },
-} as const
-const tone = (level: string) => TONE[level as NoticeLevel] ?? TONE.info
+/// 级别不再靠底色区分（蓝 / 黄 / 红的浅色框和站点的纸面主题不搭）：提醒 / 重大在信纸右上角盖一枚墨色印章，普通通知不盖。
+function Stamp({ level }: { level: string }) {
+  const { t } = useTranslation()
+  if (level !== 'warning' && level !== 'critical') return null
+  return <span data-slot="notice-stamp" data-level={level} className="letter-stamp">{t(`common:noticeStamp_${level}`)}</span>
+}
 
 /// 站点公告的入口：顶栏上一个喇叭按钮，有没看过的公告就亮红点；点开是公告列表，逐条展开才算看过。
 /// 设了弹窗的公告，没看过时进站先弹出来。没有已发布的公告时入口不显示。
@@ -116,7 +116,7 @@ export function NoticeCenter() {
   return <>
     <Tooltip content={t('common:notices')} side="bottom">
       <Button variant="ghost" size="icon" className="relative h-11 w-11 md:h-9 md:w-9" aria-label={label} onClick={() => setOpen(true)}>
-        <Megaphone className="h-4 w-4" />
+        <Mailbox className="h-4 w-4" />
         {unread.length > 0 && <span data-slot="notice-dot" aria-hidden className="absolute top-2.5 right-2.5 h-2 w-2 rounded-full bg-destructive ring-2 ring-background md:top-1.5 md:right-1.5" />}
       </Button>
     </Tooltip>
@@ -142,33 +142,38 @@ function useNoticeTime() {
   }
 }
 
-/// 列表里的一条：收起时是标题、时间和两行摘要；点开看全文，点开过才算看过（红点随之消失）。
+/// 列表里的一封：收起时是信封——标题、时间和两行摘要，没看过的封口上有一枚火漆；点开是信纸，正文落在横格线上。
+/// 点开过才算看过（火漆与入口上的红点随之消失）。
 function NoticeItem({ notice, unread, onOpen }: { notice: Notice; unread: boolean; onOpen: () => void }) {
   const { t } = useTranslation()
   const time = useNoticeTime()
   const [open, setOpen] = useState(false)
-  const look = tone(notice.level)
-  const Icon = look.icon
+  const Icon = open || !unread ? MailOpen : Mail
   return (
-    <article data-slot="notice-item" data-unread={unread || undefined} className={cn('rounded-xl border', look.wrap)}>
-      <button type="button" aria-expanded={open} className="flex w-full items-start gap-3 rounded-xl p-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+    <article data-slot="notice-item" data-unread={unread || undefined} className="letter">
+      <button type="button" aria-expanded={open} className="flex w-full items-start gap-3 rounded-[inherit] p-3.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--letter-ink)]/40"
         onClick={() => {
           setOpen(!open)
           if (!open && unread) onOpen()
         }}>
-        <Icon aria-hidden className={cn('mt-0.5 h-4 w-4 shrink-0', look.iconCls)} />
+        <Icon aria-hidden className="letter-ink mt-0.5 h-4 w-4 shrink-0 opacity-80" />
         <span className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="flex items-center gap-2">
-            <span className={cn('min-w-0 text-sm [overflow-wrap:anywhere]', unread ? 'font-semibold' : 'font-medium')}>{notice.title || t('common:noticeUntitled')}</span>
-            {unread && <span data-slot="notice-unread" role="img" aria-label={t('common:noticeUnread')} className="h-2 w-2 shrink-0 rounded-full bg-destructive" />}
+            <span className={cn('letter-title min-w-0 text-[15px] leading-6 [overflow-wrap:anywhere]', unread ? 'font-semibold' : 'font-medium')}>{notice.title || t('common:noticeUntitled')}</span>
+            {unread && <span data-slot="notice-unread" role="img" aria-label={t('common:noticeUnread')} className="letter-seal" />}
           </span>
-          <span className="text-xs text-muted-foreground tabular-nums">{time(notice.updated_at)}</span>
-          {!open && <span className="line-clamp-2 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">{notice.body}</span>}
+          <span className="letter-muted text-xs tabular-nums">{time(notice.updated_at)}</span>
+          {!open && <span className="letter-muted line-clamp-2 text-xs leading-5 [overflow-wrap:anywhere]">{notice.body}</span>}
         </span>
-        <ChevronDown aria-hidden className={cn('mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')} />
+        <span className="flex shrink-0 items-start gap-2">
+          <Stamp level={notice.level} />
+          <ChevronDown aria-hidden className={cn('letter-muted mt-0.5 h-4 w-4 transition-transform', open && 'rotate-180')} />
+        </span>
       </button>
       {/* 正文保留换行：公告常是几条要点，一坨横排读不下去 */}
-      {open && <p className="px-3 pb-3 pl-10 text-sm leading-6 whitespace-pre-line [overflow-wrap:anywhere]">{notice.body}</p>}
+      {open && <div className="letter-fold mx-3.5 pt-1 pb-3.5">
+        <p className="letter-lines pl-7 text-sm leading-7 whitespace-pre-line [overflow-wrap:anywhere]">{notice.body}</p>
+      </div>}
     </article>
   )
 }
@@ -189,30 +194,28 @@ function NoticePopup({ pending, onRead }: { pending: Notice[]; onRead: (notice: 
   useEffect(() => { closeRef.current = close })
   useModalFocus(notice !== undefined, panel, popupButton, () => closeRef.current())
   if (!notice) return null
-  const look = tone(notice.level)
-  const Icon = look.icon
   const title = notice.title || t('common:noticeUntitled')
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <button type="button" aria-label={t('common:close')} className="absolute inset-0 bg-black/50 backdrop-blur-[2px] animate-fade-in" onClick={close} />
+      <button type="button" aria-label={t('common:close')} className="absolute inset-0 bg-black/45 backdrop-blur-[2px] animate-fade-in" onClick={close} />
+      {/* 一张信纸：信头（信箱图标、衬线标题、日期、印章）一道双线，正文在横格线上 */}
       <div ref={panel} role="dialog" aria-modal="true" aria-label={title} data-slot="notice-popup"
-        className="relative z-10 flex max-h-[min(36rem,calc(100dvh-2rem))] w-full max-w-lg flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-popover animate-zoom-in">
-        <div className="flex items-start gap-3">
-          <span className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-full border', look.wrap)}>
-            <Icon aria-hidden className={cn('h-4 w-4', look.iconCls)} />
-          </span>
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5 pt-0.5">
-            <h2 className="text-[15px] leading-6 font-semibold [overflow-wrap:anywhere]">{title}</h2>
-            <p className="text-xs text-muted-foreground tabular-nums">{time(notice.updated_at)}</p>
+        className="letter relative z-10 flex max-h-[min(36rem,calc(100dvh-2rem))] w-full max-w-lg flex-col gap-4 px-6 pt-5 pb-5 animate-zoom-in">
+        <div className="letter-rule flex items-start gap-3 pb-3">
+          <Mailbox aria-hidden className="letter-ink mt-1 h-5 w-5 shrink-0 opacity-75" />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <h2 className="letter-title text-lg leading-7 font-semibold [overflow-wrap:anywhere]">{title}</h2>
+            <p className="letter-muted text-xs tabular-nums">{time(notice.updated_at)}</p>
           </div>
-          <Button size="icon" variant="ghost" className="-mt-1 -mr-2 h-10 w-10 shrink-0" aria-label={t('common:close')} onClick={close}>
+          <span className="mt-1.5"><Stamp level={notice.level} /></span>
+          <Button size="icon" variant="ghost" className="letter-muted -mt-1 -mr-3 h-10 w-10 shrink-0 hover:bg-[var(--letter-ink)]/10 focus-visible:ring-[var(--letter-ink)]/40" aria-label={t('common:close')} onClick={close}>
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <p className="min-h-0 overflow-y-auto overscroll-contain text-sm leading-6 whitespace-pre-line [overflow-wrap:anywhere]">{notice.body}</p>
-        <div className="flex flex-wrap items-center justify-end gap-3">
-          {pending.length > 1 && <span className="mr-auto text-xs text-muted-foreground">{t('common:noticeMorePending', { count: pending.length - 1 })}</span>}
-          <Button data-primary className="min-h-11 px-5 sm:min-h-9" onClick={close}>{t('common:noticeGotIt')}</Button>
+        <p className="letter-lines min-h-0 overflow-y-auto overscroll-contain text-sm leading-7 whitespace-pre-line [overflow-wrap:anywhere]">{notice.body}</p>
+        <div className="flex flex-wrap items-center justify-end gap-3 pt-1">
+          {pending.length > 1 && <span className="letter-muted mr-auto text-xs">{t('common:noticeMorePending', { count: pending.length - 1 })}</span>}
+          <Button data-primary variant="ghost" className="letter-button min-h-11 px-5 focus-visible:ring-[var(--letter-ink)]/40 focus-visible:ring-offset-[var(--letter)] sm:min-h-9" onClick={close}>{t('common:noticeGotIt')}</Button>
         </div>
       </div>
     </div>,
@@ -220,17 +223,16 @@ function NoticePopup({ pending, onRead }: { pending: Notice[]; onRead: (notice: 
   )
 }
 
-/// 一条公告的展示（后台编辑时的预览用）：图标、标题和保留换行的正文，颜色随级别。
+/// 一条公告的展示（后台编辑时的预览用）：和用户看到的同一张信纸。
 export function NoticeMessage({ notice, className }: { notice: Pick<Notice, 'title' | 'body' | 'level'>; className?: string }) {
-  const look = tone(notice.level)
-  const Icon = look.icon
   return (
-    <div className={cn('flex min-w-0 items-start gap-3 rounded-lg border px-4 py-3 text-sm', look.wrap, className)}>
-      <Icon aria-hidden className={cn('mt-0.5 h-4 w-4 shrink-0', look.iconCls)} />
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5 [overflow-wrap:anywhere]">
-        {notice.title && <span className="font-medium">{notice.title}</span>}
-        <p className="whitespace-pre-line text-muted-foreground">{notice.body}</p>
+    <div className={cn('letter flex min-w-0 flex-col gap-2 px-4 pt-3 pb-3.5', className)}>
+      <div className="letter-rule flex items-start gap-3 pb-2">
+        <Mailbox aria-hidden className="letter-ink mt-0.5 h-4 w-4 shrink-0 opacity-75" />
+        <span className="letter-title min-w-0 flex-1 text-[15px] leading-6 font-semibold [overflow-wrap:anywhere]">{notice.title}</span>
+        <Stamp level={notice.level} />
       </div>
+      <p className="letter-lines text-sm leading-7 whitespace-pre-line [overflow-wrap:anywhere]">{notice.body}</p>
     </div>
   )
 }

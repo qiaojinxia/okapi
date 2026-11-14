@@ -173,6 +173,18 @@
   --note-strip: oklch(0.955 0.026 90);
   --note-fold: oklch(0.925 0.04 88);
   --note-shadow: oklch(0.38 0.04 70);
+  /* 信纸：站点公告（components/notice-center.tsx）。和便签同一个纸面家族，但更白一点、更安静——
+     便签是贴上去的黄色小纸片，信纸是象牙色的一整张；边线、横格线、印章都是暖褐色的墨，不用主色蓝 */
+  --letter: oklch(0.986 0.011 88);
+  --letter-fg: oklch(0.27 0.02 65);
+  --letter-muted: oklch(0.5 0.022 65);
+  --letter-border: oklch(0.875 0.024 82);
+  --letter-rule: oklch(0.915 0.02 82);
+  --letter-ink: oklch(0.42 0.06 55);
+  --letter-shadow: oklch(0.38 0.04 70);
+  --letter-stamp-warning: oklch(0.55 0.12 62);
+  --letter-seal: oklch(0.52 0.17 27);
+  --letter-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.36  0 0 0 0 0.27  0 0 0 0 0.17  0.42 0 0 0 -0.16'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   --sidebar: oklch(0.974 0.004 85);
   --sidebar-fg: oklch(0.3 0.01 70);
   --sidebar-accent: oklch(0.94 0.006 85);
@@ -210,6 +222,17 @@
   --note-strip: oklch(0.355 0.02 88);
   --note-fold: oklch(0.42 0.03 88);
   --note-shadow: oklch(0 0 0);
+  /* 暗色下的信纸：暖调深纸，比卡片亮一档；墨色反过来是浅的 */
+  --letter: oklch(0.255 0.012 80);
+  --letter-fg: oklch(0.93 0.01 85);
+  --letter-muted: oklch(0.72 0.015 80);
+  --letter-border: oklch(0.37 0.022 80);
+  --letter-rule: oklch(0.305 0.014 80);
+  --letter-ink: oklch(0.8 0.05 75);
+  --letter-shadow: oklch(0 0 0);
+  --letter-stamp-warning: oklch(0.78 0.11 75);
+  --letter-seal: oklch(0.64 0.17 27);
+  --letter-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 0.95  0 0 0 0 0.86  0.22 0 0 0 -0.085'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
   --sidebar: oklch(0.185 0.015 260);
   --sidebar-fg: oklch(0.8 0.008 255);
   --sidebar-accent: oklch(0.27 0.018 260);
@@ -334,6 +357,85 @@
       calc(100% - var(--note-curl)) 100%,
       0 100%
     );
+  }
+
+  /* 信纸：公告的弹窗、列表里的每一封、后台的预览。一张象牙色的纸：极淡的纸纹、暖褐细边、两层很浅的投影；
+     标题用衬线体（.letter-title），正文落在横格线上（.letter-lines），信头下面一道双线（.letter-rule）。
+     级别不靠底色区分：提醒 / 重大是右上角一枚斜着盖的墨色印章（.letter-stamp），普通通知不盖章；
+     没看过的那封封口上有一枚火漆（.letter-seal）。 */
+  .letter {
+    position: relative;
+    color: var(--letter-fg);
+    background-color: var(--letter);
+    background-image: var(--letter-grain);
+    border: 1px solid var(--letter-border);
+    border-radius: 0.375rem;
+    box-shadow:
+      0 1px 1px color-mix(in oklch, var(--letter-shadow) 10%, transparent),
+      0 12px 24px -16px color-mix(in oklch, var(--letter-shadow) 50%, transparent);
+  }
+  .letter-muted {
+    color: var(--letter-muted);
+  }
+  .letter-ink {
+    color: var(--letter-ink);
+  }
+  .letter-title {
+    font-family: ui-serif, "Songti SC", "STSong", "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+    letter-spacing: 0.01em;
+  }
+  .letter-rule {
+    border-bottom: 3px double color-mix(in oklch, var(--letter-ink) 28%, transparent);
+  }
+  .letter-fold {
+    border-top: 1px dashed color-mix(in oklch, var(--letter-ink) 30%, transparent);
+  }
+  /* 横格线：每行一条，跟着正文滚动；线落在 content-box 上，内边距不会把它错开半行。
+     行高要和 --letter-line 相同：用的地方带上 leading-7（text-sm 这类字号工具类会顺带改行高，组件层压不过它） */
+  .letter-lines {
+    --letter-line: 1.75rem;
+    background-image: linear-gradient(to bottom, transparent calc(var(--letter-line) - 1px), var(--letter-rule) calc(var(--letter-line) - 1px));
+    background-size: 100% var(--letter-line);
+    background-origin: content-box;
+    background-attachment: local;
+  }
+  .letter-stamp {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    border: 1.5px solid currentColor;
+    border-radius: 0.25rem;
+    padding: 0 0.4rem;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.125rem;
+    letter-spacing: 0.14em;
+    transform: rotate(-6deg);
+    opacity: 0.82;
+  }
+  .letter-stamp[data-level="warning"] {
+    color: var(--letter-stamp-warning);
+  }
+  .letter-stamp[data-level="critical"] {
+    color: var(--letter-seal);
+  }
+  .letter-seal {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 9999px;
+    background: radial-gradient(circle at 35% 30%, color-mix(in oklch, var(--letter-seal) 55%, white), var(--letter-seal) 62%);
+    box-shadow: 0 1px 1px color-mix(in oklch, var(--letter-shadow) 30%, transparent);
+  }
+  /* 信纸上的按钮：墨色描边，不用主色蓝 */
+  .letter-button {
+    border: 1px solid color-mix(in oklch, var(--letter-ink) 45%, transparent);
+    background: color-mix(in oklch, var(--letter-ink) 6%, transparent);
+    color: var(--letter-fg);
+  }
+  .letter-button:hover {
+    background: color-mix(in oklch, var(--letter-ink) 12%, transparent);
   }
 }
 

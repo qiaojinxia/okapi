@@ -69,6 +69,8 @@ export default {
     noticeUnread: '未读',
     noticeGotIt: '我知道了',
     noticeMorePending: '还有 {{count}} 条',
+    noticeStamp_warning: '提醒',
+    noticeStamp_critical: '重要',
     appName: 'Okapi',
     login: '登录',
     logout: '退出登录',

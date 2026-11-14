@@ -69,6 +69,8 @@ export default {
     noticeUnread: 'Unread',
     noticeGotIt: 'Got it',
     noticeMorePending: '{{count}} more',
+    noticeStamp_warning: 'Heads-up',
+    noticeStamp_critical: 'Urgent',
     appName: 'Okapi',
     login: 'Sign in',
     logout: 'Sign out',
