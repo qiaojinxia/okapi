@@ -109,7 +109,7 @@ pub(super) async fn require_session(
     headers: &HeaderMap,
 ) -> Result<i64, AppError> {
     let sid = session_id(headers)
-        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
+        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::SESSION_REQUIRED))?;
     session_user(state, &sid).await
 }
 
@@ -122,7 +122,7 @@ pub(super) async fn session_user(state: &AppState, sid: &str) -> Result<i64, App
 fn session_outcome(checked: Result<Option<i64>, fred::error::Error>) -> Result<i64, AppError> {
     match checked {
         Ok(Some(user_id)) => Ok(user_id),
-        Ok(None) => Err(AppError::unauthorized(okapi_api::codes::INVALID_API_KEY)),
+        Ok(None) => Err(AppError::unauthorized(okapi_api::codes::SESSION_EXPIRED)),
         Err(error) => {
             tracing::error!(%error, "web session store unreachable");
             Err(AppError::new(
@@ -178,16 +178,17 @@ fn session_hash(sid: &str) -> String {
 
 #[cfg(test)]
 mod session_outcome_tests {
-    use super::session_outcome;
-    use axum::http::StatusCode;
+    use super::{session_id, session_outcome};
+    use axum::http::{HeaderMap, StatusCode};
 
-    /// 会话不存在是 401，会话存储不可达是 503：前端把 401 当「登录失效」踢回登录页，
-    /// Redis 抖一下不能让全站用户都被登出。
+    /// 会话不存在是 401 `session_expired`（不混用 `invalid_api_key`），会话存储不可达是 503。
     #[test]
     fn a_dead_session_is_401_and_an_unreachable_store_is_503() {
         assert_eq!(session_outcome(Ok(Some(7))).unwrap(), 7);
         let gone = session_outcome(Ok(None)).unwrap_err();
         assert_eq!(gone.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(gone.code, okapi_api::codes::SESSION_EXPIRED);
+        assert!(session_id(&HeaderMap::new()).is_none());
         let down = session_outcome(Err(fred::error::Error::new(
             fred::error::ErrorKind::IO,
             "connection refused",

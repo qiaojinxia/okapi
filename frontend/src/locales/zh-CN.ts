@@ -1476,6 +1476,8 @@ export default {
     key_copy_session_mismatch: '登录会话与当前账号不一致，请重新登录所属账号。',
     invalid_api_key: 'API Key 无效',
     key_disabled: 'Key 已停用或过期',
+    session_required: '此操作需要邮箱密码登录会话',
+    session_expired: '登录会话已过期，请重新登录',
     current_key_in_use: '这把密钥是当前登录正在使用的，不能删除或停用',
     permission_denied: '没有本操作的权限',
     insufficient_quota: '余额不足',

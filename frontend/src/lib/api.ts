@@ -1,6 +1,7 @@
 // API client：Bearer key 鉴权；后端只回 error_code + param（i18n 红线），
 // 文案渲染在 errors 命名空间完成。
 
+import { KEY_REVOKED_CODES, SESSION_AUTH_CODES } from '@/lib/contracts.gen'
 import { readLocal, rememberLocal } from '@/lib/storage'
 
 const KEY_STORAGE = 'okapi.key'
@@ -28,7 +29,6 @@ export function registerAuthExpired(handler: () => void): () => void {
   authExpiredHandlers.add(handler)
   return () => authExpiredHandlers.delete(handler)
 }
-const KEY_REVOKED_CODES = new Set(['invalid_api_key', 'key_disabled'])
 let verifyingKey: Promise<unknown> | null = null
 
 export function getLoginMode(): 'account' | 'key' | null {
@@ -105,9 +105,15 @@ export async function apiFetch<T>(
     }
     // 只认用存着的登录 key 发出、且它此刻仍是当前 key 的请求：显式传 key 的探测（粘贴 key 登录）不算；
     // 回调清掉 key 之后 getKey() 就变了，同时失败的其余请求不再重复触发。
-    // 会话类接口（复制完整 key、两步验证、资料）缺网页会话时也回 invalid_api_key，那时 key 本身是好的：
-    // 只有 /api/me（纯按 key 鉴权）失败才算 key 失效，其余接口先用它复核一次。
-    if (resp.status === 401 && KEY_REVOKED_CODES.has(code) && init?.key === undefined && key !== null && key === getKey()) {
+    // Missing or expired web session never implies the stored API key is revoked; skip /api/me probes.
+    if (
+      resp.status === 401 &&
+      !SESSION_AUTH_CODES.has(code) &&
+      KEY_REVOKED_CODES.has(code) &&
+      init?.key === undefined &&
+      key !== null &&
+      key === getKey()
+    ) {
       if (path.split('?')[0] === '/api/me') {
         for (const handler of authExpiredHandlers) handler()
       } else if (verifyingKey === null && authExpiredHandlers.size > 0) {

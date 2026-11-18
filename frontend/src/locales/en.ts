@@ -1483,6 +1483,8 @@ export default {
     key_copy_session_mismatch: 'The login session does not match the current account. Sign in to the owning account again.',
     invalid_api_key: 'Invalid API key',
     key_disabled: 'Key disabled or expired',
+    session_required: 'This action requires an email/password login session',
+    session_expired: 'Login session expired; please sign in again',
     current_key_in_use: 'This key signs in your current session, so it cannot be deleted or disabled',
     permission_denied: 'Permission denied',
     insufficient_quota: 'Insufficient balance',

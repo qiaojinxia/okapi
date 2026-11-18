@@ -6,6 +6,7 @@
 //! - 错误响应只携带 error_code（message 字段同置为 code，不含自然语言）。
 
 pub mod chat;
+pub mod contracts;
 pub mod error;
 pub mod permissions;
 mod token_usage;

@@ -21,6 +21,20 @@ def command(args, **kwargs):
     return subprocess.run(args, check=True, text=True, **kwargs)
 
 
+def list_suite_modules(executable):
+    out = subprocess.check_output([executable, "--list", "--format=terse"], cwd=ROOT, text=True)
+    mods = set()
+    for line in out.splitlines():
+        if not line.endswith(": test"):
+            continue
+        test_name = line[:-6]
+        mods.add(test_name.split("::", 1)[0] if "::" in test_name else test_name)
+    return sorted(mods)
+
+
+PURE_IT = {"api_it", "pricing_it", "providers_it"}
+
+
 def run():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--services", action="store_true", help="use explicitly opted-in CI services")
@@ -39,6 +53,8 @@ def run():
         parser.error("--shard requires 0 <= INDEX < COUNT <= 16")
     tag = uuid.uuid4().hex[:12]
     owned = {}
+    template_db = None
+    sql = None
     environment = os.environ.copy()
     environment["SQLX_OFFLINE"] = "true"
     environment["OKAPI_TEST_ISOLATED"] = "1"
@@ -125,14 +141,54 @@ def run():
         spec = importlib.util.spec_from_file_location("nats_reset", ROOT / "scripts/nats-reset-stream.py")
         reset = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(reset)
-        for index, (executable, target) in enumerate(sorted(suites.items())):
-            if index % shard_count != shard_index: continue
-            if options.match and options.match not in target: continue
-            if options.list:
-                print(target)
-                continue
+        all_units = []
+        for executable, target in sorted(suites.items(), key=lambda kv: (kv[1], kv[0])):
+            if target in PURE_IT:
+                if not options.match or options.match in target:
+                    all_units.append((target, executable, None))
+                else:
+                    for mod_name in list_suite_modules(executable):
+                        all_units.append((mod_name, executable, f"{mod_name}::"))
+            elif target.endswith("_it"):
+                for mod_name in list_suite_modules(executable):
+                    all_units.append((mod_name, executable, f"{mod_name}::"))
+            else:
+                all_units.append((target, executable, None))
+
+        selected = [
+            (index, unit)
+            for index, unit in enumerate(all_units)
+            if index % shard_count == shard_index and (not options.match or options.match in unit[0])
+        ]
+        if options.list:
+            for _, (display_name, _, _) in selected:
+                print(display_name)
+            return 0
+
+        if selected:
+            store_exe = next((exe for exe, name in suites.items() if name == "store_it"), None)
+            if not store_exe:
+                raise RuntimeError("store_it executable not built; cannot seed template database")
+            template_db = f"okapi_test_template_{tag}"
+            sql(f'CREATE DATABASE "{template_db}"')
+            seed_env = environment.copy()
+            seed_env["DATABASE_URL"] = urlunparse(admin._replace(path="/" + template_db))
+            seed = subprocess.run(
+                [store_exe, "migrations::seed_isolated_template_database", "--exact", "--test-threads=1"],
+                cwd=ROOT,
+                env=seed_env,
+                stdout=subprocess.DEVNULL,
+            )
+            if seed.returncode:
+                raise RuntimeError(f"failed to seed template database (exit {seed.returncode})")
+            sql(
+                f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname = '{template_db}' AND pid <> pg_backend_pid()"
+            )
+
+        for index, (display_name, executable, filter_prefix) in selected:
             database = f"okapi_test_{tag}_{index}"
-            sql(f'CREATE DATABASE "{database}"')
+            sql(f'CREATE DATABASE "{database}" TEMPLATE "{template_db}"')
             suite_env = environment.copy()
             suite_env["DATABASE_URL"] = urlunparse(admin._replace(path="/" + database))
             redis = (["docker", "exec", owned["redis"], "redis-cli", "-n", "3"] if owned else
@@ -140,13 +196,14 @@ def run():
             command([*redis, "FLUSHDB"], stdout=subprocess.DEVNULL)
             ch_request(data=b"DROP DATABASE IF EXISTS okapi")
             reset.reset(environment["OKAPI_NATS_URL"])
-            print(f"\nRunning {target} ({executable})", flush=True)
+            print(f"\nRunning {display_name} ({executable})", flush=True)
+            cmd = [executable, *([filter_prefix] if filter_prefix else []), "--test-threads=1", "--nocapture"]
             try:
-                result = subprocess.run([executable, "--test-threads=1", "--nocapture"], cwd=ROOT, env=suite_env, timeout=options.timeout_secs)
-                if result.returncode: failures.append(target)
+                result = subprocess.run(cmd, cwd=ROOT, env=suite_env, timeout=options.timeout_secs)
+                if result.returncode: failures.append(display_name)
             except subprocess.TimeoutExpired:
-                print(f"Suite timed out after {options.timeout_secs}s: {target}", flush=True)
-                failures.append(target + " (timeout)")
+                print(f"Suite timed out after {options.timeout_secs}s: {display_name}", flush=True)
+                failures.append(display_name + " (timeout)")
             finally:
                 sql(f'DROP DATABASE "{database}" WITH (FORCE)')
         if not options.match and not options.list and shard_index == 0:
@@ -155,6 +212,11 @@ def run():
         print(f"Isolated shard {shard_index}/{shard_count} suite failures:", failures, flush=True)
         return int(bool(failures))
     finally:
+        if sql and template_db:
+            try:
+                sql(f'DROP DATABASE IF EXISTS "{template_db}" WITH (FORCE)')
+            except Exception:
+                pass
         for name in owned.values():
             # -v: also drop the anonymous volumes the images declare; without it every run leaves a few behind
             subprocess.run(["docker", "rm", "-fv", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

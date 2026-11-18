@@ -1,0 +1,43 @@
+//! Consolidated integration test binary for `okapi-console`.
+#![allow(clippy::duplicate_mod)]
+
+pub mod channel_key_lifecycle;
+pub mod console_audit;
+pub mod console_auth_web;
+pub mod console_channel_test;
+pub mod console_channel_writes;
+pub mod console_cloud_probe;
+pub mod console_diagnose;
+pub mod console_import;
+pub mod console_key_copy;
+pub mod console_m2;
+pub mod console_malformed_ids;
+pub mod console_manage;
+pub mod console_mcp;
+pub mod console_mcp_write;
+pub mod console_model_catalog;
+pub mod console_oauth;
+pub mod console_oauth_presets;
+pub mod console_playground;
+pub mod console_portal_pages;
+pub mod console_pricing_catalog;
+pub mod console_pricing_write;
+pub mod console_profile;
+pub mod console_ratio_sync;
+pub mod console_setup;
+pub mod console_spa_navigation;
+pub mod console_ssrf;
+pub mod console_teams;
+pub mod console_turnstile;
+pub mod console_visibility;
+pub mod console_write_receipts;
+pub mod gateway_group_rate;
+pub mod gateway_ip_allowlist;
+pub mod gateway_key_admission;
+pub mod gateway_pricing_rules;
+pub mod gateway_upstream_cost;
+pub mod list_pagination;
+pub mod portal_ownership;
+pub mod pricing_base;
+pub mod pricing_publication;
+pub mod route_error_envelope;

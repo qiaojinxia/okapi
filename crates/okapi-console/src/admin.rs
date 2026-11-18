@@ -39,14 +39,8 @@ pub(crate) use self::channel_probe::probe_channel;
 pub use self::channel_probe::{
     DraftModelsReq, TestChannelReq, fetch_channel_models, fetch_draft_models, test_channel,
 };
-pub(super) use self::channel_settings::{
-    ensure_account_control, ensure_azure_api_base, validate_channel_settings,
-};
-use self::channel_settings::{
-    ensure_request_extensions, ensure_settings_api_version, ensure_settings_balance,
-    ensure_settings_mimic, ensure_settings_oauth_token_url, ensure_settings_outbound,
-    ensure_settings_tool_loss_policy,
-};
+use self::channel_settings::ensure_request_extensions;
+pub(super) use self::channel_settings::{ensure_azure_api_base, validate_channel_settings};
 pub use self::channels::{
     ChannelUsageQuery, CreateChannelReq, PatchChannelKeyReq, PatchChannelReq, PoolMemberReq,
     RotateCredentialReq, SetPoolsReq, SetStatusReq, channel_providers, channel_usage,

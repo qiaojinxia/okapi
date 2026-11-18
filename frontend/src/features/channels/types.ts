@@ -1,5 +1,30 @@
 import type { PoolMember } from '@/features/pools/types'
 import type { EgressBinding } from '@/features/proxies/types'
+import {
+  TOOL_LOSS_POLICIES,
+  type AccountControl,
+  type ChannelExtensions,
+  type ChannelSettings,
+  type ChannelSettingsPatch,
+  type ClientProfile,
+  type CodexClientGate,
+  type LocalPeriod,
+  type LowBalanceRule,
+  type ToolLossPolicy,
+} from '@/lib/contracts.gen'
+
+export {
+  TOOL_LOSS_POLICIES,
+  type AccountControl,
+  type ChannelExtensions,
+  type ChannelSettings,
+  type ChannelSettingsPatch,
+  type ClientProfile,
+  type CodexClientGate,
+  type LocalPeriod,
+  type LowBalanceRule,
+  type ToolLossPolicy,
+}
 
 /// 渠道协议：决定请求如何被转换后送往上游（见 §4.4 四象限）。
 /// `openai` = 官方 OpenAI（/v1/responses 缺省直转）；`openai_compat` = 一切 OpenAI 兼容上游
@@ -125,74 +150,6 @@ export interface ChannelKeyRow {
 
 
 
-/// 渠道行为开关。后端只认这几个键，故前端用具名字段而非任意 JSON——
-/// 用户不该去猜有哪些键可填、值是什么类型。
-export interface ChannelSettings {
-  account_control?: AccountControl
-  thinking_to_content: boolean
-  bill_by_response_model: boolean
-  strip_request_fields: string[]
-  /// `/v1/responses` 是否同方言直转到该渠道；undefined = 跟随协议缺省
-  /// （openai 直转 / openai_compat 降级）。只对说 OpenAI 方言的渠道有意义。
-  responses_native?: boolean
-  /// 跨方言转换会丢工具时怎么办；undefined = 后端缺省 `safe`（丢托管工具、拒客户端工具）。
-  tool_loss_policy?: ToolLossPolicy
-  /// Azure 数据面 api-version（`YYYY-MM-DD[-preview]`）；undefined = 后端缺省。只对 azure 有意义。
-  api_version?: string
-  /// Bedrock SigV4 区域覆写；undefined = 从 api_base 主机名解析。只对 bedrock 有意义。
-  aws_region?: string
-  /// 额外请求头（对象）。鉴权 / Host / 逐跳头后端会拒。
-  extra_headers?: Record<string, string>
-  /// 强制写入请求顶层的字段。model / messages / stream / provider 后端会拒。
-  inject_request_fields?: Record<string, unknown>
-  extensions?: {
-    client_profile?: { name: 'native' } | {
-      name: 'claude-code'
-      mode: 'auto' | 'passthrough' | 'mimic'
-      /** Server-normalized; omitted means the latest client the server implements. */
-      revision?: string
-      entrypoint?: 'cli' | 'sdk-cli'
-      request_class?: 'main' | 'auxiliary'
-      /** Only the real Claude Code client is routed here; other clients skip the channel. */
-      native_only?: boolean
-    }
-    /** Codex 渠道只接官方客户端（可带版本窗口）；其它客户端跳过这个渠道。 */
-    codex_client?: CodexClientGate
-  }
-}
-
-export interface CodexClientGate {
-  official_only?: boolean
-  /** `x.y.z`，含；缺省不限。 */
-  min_version?: string
-  max_version?: string
-}
-
-/** `total` never resets; the others are calendar periods in the server's timezone. */
-export type LocalPeriod = 'total' | 'day' | 'week' | 'month'
-
-export interface AccountControl {
-  /** Historical local caps are read for the retirement notice and removed on save. */
-  usage?: { period?: 'hour' | 'day' | 'week' | 'month'; requests?: number | null; tokens?: number | null; cost_micro?: number | null }
-  quota_aware: boolean
-  quota_threshold_pct: number
-  /** Upstream window seconds mapped to independently configured percentages. */
-  quota_limits?: Record<string, number>
-  /** Keep lines for sessions whose prompt cache is still warm; new placements use `quota_limits`. */
-  quota_keep_limits?: Record<string, number>
-  /** Request-level quota forecast: `shadow` (default) only records diagnostics, `enforce` excludes accounts a cold start would push over the line. */
-  quota_forecast?: 'off' | 'shadow' | 'enforce'
-  /** Cap on the input plus output tokens this channel has on record. Any channel can set it. */
-  local_tokens?: { cap: number; period?: LocalPeriod } | null
-  /** Cap on the upstream cost this channel has on record, in micro-USD. Any channel can set it. */
-  local_cost?: { cap_micro: number; period?: LocalPeriod } | null
-  rate_limit_cooldown_secs: number
-  failure_threshold: number
-  failure_cooldown_secs: number
-  refresh_mode: 'managed' | 'external'
-  refresh_margin_secs: number
-}
-
 export function channelSettingsForSave(settings: ChannelSettings): ChannelSettings {
   if (!settings.account_control) return settings
   const { usage: _retired, ...account_control } = settings.account_control
@@ -250,9 +207,6 @@ export interface ChannelRow {
 }
 
 
-
-export const TOOL_LOSS_POLICIES = ['safe', 'strict', 'allow'] as const
-export type ToolLossPolicy = (typeof TOOL_LOSS_POLICIES)[number]
 
 export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSettings {
   // settings.proxy_url 已退役（§11.41 出口绑定）：残留值不能被抽屉整体回写（后端会 400）

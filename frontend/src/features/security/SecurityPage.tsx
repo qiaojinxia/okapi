@@ -13,6 +13,7 @@ import { ActiveSessionsCard } from './ActiveSessionsCard'
 import { RecentLoginsCard } from './RecentLoginsCard'
 import { toast } from '@/components/ui/toast'
 import { ApiError, apiFetch } from '@/lib/api'
+import { ERROR_CODES, SESSION_AUTH_CODES } from '@/lib/contracts.gen'
 import { describeError } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 
@@ -41,7 +42,11 @@ export function SecurityPage() {
   const [needSession, setNeedSession] = useState(false)
 
   const fail = (err: unknown) => {
-    if (err instanceof ApiError && err.status === 401 && err.code === 'invalid_api_key') {
+    if (
+      err instanceof ApiError &&
+      err.status === 401 &&
+      (SESSION_AUTH_CODES.has(err.code) || err.code === ERROR_CODES.INVALID_API_KEY)
+    ) {
       setNeedSession(true)
       return
     }

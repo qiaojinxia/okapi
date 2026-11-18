@@ -1,10 +1,8 @@
 //! 渠道管理：创建 / 列表 / 改 / 删、启停与池归属、key 调度参数、凭证轮换、用量。
 use super::super::query::{PageQuery, Query};
 use super::{
-    audit, ensure_account_control, ensure_azure_api_base, ensure_channel_owner,
-    ensure_request_extensions, ensure_settings_api_version, ensure_settings_balance,
-    ensure_settings_mimic, ensure_settings_oauth_token_url, ensure_settings_outbound,
-    ensure_settings_tool_loss_policy, guard_scoped,
+    audit, ensure_azure_api_base, ensure_channel_owner, ensure_request_extensions, guard_scoped,
+    validate_channel_settings,
 };
 use axum::Json;
 use axum::extract::State;
@@ -486,6 +484,9 @@ pub struct PatchChannelReq {
     /// channels.settings 整体覆盖（对象）。
     #[serde(default)]
     pub settings: Option<Value>,
+    /// channels.settings 字段级增量补丁（对象；与 settings 互斥，`null` 表示删除该键）。
+    #[serde(default)]
+    pub settings_patch: Option<Value>,
     /// 能力声明（tools/vision），驱动能力感知路由。
     #[serde(default)]
     pub capabilities: Option<Value>,
@@ -520,14 +521,13 @@ pub async fn update_channel(
     if let Some(api_base) = &req.api_base {
         okapi_kernel::ssrf::validate_upstream_base(&state.pg, api_base).await?;
     }
-    ensure_settings_api_version(req.settings.as_ref())?;
-    ensure_settings_outbound(req.settings.as_ref())?;
-    ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
-    ensure_settings_mimic(req.settings.as_ref())?;
-    ensure_settings_tool_loss_policy(req.settings.as_ref())?;
-    ensure_settings_balance(req.settings.as_ref())?;
-    ensure_account_control(req.settings.as_ref())?;
-    if req.provider.is_some() || req.settings.is_some() {
+    if req.settings.is_some() && req.settings_patch.is_some() {
+        return Err(AppError::bad_request().with_param("settings_patch"));
+    }
+    if req.settings.as_ref().is_some_and(|v| !v.is_object()) {
+        return Err(AppError::bad_request().with_param("settings"));
+    }
+    if req.provider.is_some() || req.settings.is_some() || req.settings_patch.is_some() {
         let (current_provider, current_settings): (String, Value) = sqlx::query_as(
             "SELECT provider, settings FROM channels WHERE id=$1 AND deleted_at IS NULL",
         )
@@ -536,10 +536,30 @@ pub async fn update_channel(
         .await
         .map_err(okapi_store::StoreError::from)?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
-        ensure_request_extensions(
-            req.provider.as_deref().unwrap_or(&current_provider),
-            Some(req.settings.as_ref().unwrap_or(&current_settings)),
-        )?;
+
+        if let Some(patch) = req.settings_patch.take() {
+            let merged =
+                okapi_api::contracts::merge_channel_settings_patch(&current_settings, &patch)
+                    .map_err(|param| AppError::bad_request().with_param(param))?;
+            req.settings = Some(merged);
+        } else if let Some(Value::Object(ref mut map)) = req.settings {
+            if map.get("oauth_token_url").is_some_and(Value::is_null) {
+                map.remove("oauth_token_url");
+            } else if !map.contains_key("oauth_token_url")
+                && let Some(url) = current_settings
+                    .get("oauth_token_url")
+                    .filter(|v| !v.is_null())
+            {
+                map.insert("oauth_token_url".into(), url.clone());
+            }
+        }
+
+        let effective_provider = req.provider.as_deref().unwrap_or(&current_provider);
+        if req.settings.is_some() {
+            validate_channel_settings(&state, effective_provider, req.settings.as_ref()).await?;
+        } else {
+            ensure_request_extensions(effective_provider, Some(&current_settings))?;
+        }
     }
 
     // 空地址已被上面的 SSRF 校验拦下（scheme 不合法）。要地址的三家（azure / bedrock / vertex）：

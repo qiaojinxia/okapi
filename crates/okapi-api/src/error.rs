@@ -7,6 +7,10 @@ use serde::Serialize;
 pub mod codes {
     pub const INVALID_API_KEY: &str = "invalid_api_key";
     pub const KEY_DISABLED: &str = "key_disabled";
+    /// 当前操作要求浏览器携带有效的邮箱/密码登录会话 Cookie，但请求未带会话 Cookie。
+    pub const SESSION_REQUIRED: &str = "session_required";
+    /// 请求携带的网页登录会话已失效（已登出、被踢下线或过期）。
+    pub const SESSION_EXPIRED: &str = "session_expired";
     /// 要删除 / 停用的正是这次请求自己用的 key（网页登录换来的那把或粘贴登录的那把）：
     /// 删了当前会话立刻失效，只能换一把 key 登录后再处理。
     pub const CURRENT_KEY_IN_USE: &str = "current_key_in_use";
@@ -56,6 +60,88 @@ pub mod codes {
     pub const OVERLOADED: &str = "overloaded";
     /// 登录 key 要核对所属登录会话，但会话存储（Redis）暂不可达：服务端故障，不是凭证无效，稍后重试。
     pub const AUTH_BACKEND_UNAVAILABLE: &str = "auth_backend_unavailable";
+
+    /// 需要网页登录会话的操作缺少/失效会话时返回的错误码（不代表 Bearer API Key 失效）。
+    pub const SESSION_AUTH: &[&str] = &[SESSION_REQUIRED, SESSION_EXPIRED];
+
+    /// Bearer API Key 已吊销/停用/无效的错误码（前端收到后清本地登录态回登录页）。
+    pub const KEY_REVOKED: &[&str] = &[INVALID_API_KEY, KEY_DISABLED];
+
+    /// `(Rust 常量名, 线缆 error_code)` 全集，供 TypeScript 契约代码生成使用。
+    pub const NAMED: &[(&str, &str)] = &[
+        ("INVALID_API_KEY", INVALID_API_KEY),
+        ("KEY_DISABLED", KEY_DISABLED),
+        ("SESSION_REQUIRED", SESSION_REQUIRED),
+        ("SESSION_EXPIRED", SESSION_EXPIRED),
+        ("CURRENT_KEY_IN_USE", CURRENT_KEY_IN_USE),
+        ("MODEL_NOT_ALLOWED", MODEL_NOT_ALLOWED),
+        ("MODEL_NOT_FOUND", MODEL_NOT_FOUND),
+        ("INSUFFICIENT_QUOTA", INSUFFICIENT_QUOTA),
+        ("RATE_LIMITED", RATE_LIMITED),
+        ("NO_AVAILABLE_CHANNEL", NO_AVAILABLE_CHANNEL),
+        ("UNSUPPORTED_ENDPOINT", UNSUPPORTED_ENDPOINT),
+        ("EMPTY_COMPLETION", EMPTY_COMPLETION),
+        ("CLIENT_CLOSED_REQUEST", CLIENT_CLOSED_REQUEST),
+        ("UPSTREAM_ERROR", UPSTREAM_ERROR),
+        ("UPSTREAM_TIMEOUT", UPSTREAM_TIMEOUT),
+        ("BAD_REQUEST", BAD_REQUEST),
+        ("INTERNAL_ERROR", INTERNAL_ERROR),
+        ("STATS_DISABLED", STATS_DISABLED),
+        ("PERMISSION_DENIED", PERMISSION_DENIED),
+        ("MEMBER_LIMIT_EXCEEDED", MEMBER_LIMIT_EXCEEDED),
+        ("KEY_QUOTA_EXCEEDED", KEY_QUOTA_EXCEEDED),
+        ("NOT_FOUND", NOT_FOUND),
+        ("GROUP_NOT_SELECTABLE", GROUP_NOT_SELECTABLE),
+        ("GROUP_NOT_PUBLISHED", GROUP_NOT_PUBLISHED),
+        ("IP_NOT_ALLOWED", IP_NOT_ALLOWED),
+        ("RECONCILE_UNSTABLE", RECONCILE_UNSTABLE),
+        ("PRICE_ABOVE_MAX", PRICE_ABOVE_MAX),
+        ("SERVER_TOOL_UNPRICED", SERVER_TOOL_UNPRICED),
+        ("TOOL_CONVERSION_UNSUPPORTED", TOOL_CONVERSION_UNSUPPORTED),
+        ("CLAUDE_CODE_CLIENT_REQUIRED", CLAUDE_CODE_CLIENT_REQUIRED),
+        ("CODEX_CLIENT_REQUIRED", CODEX_CLIENT_REQUIRED),
+        ("MARGIN_BLOCKED", MARGIN_BLOCKED),
+        ("OVERLOADED", OVERLOADED),
+        ("AUTH_BACKEND_UNAVAILABLE", AUTH_BACKEND_UNAVAILABLE),
+    ];
+
+    /// 全部稳定错误码列表（与 `NAMED` 一一对应）。
+    pub const ALL: &[&str] = &[
+        INVALID_API_KEY,
+        KEY_DISABLED,
+        SESSION_REQUIRED,
+        SESSION_EXPIRED,
+        CURRENT_KEY_IN_USE,
+        MODEL_NOT_ALLOWED,
+        MODEL_NOT_FOUND,
+        INSUFFICIENT_QUOTA,
+        RATE_LIMITED,
+        NO_AVAILABLE_CHANNEL,
+        UNSUPPORTED_ENDPOINT,
+        EMPTY_COMPLETION,
+        CLIENT_CLOSED_REQUEST,
+        UPSTREAM_ERROR,
+        UPSTREAM_TIMEOUT,
+        BAD_REQUEST,
+        INTERNAL_ERROR,
+        STATS_DISABLED,
+        PERMISSION_DENIED,
+        MEMBER_LIMIT_EXCEEDED,
+        KEY_QUOTA_EXCEEDED,
+        NOT_FOUND,
+        GROUP_NOT_SELECTABLE,
+        GROUP_NOT_PUBLISHED,
+        IP_NOT_ALLOWED,
+        RECONCILE_UNSTABLE,
+        PRICE_ABOVE_MAX,
+        SERVER_TOOL_UNPRICED,
+        TOOL_CONVERSION_UNSUPPORTED,
+        CLAUDE_CODE_CLIENT_REQUIRED,
+        CODEX_CLIENT_REQUIRED,
+        MARGIN_BLOCKED,
+        OVERLOADED,
+        AUTH_BACKEND_UNAVAILABLE,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,5 +174,29 @@ impl ErrorBody {
                 request_id,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codes::{ALL, NAMED};
+
+    #[test]
+    fn all_error_codes_are_unique_and_complete() {
+        let mut sorted = ALL.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(before, sorted.len(), "ALL 中存在重复 error_code");
+        let declared = include_str!("error.rs")
+            .lines()
+            .filter(|l| l.trim_start().starts_with("pub const ") && l.contains(": &str ="))
+            .count();
+        assert_eq!(
+            ALL.len(),
+            declared,
+            "新增错误码后请同步登记进 codes::ALL / NAMED"
+        );
+        assert_eq!(NAMED.len(), ALL.len());
     }
 }

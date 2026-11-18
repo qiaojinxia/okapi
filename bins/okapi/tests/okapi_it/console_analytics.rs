@@ -1,0 +1,1634 @@
+//! 用量分析端点验收（IMPLEMENTATION §11.13）：mv_cube_hour 三端点（趋势 / 拆分 / 流向），
+//! 以及站点规模（PG）、列表行内用量、单渠道时间线。
+//! 依赖 .env 与 ClickHouse（scripts/dev-deps.sh up）；未配 CH 时立方体端点按约定 501。
+
+use okapi::worker::chsink;
+use okapi::{console, gateway};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use uuid::Uuid;
+
+#[path = "../support/statistics_sql_capture.rs"]
+mod statistics_sql_capture;
+
+#[path = "../support/server_tool_statistics.rs"]
+mod server_tool_statistics;
+
+fn hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+struct Env {
+    pg: PgPool,
+    state: gateway::state::AppState,
+    addr: SocketAddr,
+    super_token: String,
+    user_token: String,
+    user_id: i64,
+    username: String,
+    key_id: i64,
+    model_a: String,
+    model_b: String,
+    channel_id: i64,
+    channel_name: String,
+}
+
+async fn setup() -> Env {
+    setup_inner(None).await
+}
+
+async fn setup_with_ch_database(database: &str) -> Env {
+    setup_inner(Some(database)).await
+}
+
+async fn setup_inner(database: Option<&str>) -> Env {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("okapi=error")
+        .try_init();
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
+    let pg = okapi_store::connect_pg(&database_url).await.unwrap();
+    okapi_store::run_migrations(&pg).await.unwrap();
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    // 模型名取固定前缀 + 随机后缀：立方体端点全部带 user_id 过滤，不会与其它用例混流
+    let model_a = format!("cube-a-{}", &suffix[..10]);
+    let model_b = format!("cube-b-{}", &suffix[..10]);
+
+    let super_id = okapi_store::provision::create_user(&pg, &format!("cs-{suffix}"))
+        .await
+        .unwrap();
+    sqlx::query!("UPDATE users SET role = 100 WHERE id = $1", super_id)
+        .execute(&pg)
+        .await
+        .unwrap();
+    let super_token = format!("sk-okapi-cube-s-{suffix}");
+    okapi_store::provision::create_api_key(&pg, super_id, &hash(&super_token), "sk-cube-s")
+        .await
+        .unwrap();
+
+    let username = format!("cu-{suffix}");
+    let user_id = okapi_store::provision::create_user(&pg, &username)
+        .await
+        .unwrap();
+    let user_token = format!("sk-okapi-cube-u-{suffix}");
+    let key_id =
+        okapi_store::provision::create_api_key(&pg, user_id, &hash(&user_token), "sk-cube-u")
+            .await
+            .unwrap();
+    sqlx::query!(
+        "UPDATE api_keys SET name = 'cube-key' WHERE id = $1",
+        key_id
+    )
+    .execute(&pg)
+    .await
+    .unwrap();
+
+    for m in [&model_a, &model_b] {
+        okapi_store::provision::create_model_ratio(&pg, m, "1", "1", "1")
+            .await
+            .unwrap();
+    }
+    let channel_name = format!("cube-ch-{suffix}");
+    let (channel_id, _key) = okapi_store::provision::create_channel(
+        &pg,
+        &channel_name,
+        "openai",
+        "http://127.0.0.1:1/v1",
+        "mock",
+        &[model_a.as_str(), model_b.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut state = gateway::build_state(
+        &database_url,
+        &redis_url,
+        "test-node",
+        ch_url.as_deref(),
+        None,
+    )
+    .await
+    .unwrap();
+    if let (Some(url), Ok(database)) = (ch_url.as_deref(), std::env::var("OKAPI_TEST_CH_DATABASE"))
+    {
+        state.ch = Some(okapi_store::ChClient::new(url, &database).unwrap());
+    }
+    if let Some(client) = statistics_sql_capture::configured(ch_url.as_deref(), None).await {
+        state.ch = Some(client);
+    }
+    if let Some(database) = database {
+        state.ch = Some(okapi_store::ChClient::new(ch_url.as_deref().unwrap(), database).unwrap());
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = console::router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    Env {
+        pg,
+        state,
+        addr,
+        super_token,
+        user_token,
+        user_id,
+        username,
+        key_id,
+        model_a,
+        model_b,
+        channel_id,
+        channel_name,
+    }
+}
+
+fn payload(env: &Env, model: &str, amount: i64, is_error: bool) -> Value {
+    json!({
+        "request_id": Uuid::new_v4(),
+        "input_unit":"tokens",
+        "input_characters":null,
+        "user_id": env.user_id,
+        "api_key_id": env.key_id,
+        "group": "default",
+        "model": model,
+        "channel_id": env.channel_id,
+        "channel_key_id": 1,
+        "log_type": if is_error { 5 } else { 2 },
+        "prompt_source":"upstream",
+        "completion_source":"upstream",
+        "upstream_usage":{"prompt_tokens":100,"completion_tokens":200},
+        "prompt_tokens": 100,
+        "cached_tokens": 40,
+        "cache_read_reported": true,
+        "completion_tokens": 200,
+        "reasoning_tokens": 10,
+        "amount_micro": amount,
+        "original_amount_micro": amount + 250,
+        "discount_micro": 250,
+        "pricing_epoch": 1,
+        "latency_ms": 1_000,
+        "ttft_ms": 120,
+        "is_stream": true,
+        "sticky_layer": 2,
+        "failover_count": 0,
+        "error_code": if is_error { "upstream_error" } else { "" },
+        "node": "test-node",
+        "client_type": "test",
+    })
+}
+
+async fn seed(env: &Env, model: &str, ok: usize, err: usize) {
+    let mut rows: Vec<Value> = Vec::with_capacity(ok + err);
+    for _ in 0..ok {
+        rows.push(payload(env, model, 1_000, false));
+    }
+    for _ in 0..err {
+        rows.push(payload(env, model, 0, true));
+    }
+    sqlx::query!(
+        r#"INSERT INTO billing_outbox (topic, payload)
+           SELECT 'request_log', p FROM UNNEST($1::jsonb[]) AS p"#,
+        &rows
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+}
+
+async fn drain(env: &Env) {
+    let Some(ch) = env.state.ch.as_ref() else {
+        return;
+    };
+    ch.ensure_schema().await.unwrap();
+    for _ in 0..100 {
+        if chsink::process_once(&env.pg, ch).await.unwrap() == 0 {
+            break;
+        }
+    }
+}
+
+async fn get(env: &Env, path: &str, token: &str) -> (u16, Value) {
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}{path}", env.addr))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+    (status, body)
+}
+
+/// 统计窗口按机器时区切日：「昨天中午」也按本地时区取，否则 UTC 与本地跨日的那几个小时里
+/// UTC 的昨天会落进本地的今天，上期为空。
+fn local_yesterday_noon() -> String {
+    (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .earliest()
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// drain + 查询直到谓词成立（outbox 是全局队列，并行用例持锁时 drain 会提前收敛）。
+async fn poll_until<F>(env: &Env, path: &str, ready: F) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    for _ in 0..50 {
+        drain(env).await;
+        let (status, body) = get(env, path, &env.super_token).await;
+        assert_eq!(status, 200, "{path} 应 200：{body}");
+        if ready(&body) {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{path} 轮询超时");
+}
+
+fn has_ch(env: &Env) -> bool {
+    if env.state.ch.is_none() {
+        eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
+        return false;
+    }
+    true
+}
+
+/// 六个端点同一守卫：无 billing.read 一律 403。
+#[tokio::test]
+async fn analytics_require_billing_read() {
+    let env = setup().await;
+    for path in [
+        "/admin/stats/trend",
+        "/admin/stats/breakdown",
+        "/admin/stats/flow",
+        "/admin/stats/inventory",
+        "/admin/stats/entity-usage?kind=user&ids=1",
+        "/admin/stats/channels/1/timeline",
+    ] {
+        let (status, _) = get(&env, path, &env.user_token).await;
+        assert_eq!(status, 403, "{path} 应拒绝无权限用户");
+    }
+}
+
+#[tokio::test]
+async fn cached_dashboard_queries_keep_scope_and_manual_refresh_fresh() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 2, 0).await;
+    drain(&env).await;
+    let path = format!(
+        "/admin/stats/trend?days=7&user_id={}&cached=true",
+        env.user_id
+    );
+    let start = std::time::Instant::now();
+    let first = poll_until(&env, &path, |v| v["total"]["requests"] == 2).await;
+    let cold = start.elapsed();
+    seed(&env, &env.model_a, 3, 0).await;
+    drain(&env).await;
+    let start = std::time::Instant::now();
+    let (status, cached) = get(&env, &path, &env.super_token).await;
+    let warm = start.elapsed();
+    assert_eq!(status, 200);
+    assert_eq!(cached["total"], first["total"]);
+    let different = format!("{path}&model={}", env.model_b);
+    let (status, empty) = get(&env, &different, &env.super_token).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        empty["total"]["requests"], 0,
+        "model filters cannot reuse another scope's cache"
+    );
+    let denied = get(&env, &path, &env.user_token).await;
+    assert_eq!(denied.0, 403, "cached data still requires billing.read");
+    let response = reqwest::Client::new()
+        .get(format!("http://{}{path}", env.addr))
+        .bearer_auth(&env.super_token)
+        .header("Cache-Control", "no-cache")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let fresh = response.json::<Value>().await.unwrap();
+    assert_eq!(fresh["total"]["requests"], 5);
+    let (_, after) = get(&env, &path, &env.super_token).await;
+    assert_eq!(
+        after["total"]["requests"], 5,
+        "refresh must not resurrect stale cached counters"
+    );
+    eprintln!("dashboard trend: cold={cold:?}, warm={warm:?}");
+}
+
+#[tokio::test]
+async fn token_quality_hints_keep_fixture_records_in_totals_and_filters() {
+    let env = setup().await;
+    assert!(has_ch(&env), "token quality regression requires ClickHouse");
+    seed(&env, &env.model_a, 2, 0).await;
+    for model in [
+        "log-0123456789ab",
+        "modal-0123456789abcdef0123456789abcdef",
+        "gpt-6-astra",
+        "log-custom",
+        "cube-a-model",
+    ] {
+        seed(&env, model, 1, 0).await;
+    }
+    let path = format!("/admin/stats/trend?days=7&user_id={}", env.user_id);
+    let trend = poll_until(&env, &path, |v| v["total"]["requests"] == 7).await;
+    let total = &trend["total"];
+    assert_eq!(total["tokens"], 2100, "test-like records remain included");
+    assert_eq!(total["suspected_test_requests"], 4);
+    assert_eq!(total["suspected_test_tokens"], 1200);
+    assert_eq!(total["test_detection_basis"], "fixture_model_name");
+    assert_eq!(total["measured_cache_read_tokens"], 280);
+    assert_eq!(total["measured_prompt_tokens"], 700);
+    assert!(
+        total["recorded_cache_write_tokens"].is_null(),
+        "missing writes are not zero"
+    );
+    let (_, filtered) = get(&env, &format!("{path}&model=log-custom"), &env.super_token).await;
+    assert_eq!(filtered["total"]["requests"], 1);
+    assert_eq!(
+        filtered["total"]["suspected_test_requests"], 0,
+        "a prefix alone is not a test flag"
+    );
+    let (_, stacked) = get(&env, &format!("{path}&stack=model"), &env.super_token).await;
+    assert_eq!(
+        stacked["total"]["suspected_test_requests"], 4,
+        "stack folding stays additive"
+    );
+    let (_, ranking) = get(
+        &env,
+        &format!(
+            "/admin/stats/breakdown?days=7&user_id={}&by=model&model=log-custom",
+            env.user_id
+        ),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(ranking["data"][0]["suspected_test_requests"], 0);
+}
+
+#[tokio::test]
+async fn token_quality_exposes_partial_write_subtotal_and_paired_measured_cache_counts() {
+    let env = setup().await;
+    assert!(has_ch(&env), "token quality regression requires ClickHouse");
+    let mut reported = payload(&env, &env.model_a, 1000, false);
+    reported["cache_write_tokens"] = json!(20);
+    reported["cache_write_reported"] = json!(true);
+    let mut estimated = payload(&env, &env.model_a, 1000, false);
+    estimated["prompt_source"] = json!("estimated");
+    estimated["upstream_usage"]["prompt_tokens"] = Value::Null;
+    estimated["cached_tokens"] = json!(0);
+    estimated
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_read_reported");
+    let rows = vec![reported, estimated];
+    sqlx::query("INSERT INTO billing_outbox(topic,payload) SELECT 'request_log',p FROM UNNEST($1::jsonb[]) AS p")
+        .bind(&rows).execute(&env.pg).await.unwrap();
+    let path = format!("/admin/stats/trend?days=7&user_id={}", env.user_id);
+    let trend = poll_until(&env, &path, |v| v["total"]["requests"] == 2).await;
+    let total = &trend["total"];
+    assert_eq!(total["tokens"], 600);
+    assert_eq!(total["cache_write_known_requests"], 1);
+    assert_eq!(total["recorded_cache_write_tokens"], 20);
+    assert!(
+        total["cache_write_tokens"].is_null(),
+        "subtotal must not imply full coverage"
+    );
+    assert_eq!(total["cache_read_known_requests"], 1);
+    assert_eq!(total["measured_cache_read_tokens"], 40);
+    assert_eq!(
+        total["measured_prompt_tokens"], 100,
+        "estimated input is not in the denominator"
+    );
+    assert_eq!(total["measured_cache_hit_requests"], 1);
+    assert_eq!(total["measured_cache_hit_bp"], 4000);
+    assert!(total["cache_hit_bp"].is_null());
+    assert_eq!(
+        total["token_provenance"]["prompt"]["estimated"]["tokens"],
+        100
+    );
+}
+
+/// 趋势：user_id 过滤只见本用户；model 过滤只见该模型；scope 回填名字；
+/// 单日窗口按小时出桶；环比窗口为空。
+#[tokio::test]
+async fn trend_filters_by_dimension_and_resolves_scope() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 6, 2).await;
+    seed(&env, &env.model_b, 4, 0).await;
+
+    let path = format!("/admin/stats/trend?days=1&user_id={}", env.user_id);
+    let body = poll_until(&env, &path, |b| b["total"]["requests"].as_i64() == Some(12)).await;
+    assert_eq!(body["granularity"], "hour");
+    assert_eq!(body["total"]["errors"], 2);
+    assert_eq!(body["total"]["error_rate_bp"], 1_666, "2/12");
+    assert_eq!(body["total"]["amount_micro"], 10_000, "10 笔成功 × 1000");
+    assert_eq!(body["total"]["discount_micro"], 3_000, "12 笔 × 250");
+    assert_eq!(body["total"]["prompt_tokens"], 1_200);
+    assert_eq!(body["total"]["cached_tokens"], 480);
+    assert_eq!(body["total"]["cache_hit_bp"], 4_000, "480/1200");
+    assert_eq!(body["total"]["avg_latency_ms"], 1_000);
+    assert_eq!(body["total"]["avg_ttft_ms"], 120);
+    assert_eq!(body["scope"]["user"]["username"], env.username);
+    assert!(body["previous"]["requests"].is_null() || body["previous"]["requests"] == 0);
+    let buckets = body["data"].as_array().unwrap();
+    assert!(!buckets.is_empty(), "buckets should not be empty");
+    assert!(
+        buckets[0]["bucket"].as_str().unwrap().contains(':'),
+        "小时桶应带时分秒：{}",
+        buckets[0]["bucket"]
+    );
+
+    // 叠加 model 过滤
+    let path = format!(
+        "/admin/stats/trend?days=1&user_id={}&model={}",
+        env.user_id, env.model_b
+    );
+    let (status, body) = get(&env, &path, &env.super_token).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"]["requests"], 4);
+    assert_eq!(body["scope"]["model"], env.model_b);
+
+    // 多日窗口按天出桶
+    let path = format!("/admin/stats/trend?days=7&user_id={}", env.user_id);
+    let (_, body) = get(&env, &path, &env.super_token).await;
+    assert_eq!(body["granularity"], "day");
+    assert!(!body["data"][0]["bucket"].as_str().unwrap().contains(':'));
+
+    // 按模型堆叠：两条序列，逐桶求和守恒；limit=1 时 B 折进 __other
+    let path = format!(
+        "/admin/stats/trend?days=1&user_id={}&stack=model",
+        env.user_id
+    );
+    let (_, body) = get(&env, &path, &env.super_token).await;
+    assert_eq!(body["stack"], "model");
+    let series: Vec<&str> = body["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        series,
+        vec![env.model_a.as_str(), env.model_b.as_str()],
+        "按金额降序"
+    );
+    let sum: i64 = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["values"].as_object().unwrap().values())
+        .map(|v| v["requests"].as_i64().unwrap())
+        .sum();
+    assert_eq!(sum, 12);
+    let path = format!(
+        "/admin/stats/trend?days=1&user_id={}&stack=model&limit=1",
+        env.user_id
+    );
+    let (_, body) = get(&env, &path, &env.super_token).await;
+    assert_eq!(body["series"][1]["key"], "__other");
+    assert!(body["series"][1]["label"].is_null());
+
+    // 按渠道堆叠：序列标签从 PG 回填渠道名
+    let path = format!(
+        "/admin/stats/trend?days=1&user_id={}&stack=channel",
+        env.user_id
+    );
+    let (_, body) = get(&env, &path, &env.super_token).await;
+    assert_eq!(body["series"][0]["label"], env.channel_name);
+}
+
+/// 拆分：按模型给占比 / 名次；按渠道回填名字与 provider；按 provider 折叠；
+/// 按 key 回填名字 + 属主；非法维度 400。
+#[tokio::test]
+async fn breakdown_by_each_dimension() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 6, 0).await;
+    seed(&env, &env.model_b, 2, 0).await;
+
+    let base = format!("&days=1&user_id={}", env.user_id);
+    // 总计与明细是两条先后执行的 CH 查询；别的测试进程若正把本用例的 outbox 行写进
+    // CH，两条查询可能夹在两张 MV 落地之间——谓词必须覆盖后面要断言的两边。
+    let body = poll_until(
+        &env,
+        &format!("/admin/stats/breakdown?by=model{base}"),
+        |b| {
+            b["total_requests"].as_i64() == Some(8)
+                && b["data"].as_array().is_some_and(|rows| rows.len() == 2)
+        },
+    )
+    .await;
+    let rows = body["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["key"], env.model_a);
+    assert_eq!(rows[0]["rank"], 1);
+    assert_eq!(rows[0]["share_bp"], 7_500, "6000/8000");
+    assert_eq!(rows[0]["request_share_bp"], 7_500);
+    assert!(rows[0]["previous_rank"].is_null(), "上期无数据");
+    assert!(rows[0]["delta_bp"].is_null(), "上期为 0 → 环比无意义");
+    assert_eq!(rows[1]["key"], env.model_b);
+    assert_eq!(rows[1]["share_bp"], 2_500);
+    assert_eq!(body["total_amount_micro"], 8_000);
+
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=channel{base}"),
+        &env.super_token,
+    )
+    .await;
+    let row = &body["data"][0];
+    assert_eq!(row["channel_id"], env.channel_id);
+    assert_eq!(row["label"], env.channel_name);
+    assert_eq!(row["provider"], "openai");
+    assert_eq!(row["requests"], 8);
+
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=provider{base}"),
+        &env.super_token,
+    )
+    .await;
+    let row = &body["data"][0];
+    assert_eq!(row["key"], "openai");
+    assert_eq!(row["channels"], 1);
+    assert_eq!(row["amount_micro"], 8_000);
+    assert_eq!(row["share_bp"], 10_000);
+
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=api_key{base}"),
+        &env.super_token,
+    )
+    .await;
+    let row = &body["data"][0];
+    assert_eq!(row["api_key_id"], env.key_id);
+    assert_eq!(row["label"], "cube-key");
+    assert_eq!(row["user_id"], env.user_id);
+    assert_eq!(row["username"], env.username);
+
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=user{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(body["data"][0]["label"], env.username);
+
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=group{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(body["data"][0]["key"], "default");
+    assert!(
+        body["data"][0]["group_ratio"].is_string(),
+        "分组倍率应由 PG 回填"
+    );
+
+    let (status, _) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=planet{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 400);
+}
+
+/// Top N 必须在数据库按所选指标截断，免费高频模型也能上榜；分母包含榜外数据。
+#[tokio::test]
+async fn breakdown_metric_ranks_before_limit_and_preserves_totals() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    let token_model = format!("{}-tokens", env.model_a);
+    let (other_channel, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("{}-other", env.channel_name),
+        "anthropic",
+        "http://127.0.0.1:1/v1",
+        "mock",
+        &[env.model_b.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let expensive = payload(&env, &env.model_a, 100_000, false);
+    let mut heavy = payload(&env, &token_model, 1_000, false);
+    heavy["prompt_tokens"] = json!(1_000);
+    heavy["upstream_usage"]["prompt_tokens"] = json!(1_000);
+    let mut rows = vec![expensive, heavy];
+    for _ in 0..3 {
+        let mut free = payload(&env, &env.model_b, 0, false);
+        free["channel_id"] = json!(other_channel);
+        rows.push(free);
+    }
+    insert_values(&env, &rows, None).await;
+    let base = format!("days=1&user_id={}&limit=1", env.user_id);
+    poll_until(
+        &env,
+        &format!("/admin/stats/breakdown?by=model&{base}"),
+        |b| b["total_requests"] == 5 && b["total_tokens"] == 2_400,
+    )
+    .await;
+
+    for (metric, model, provider, share_field, expected_share) in [
+        ("amount", env.model_a.as_str(), "openai", "share_bp", 9_900),
+        (
+            "requests",
+            env.model_b.as_str(),
+            "anthropic",
+            "request_share_bp",
+            6_000,
+        ),
+        (
+            "tokens",
+            token_model.as_str(),
+            "openai",
+            "token_share_bp",
+            5_000,
+        ),
+    ] {
+        for (by, key) in [("model", model), ("provider", provider)] {
+            let (status, body) = get(
+                &env,
+                &format!("/admin/stats/breakdown?by={by}&metric={metric}&{base}"),
+                &env.super_token,
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"].as_array().unwrap().len(), 1);
+            assert_eq!(body["data"][0]["key"], key);
+            assert_eq!(body["total_requests"], 5);
+            assert_eq!(body["total_tokens"], 2_400);
+            assert_eq!(body["total_amount_micro"], 101_000);
+            if by == "model" {
+                assert_eq!(body["data"][0][share_field], expected_share);
+            }
+        }
+    }
+    // 历史名次跟随所选指标，而金额环比继续使用真实金额。
+    let yesterday_noon = local_yesterday_noon();
+    let mut previous = rows.clone();
+    for row in &mut previous {
+        row["request_id"] = json!(Uuid::new_v4());
+    }
+    insert_values(&env, &previous, Some(&yesterday_noon)).await;
+    poll_until(
+        &env,
+        &format!("/admin/stats/breakdown?by=model&metric=requests&{base}"),
+        |b| b["data"][0]["previous_rank"] == 1,
+    )
+    .await;
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=model&metric=tokens&{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(body["data"][0]["previous_rank"], 1);
+    assert_eq!(body["data"][0]["previous_amount_micro"], 1_000);
+    assert_eq!(body["data"][0]["delta_bp"], 0);
+
+    let (status, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?metric=unknown&{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "metric");
+}
+
+/// 流向：五阶段节点齐全、相邻链接守恒、限定单用户时覆盖率 100%、
+/// limit=1 时次要模型折进 `__other`。
+#[tokio::test]
+async fn flow_links_conserve_and_fold_other() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 6, 0).await;
+    seed(&env, &env.model_b, 2, 0).await;
+
+    let path = format!(
+        "/admin/stats/flow?days=1&metric=requests&limit=2&user_id={}",
+        env.user_id
+    );
+    // total 与覆盖率来自先后两条 CH 查询，谓词要一起等（见 poll_until 注释）
+    let body = poll_until(&env, &path, |b| {
+        b["total"].as_i64() == Some(8) && b["coverage_bp"].as_i64() == Some(10_000)
+    })
+    .await;
+    assert_eq!(body["truncated"], false);
+    let nodes = body["nodes"].as_array().unwrap();
+    let find = |id: &str| nodes.iter().find(|n| n["id"] == id).cloned();
+    let user_node = find(&format!("user:{}", env.user_id)).expect("用户节点");
+    assert_eq!(user_node["value"], 8);
+    assert_eq!(user_node["label"], env.username);
+    let key_node = find(&format!("api_key:{}", env.key_id)).expect("key 节点");
+    assert_eq!(key_node["label"], "cube-key");
+    assert_eq!(find(&format!("model:{}", env.model_a)).unwrap()["value"], 6);
+    assert_eq!(find(&format!("model:{}", env.model_b)).unwrap()["value"], 2);
+    let ch_node = find(&format!("channel:{}", env.channel_id)).expect("渠道节点");
+    assert_eq!(ch_node["label"], env.channel_name);
+
+    // 每一跳的链接值之和 = 总量（守恒）
+    let links = body["links"].as_array().unwrap();
+    for (from, to) in [
+        ("user:", "node:"),
+        ("node:", "api_key:"),
+        ("api_key:", "group:"),
+        ("group:", "model:"),
+        ("model:", "channel:"),
+    ] {
+        let sum: i64 = links
+            .iter()
+            .filter(|l| {
+                l["source"].as_str().unwrap().starts_with(from)
+                    && l["target"].as_str().unwrap().starts_with(to)
+            })
+            .map(|l| l["value"].as_i64().unwrap())
+            .sum();
+        assert_eq!(sum, 8, "{from}→{to} 链接应守恒");
+    }
+
+    // limit=1：模型阶段只留 Top1，次要模型折进 __other
+    let path = format!(
+        "/admin/stats/flow?days=1&metric=requests&limit=1&user_id={}",
+        env.user_id
+    );
+    let (_, body) = get(&env, &path, &env.super_token).await;
+    let nodes = body["nodes"].as_array().unwrap();
+    let other = nodes
+        .iter()
+        .find(|n| n["id"] == "model:__other")
+        .expect("应有其他桶");
+    assert_eq!(other["value"], 2);
+    assert_eq!(other["other"], true);
+    assert!(other["label"].is_null());
+
+    let (status, _) = get(&env, "/admin/stats/flow?metric=bananas", &env.super_token).await;
+    assert_eq!(status, 400);
+}
+
+/// 站点规模：纯 PG，不依赖 CH；渠道健康按"有可用 key"口径。
+#[tokio::test]
+async fn inventory_counts_without_clickhouse() {
+    let env = setup().await;
+    let (status, body) = get(&env, "/admin/stats/inventory", &env.super_token).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body["users"]["total"].as_i64().unwrap() >= 2);
+    assert!(
+        body["users"]["new_today"].as_i64().unwrap() >= 2,
+        "本用例刚建两个用户"
+    );
+    assert!(body["api_keys"]["active"].as_i64().unwrap() >= 2);
+    assert!(body["channels"]["total"].as_i64().unwrap() >= 1);
+    let healthy_before = body["channels"]["healthy"].as_i64().unwrap();
+    assert!(healthy_before >= 1, "本用例渠道有一把可用 key");
+    assert!(body["models"]["priced"].as_i64().unwrap() >= 2);
+    assert!(
+        body["models"]["served"].as_i64().unwrap() >= 2,
+        "两模型都挂在启用渠道上"
+    );
+    assert!(body["channel_keys"]["active"].as_i64().unwrap() >= 1);
+    assert!(body["groups"].as_i64().unwrap() >= 1);
+
+    // 把本渠道的 key 全部置冷却 → 渠道从 healthy 移到 no_key
+    sqlx::query!(
+        "UPDATE channel_keys SET status = 2 WHERE channel_id = $1",
+        env.channel_id
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    // inventory 数的是**全站**渠道，并行用例随时在建/停渠道，两次读之间的全局
+    // 计数必然漂移——此前这里断言精确差值 healthy_before - 1，于是在长期 dev 库上
+    // 随机红。改为「本渠道确实落到了该状态」（DB 事实，不受并发影响）+ 端点侧的
+    // 方向性断言（本渠道必然贡献至少一个 no_key）。
+    let (_, after) = get(&env, "/admin/stats/inventory", &env.super_token).await;
+    let still_active: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "c!" FROM channel_keys WHERE channel_id = $1 AND status = 1"#,
+        env.channel_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(still_active, 0, "本渠道的 key 已全部停用");
+    assert!(
+        after["channels"]["no_key"].as_i64().unwrap() >= 1,
+        "无可用 key 的渠道要计进 no_key：{after}"
+    );
+
+    // 孤儿渠道（不在任何池）单独计数：对谁都不可达，落地页要能看见
+    okapi_store::admin::set_channel_pool_codes(&env.pg, env.channel_id, &[])
+        .await
+        .unwrap();
+    let (_, after) = get(&env, "/admin/stats/inventory", &env.super_token).await;
+    let pools: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "c!" FROM pool_channels WHERE channel_id = $1"#,
+        env.channel_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(pools, 0, "本渠道已退出所有池");
+    assert!(
+        after["channels"]["orphan"].as_i64().unwrap() >= 1,
+        "不在任何池的渠道要计进 orphan：{after}"
+    );
+}
+
+/// 行内用量：按用户 / 按 key 批量取今日与窗口消费；不存在的 id 不出现；非法 kind 400。
+#[tokio::test]
+async fn entity_usage_batches_by_ids() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 5, 1).await;
+
+    let uid = env.user_id.to_string();
+    let path = format!("/admin/stats/entity-usage?kind=user&ids={uid},999999999&days=7");
+    let body = poll_until(&env, &path, |b| {
+        b["data"][&uid]["requests"].as_i64() == Some(6)
+    })
+    .await;
+    let row = &body["data"][&uid];
+    assert_eq!(row["today_micro"], 5_000);
+    assert_eq!(row["window_micro"], 5_000);
+    assert!(row["last_day"].is_string());
+    assert!(body["data"]["999999999"].is_null(), "无数据的 id 不出现");
+
+    let kid = env.key_id.to_string();
+    let path = format!("/admin/stats/entity-usage?kind=api_key&ids={kid}");
+    let body = poll_until(&env, &path, |b| {
+        b["data"][&kid]["requests"].as_i64() == Some(6)
+    })
+    .await;
+    assert_eq!(body["data"][&kid]["window_micro"], 5_000);
+
+    let (status, _) = get(
+        &env,
+        "/admin/stats/entity-usage?kind=planet&ids=1",
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    let (status, body) = get(
+        &env,
+        "/admin/stats/entity-usage?kind=user&ids=",
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["data"], json!({}));
+}
+
+/// 单渠道时间线：5 分钟桶带错误率与 TTFT 分位，汇总与播种一致。
+#[tokio::test]
+async fn channel_timeline_buckets() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 8, 2).await;
+
+    let path = format!("/admin/stats/channels/{}/timeline?hours=1", env.channel_id);
+    let body = poll_until(&env, &path, |b| b["requests"].as_i64() == Some(10)).await;
+    assert_eq!(body["errors"], 2);
+    assert_eq!(body["error_rate_bp"], 2_000);
+    assert_eq!(body["channel_id"], env.channel_id);
+    let data = body["data"].as_array().unwrap();
+    assert!(!data.is_empty(), "data should not be empty");
+    let total: i64 = data.iter().map(|d| d["requests"].as_i64().unwrap()).sum();
+    assert_eq!(total, 10);
+    assert!(data[0]["bucket"].as_str().unwrap().contains(':'));
+    assert!(data.iter().any(|d| d["ttft_p50_ms"].as_i64().unwrap() > 0));
+
+    // hours 超界被 clamp 而非报错
+    let (status, body) = get(
+        &env,
+        &format!(
+            "/admin/stats/channels/{}/timeline?hours=9999",
+            env.channel_id
+        ),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["hours"], 168);
+}
+
+async fn insert_values(env: &Env, rows: &[Value], day: Option<&str>) {
+    for row in rows {
+        sqlx::query("INSERT INTO billing_outbox (topic, payload, created_at) VALUES ('request_log', $1, COALESCE($2::text::timestamptz, now()))")
+            .bind(row).bind(day).execute(&env.pg).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cache_reporting_distinguishes_unknown_from_zero_across_admin_views() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        return;
+    }
+    let mut known = payload(&env, &env.model_a, 1000, false);
+    known["cached_tokens"] = json!(0);
+    known["cache_write_tokens"] = json!(0);
+    known["cache_write_reported"] = json!(true);
+    insert_values(&env, &[known.clone()], None).await;
+    let path = format!("/admin/stats/trend?user_id={}&days=7", env.user_id);
+    let report = poll_until(&env, &path, |body| body["total"]["requests"] == 1).await;
+    assert_eq!(report["total"]["cache_hit_bp"], 0);
+    assert_eq!(report["total"]["cache_read_known_requests"], 1);
+    assert_eq!(report["total"]["cache_write_tokens"], 0);
+    known["request_id"] = json!(Uuid::new_v4());
+    known["cache_read_reported"] = json!(false);
+    known["cache_write_reported"] = json!(false);
+    insert_values(&env, &[known], None).await;
+    let report = poll_until(&env, &path, |body| body["total"]["requests"] == 2).await;
+    assert!(report["total"]["cache_hit_bp"].is_null());
+    assert!(report["total"]["cache_write_tokens"].is_null());
+    assert_eq!(report["total"]["cache_read_known_requests"], 1);
+    for path in [
+        format!("/admin/stats/breakdown?user_id={}&by=model", env.user_id),
+        format!("/admin/logs/stat?user_id={}", env.user_id),
+    ] {
+        let (status, body) = get(&env, &path, &env.super_token).await;
+        assert_eq!(status, 200, "{body}");
+        let row = body
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|data| data.first())
+            .unwrap_or(&body);
+        assert!(row["cache_hit_bp"].is_null(), "{body}");
+        assert_eq!(row["cache_read_known_requests"], 1, "{body}");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One fixture compared across independent aggregation endpoints.
+async fn token_totals_and_weighted_metrics_agree_across_statistics_endpoints() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        eprintln!("SKIP: Token statistics assertions require OKAPI_CLICKHOUSE_URL");
+        return;
+    }
+    let mut rows = Vec::new();
+    for (model, prompt, cached, writes, output, reasoning, latency, ttft) in [
+        (&env.model_a, 100, 90, 0, 50, 10, 1000, 100),
+        (&env.model_a, 900, 90, 100, 450, 90, 9000, 900),
+        (&env.model_b, 100, 0, 0, 0, 0, 500, 0),
+    ] {
+        let mut row = payload(&env, model, 1000, output == 0);
+        for (field, value) in [
+            ("prompt_tokens", prompt),
+            ("cached_tokens", cached),
+            ("cache_write_tokens", writes),
+            ("completion_tokens", output),
+            ("reasoning_tokens", reasoning),
+            ("latency_ms", latency),
+            ("ttft_ms", ttft),
+        ] {
+            row[field] = json!(value);
+        }
+        if output == 0 {
+            row["ttft_ms"] = Value::Null;
+        }
+        row["cache_write_reported"] = json!(true);
+        row["upstream_usage"] = json!({"prompt_tokens":prompt,"completion_tokens":output});
+        rows.push(row);
+    }
+    insert_values(&env, &rows, None).await;
+    let trend = poll_until(
+        &env,
+        &format!("/admin/stats/trend?user_id={}&days=1", env.user_id),
+        |b| b["total"]["requests"] == 3,
+    )
+    .await;
+    let total = &trend["total"];
+    for (field, value) in [
+        ("prompt_tokens", 1100),
+        ("cached_tokens", 180),
+        ("cache_write_tokens", 100),
+        ("completion_tokens", 500),
+        ("reasoning_tokens", 100),
+        ("tokens", 1600),
+        ("cache_hit_bp", 1636),
+        ("avg_latency_ms", 3500),
+        ("avg_ttft_ms", 500),
+        ("avg_output_tps_milli", 47619),
+    ] {
+        assert_eq!(total[field], value, "{field}: {trend}");
+    }
+    let (status, portal) = get(&env, "/api/me/stats/breakdown?days=1", &env.user_token).await;
+    assert_eq!(status, 200, "{portal}");
+    for field in [
+        "requests",
+        "tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "cache_hit_bp",
+        "avg_latency_ms",
+        "avg_ttft_ms",
+    ] {
+        assert_eq!(portal["total"][field], total[field], "{field}");
+    }
+    assert_eq!(portal["total"]["tokens_per_1k_sec"], 47619);
+    assert_eq!(portal["total"]["avg_tpm_micro"], 1_111_111);
+    assert_eq!(portal["live"]["rate_basis"], "admission_estimate");
+    assert_eq!(portal["total"]["avg_rate_window_minutes"], 1440);
+    let (status, models) = get(
+        &env,
+        &format!(
+            "/admin/stats/breakdown?by=model&user_id={}&days=1",
+            env.user_id
+        ),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let empty_ttft = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == env.model_b)
+        .unwrap();
+    assert!(empty_ttft["avg_ttft_ms"].is_null());
+    for by in ["provider", "channel", "user", "group"] {
+        let (status, body) = get(
+            &env,
+            &format!(
+                "/admin/stats/breakdown?by={by}&user_id={}&days=1",
+                env.user_id
+            ),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let data = body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        for field in [
+            "tokens",
+            "cached_tokens",
+            "cache_write_tokens",
+            "cache_hit_bp",
+            "avg_output_tps_milli",
+        ] {
+            assert_eq!(data[0][field], total[field], "{by}: {field}");
+        }
+    }
+    let (status, logs) = get(
+        &env,
+        &format!("/admin/logs/stat?user_id={}", env.user_id),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(logs["tokens"], 1600);
+    assert_eq!(logs["cache_hit_bp"], 1636);
+    // The cross-endpoint checks can exceed the rolling 60s rate window. Verify
+    // that window with a fresh, separately scoped sample, retaining exact totals.
+    verify_fresh_token_rate(&env).await;
+}
+
+async fn verify_fresh_token_rate(env: &Env) {
+    let model = format!("minute-{}", Uuid::new_v4().simple());
+    let mut recent = payload(env, &model, 1000, false);
+    recent["prompt_tokens"] = json!(1100);
+    recent["completion_tokens"] = json!(500);
+    recent["cached_tokens"] = json!(180);
+    recent["upstream_usage"] = json!({"prompt_tokens":1100,"completion_tokens":500});
+    insert_values(env, &[recent], None).await;
+    for _ in 0..50 {
+        drain(env).await;
+        let (status, logs) = get(
+            env,
+            &format!("/admin/logs/stat?user_id={}&model={model}", env.user_id),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 200, "{logs}");
+        if logs["requests"] == 1 {
+            assert_eq!(logs["tokens"], 1600);
+            assert_eq!(logs["cache_hit_bp"], 1636);
+            assert_eq!(logs["tpm"], 1600);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("fresh Token rate sample was not ingested");
+}
+fn advanced_payload(
+    env: &Env,
+    upstream: &str,
+    group: &str,
+    latency: i64,
+    known: bool,
+    cost: i64,
+) -> Value {
+    let mut row = payload(env, &env.model_a, 1000, false);
+    row["requested_model"] = json!("client.alias");
+    row["upstream_model"] = json!(upstream);
+    row["endpoint"] = json!("/v1/responses");
+    row["upstream_endpoint"] = json!("/v1/chat/completions");
+    row["billing_type"] = json!("ratio");
+    row["group"] = json!(group);
+    row["latency_ms"] = json!(latency);
+    row["ttft_ms"] = json!(latency / 10);
+    row["upstream_cost_known"] = json!(known);
+    row["upstream_cost_micro"] = json!(cost);
+    row["cache_write_tokens"] = json!(0);
+    row["cache_write_reported"] = json!(true);
+    row
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    let rows = vec![
+        advanced_payload(&env, "up.a", "g,a", 1000, true, 0),
+        advanced_payload(&env, "up.a", "g,a", 3000, true, 500),
+        advanced_payload(&env, "up.b", "g'b", 8000, false, 0),
+    ];
+    insert_values(&env, &rows, Some("2026-08-25 12:00:00+00")).await;
+    insert_values(&env, &[rows[0].clone()], Some("2026-08-24 12:00:00+00")).await;
+    let path = format!(
+        "/admin/stats/trend?start_date=2026-08-25&end_date=2026-08-25&granularity=hour&user_id={}",
+        env.user_id
+    );
+    // 当期 / 上期 / cost_known / 水位分属不同 CH 查询或 MV，谓词要一起等：
+    // 水位读的是 mv_analysis_hour，全新 CH 上它可能比 total 所在的 MV 晚一拍落地
+    // （共享库里总有历史行，所以此前看不出来）
+    let body = poll_until(&env, &path, |b| {
+        b["total"]["requests"] == 3
+            && b["previous"]["requests"] == 1
+            && b["total"]["cost_known_requests"] == 2
+            && b["window"]["freshness"]["last_ingested_at"].is_string()
+    })
+    .await;
+    assert_eq!(body["previous"]["requests"], 1);
+    assert_eq!(
+        body["total"]["cost_known_requests"], 2,
+        "known zero cost is covered"
+    );
+    assert_eq!(body["total"]["cost_coverage_bp"], 6666);
+    assert_eq!(body["total"]["known_margin_micro"], 1500);
+    assert!(
+        body["total"]["margin_micro"].is_null(),
+        "partial coverage cannot be total margin"
+    );
+    assert_eq!(body["total"]["cache_write_tokens"], 0);
+    assert_eq!(body["total"]["avg_latency_ms"], 4000);
+    assert!(body["window"]["freshness"]["last_ingested_at"].is_string());
+    let mut query_url = reqwest::Url::parse("http://localhost/").unwrap();
+    let mut query = query_url.query_pairs_mut();
+    query.extend_pairs([
+        ("start_date", "2026-08-25"),
+        ("end_date", "2026-08-25"),
+        ("model_source", "upstream"),
+        ("models", "[\"up.a\"]"),
+        ("groups", "[\"g,a\"]"),
+        ("endpoint", "/v1/responses"),
+        ("upstream_endpoint", "/v1/chat/completions"),
+        ("request_type", "stream"),
+        ("billing_type", "ratio"),
+        ("node", "test-node"),
+    ]);
+    query.append_pair("user_id", &env.user_id.to_string());
+    drop(query);
+    let query = query_url.query().unwrap();
+    let (status, trend) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&stack=model_group&metric=latency"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{trend}");
+    assert_eq!(trend["total"]["requests"], 2);
+    assert_eq!(trend["total"]["margin_micro"], 1500);
+    assert_eq!(trend["series"][0]["key"], "[\"up.a\",\"g,a\"]");
+    let value = trend["data"][0]["values"]["[\"up.a\",\"g,a\"]"].clone();
+    assert_eq!(value["avg_latency_ms"], 2000);
+    assert_eq!(value["avg_ttft_ms"], 200);
+    assert_eq!(value["avg_output_tps_milli"], 100_000);
+    let (status, by) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=model"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{by}");
+    assert_eq!(by["total_requests"], 2);
+    assert_eq!(by["data"][0]["key"], "up.a");
+    assert_eq!(by["data"][0]["known_margin_micro"], 1500);
+    let stages = "stages=%5B%22node%22,%22model%22,%22channel%22%5D";
+    let (status, flow) = get(
+        &env,
+        &format!("/admin/stats/flow?{query}&metric=requests&{stages}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{flow}");
+    assert_eq!(flow["total"], 2);
+    assert_eq!(flow["stages"], json!(["node", "model", "channel"]));
+    assert!(
+        flow["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "model:up.a")
+    );
+    assert!(
+        flow["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["value"] == 2)
+    );
+    let (status, none) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&stream=false"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(none["total"]["requests"], 0);
+}
+
+#[tokio::test]
+async fn invalid_analysis_ranges_and_dimensions_are_rejected() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    drain(&env).await;
+    for query in [
+        "start_date=2026-08-01",
+        "start_date=2026-08-30&end_date=2026-08-01",
+        "start_date=2026-02-30&end_date=2026-03-01",
+        "start_date=2099-01-01&end_date=2099-01-02",
+        "start_date=2025-01-01&end_date=2026-08-01",
+        "start_date=2026-06-01&end_date=2026-08-01&granularity=hour",
+        "model_source=invalid",
+        "request_type=invalid",
+        "models=not-json",
+        "groups=%5B%22%22%5D",
+    ] {
+        let (status, body) = get(
+            &env,
+            &format!("/admin/stats/trend?{query}"),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 400, "{query}: {body}");
+    }
+    for stages in [
+        "%5B%22node%22%5D",
+        "%5B%22node%22,%22node%22%5D",
+        "%5B%22node%22,%22oops%22%5D",
+    ] {
+        let (status, body) = get(
+            &env,
+            &format!("/admin/stats/flow?stages={stages}"),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn flow_names_include_safe_context_deleted_and_missing_identities() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    sqlx::query("UPDATE api_keys SET name = '' WHERE id = $1")
+        .bind(env.key_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channels SET deleted_at = now() WHERE id = $1")
+        .bind(env.channel_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let missing = 3_000_000_000_i64 + env.user_id;
+    let mut orphan = payload(&env, &env.model_a, 500, false);
+    orphan["user_id"] = json!(missing);
+    orphan["api_key_id"] = json!(missing);
+    orphan["channel_id"] = json!(missing);
+    insert_values(
+        &env,
+        &[payload(&env, &env.model_a, 1000, false), orphan],
+        None,
+    )
+    .await;
+    let path = format!(
+        "/admin/stats/flow?days=1&model={}&metric=requests",
+        env.model_a
+    );
+    let user_node_id = format!("user:{}", env.user_id);
+    let body = poll_until(&env, &path, |b| {
+        b["total"] == 2
+            && b["nodes"]
+                .as_array()
+                .is_some_and(|n| n.iter().any(|x| x["id"] == user_node_id))
+    })
+    .await;
+    let nodes = body["nodes"].as_array().unwrap();
+    let node = |stage: &str, id: i64| {
+        nodes
+            .iter()
+            .find(|n| n["id"] == format!("{stage}:{id}"))
+            .unwrap()
+    };
+    assert_eq!(node("user", env.user_id)["label"], env.username);
+    assert_eq!(node("api_key", env.key_id)["label"], "");
+    assert_eq!(node("api_key", env.key_id)["entity_status"], "active");
+    assert_eq!(node("api_key", env.key_id)["owner_name"], env.username);
+    assert_eq!(node("api_key", env.key_id)["key_prefix"], "sk-cube-u");
+    assert!(node("api_key", env.key_id).get("key_hash").is_none());
+    assert_eq!(node("channel", env.channel_id)["label"], env.channel_name);
+    assert_eq!(node("channel", env.channel_id)["provider"], "openai");
+    assert_eq!(node("channel", env.channel_id)["entity_status"], "deleted");
+    for stage in ["user", "api_key", "channel"] {
+        assert!(node(stage, missing)["label"].is_null());
+        assert_eq!(node(stage, missing)["entity_status"], "missing");
+    }
+}
+
+const CORE_FIELDS: [&str; 11] = [
+    "requests",
+    "errors",
+    "error_rate_bp",
+    "prompt_tokens",
+    "cached_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "tokens",
+    "amount_micro",
+    "discount_micro",
+    "upstream_cost_micro",
+];
+
+fn assert_core_equal(core: &Value, full: &Value, context: &str) {
+    for field in CORE_FIELDS {
+        assert!(!core[field].is_null(), "{context}: core 缺少 {field}");
+        assert_eq!(core[field], full[field], "{context}: {field}");
+    }
+}
+
+/// `fields=core` 走精简数据源，只为跳过 ~300 个测量子查询的规划耗时；它必须与完整数据源
+/// 在核心字段上逐值相同——包括明细维度、多渠道与多分组——
+/// 并且在不能保证相同时（明细过滤）回退完整源，不能静默给出另一个数。
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One fixture compared across every endpoint and dimension.
+async fn core_fields_match_the_full_source() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    let (other_channel, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("{}-other", env.channel_name),
+        "anthropic",
+        "http://127.0.0.1:1/v1",
+        "mock",
+        &[env.model_b.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let ok = |model: &str, group: &str, channel: i64, amount: i64| {
+        let mut row = advanced_payload(&env, "up.a", group, 1_000, true, 0);
+        row["model"] = json!(model);
+        row["channel_id"] = json!(channel);
+        row["amount_micro"] = json!(amount);
+        row
+    };
+    let mut failed = ok(&env.model_b, "vip", other_channel, 0);
+    failed["log_type"] = json!(5);
+    failed["error_code"] = json!("upstream_error");
+    insert_values(
+        &env,
+        &[
+            ok(&env.model_a, "default", env.channel_id, 1_000),
+            ok(&env.model_a, "default", env.channel_id, 1_000),
+            failed,
+        ],
+        Some("2026-08-20 12:00:00+00"),
+    )
+    .await;
+    insert_values(
+        &env,
+        &[ok(&env.model_a, "default", env.channel_id, 1_000)],
+        Some("2026-08-21 12:00:00+00"),
+    )
+    .await;
+    drain(&env).await;
+    let query = format!(
+        "start_date=2026-08-20&end_date=2026-08-21&user_id={}",
+        env.user_id
+    );
+    let full = poll_until(&env, &format!("/admin/stats/trend?{query}"), |b| {
+        b["total"]["requests"].as_i64() == Some(4)
+            && b["total"]["cost_known_requests"].as_i64() == Some(4)
+    })
+    .await;
+    assert_eq!(full["total"]["amount_micro"], 3_000);
+    assert_eq!(full["fields"], "all");
+
+    // 趋势：总计与逐桶一致；精简响应不带任何测量口径，也不带上期。
+    let (status, core) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{core}");
+    assert_eq!(core["fields"], "core");
+    assert_core_equal(&core["total"], &full["total"], "trend total");
+    let (core_buckets, full_buckets) = (
+        core["data"].as_array().unwrap(),
+        full["data"].as_array().unwrap(),
+    );
+    assert_eq!(core_buckets.len(), full_buckets.len());
+    for (a, b) in core_buckets.iter().zip(full_buckets) {
+        assert_eq!(a["bucket"], b["bucket"]);
+        assert_core_equal(a, b, &format!("trend bucket {}", a["bucket"]));
+    }
+    assert_eq!(core["previous"], json!({}));
+    for unmeasured in ["avg_latency_ms", "cost_coverage_bp", "cache_hit_bp"] {
+        assert!(core["total"].get(unmeasured).is_none(), "{unmeasured}");
+    }
+    // compare=false 只是不查上期，当前窗口的完整指标不变。
+    let (_, uncompared) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&compare=false"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(uncompared["total"], full["total"]);
+    assert_eq!(uncompared["data"], full["data"]);
+    assert_eq!(uncompared["previous"], json!({}));
+
+    // 拆分：每个维度 × 每个排序指标，名次、取值、占比与全量分母都一致。
+    // 排序指标只影响 ORDER BY 与取榜（两条路径共用），逐个指标只在 model 上全跑。
+    for by in ["model", "channel", "user", "api_key", "group", "provider"] {
+        for metric in ["amount", "requests", "tokens"] {
+            if by != "model" && metric != "amount" {
+                continue;
+            }
+            let path = format!("/admin/stats/breakdown?{query}&by={by}&metric={metric}");
+            let (status, full) = get(&env, &path, &env.super_token).await;
+            assert_eq!(status, 200, "{path}: {full}");
+            let (status, core) = get(
+                &env,
+                &format!("{path}&fields=core&compare=false"),
+                &env.super_token,
+            )
+            .await;
+            assert_eq!(status, 200, "{path}: {core}");
+            assert_eq!(core["fields"], "core", "{by}/{metric}");
+            for total in ["total_amount_micro", "total_requests", "total_tokens"] {
+                assert_eq!(core[total], full[total], "{by}/{metric}: {total}");
+            }
+            let (core_rows, full_rows) = (
+                core["data"].as_array().unwrap(),
+                full["data"].as_array().unwrap(),
+            );
+            assert!(!full_rows.is_empty(), "{by}/{metric}");
+            assert_eq!(core_rows.len(), full_rows.len(), "{by}/{metric}");
+            for (a, b) in core_rows.iter().zip(full_rows) {
+                let context = format!("{by}/{metric}/{}", a["key"]);
+                assert_core_equal(a, b, &context);
+                for field in [
+                    "key",
+                    "rank",
+                    "label",
+                    "share_bp",
+                    "request_share_bp",
+                    "token_share_bp",
+                ] {
+                    assert_eq!(a[field], b[field], "{context}: {field}");
+                }
+                // 不查上期：名次、环比、上期金额都是"未知"（null），而不是 0；完整排行里上期金额是数。
+                assert!(
+                    a["previous_rank"].is_null()
+                        && a["delta_bp"].is_null()
+                        && a["previous_amount_micro"].is_null(),
+                    "{context}"
+                );
+                assert!(b["previous_amount_micro"].is_number(), "{context}");
+            }
+        }
+    }
+    let (_, by_model) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=model&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(by_model["data"][0]["key"], env.model_a);
+    assert_eq!(by_model["data"][0]["requests"], 3, "2 + 1 条明细");
+
+    // 带明细过滤时不能走精简源：回退完整源，指标与不带 fields 时完全相同。
+    let filtered = format!("{query}&stream=true");
+    let (_, expected) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{filtered}&by=model&compare=false"),
+        &env.super_token,
+    )
+    .await;
+    let (status, fallback) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{filtered}&by=model&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{fallback}");
+    assert_eq!(fallback["fields"], "all");
+    assert_eq!(fallback["data"], expected["data"]);
+    assert!(fallback["data"][0].get("cost_coverage_bp").is_some());
+
+    // 拆分维度不在主键内（endpoint 是明细维度）同样回退完整源，结果与不带 fields 一致。
+    let by_endpoint = format!("/admin/stats/breakdown?{query}&by=endpoint&compare=false");
+    let (_, expected) = get(&env, &by_endpoint, &env.super_token).await;
+    let (status, fallback) = get(
+        &env,
+        &format!("{by_endpoint}&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{fallback}");
+    assert_eq!(fallback["fields"], "all");
+    assert_eq!(fallback["data"], expected["data"]);
+    assert!(
+        !expected["data"].as_array().unwrap().is_empty(),
+        "expected[\"data\"].as_array().unwrap() should not be empty"
+    );
+
+    // fields=core 隐含不查上期：即便显式 compare=true 也是 null，不会再付一条上期查询。
+    let (status, implied) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=model&fields=core&compare=true"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{implied}");
+    assert!(implied["data"][0]["previous_amount_micro"].is_null());
+    assert!(implied["data"][0]["previous_rank"].is_null());
+    let (_, trend) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&fields=core&compare=true"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(trend["previous"], json!({}));
+
+    let (status, bad) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&fields=everything"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(bad["error"]["param"], "fields");
+}

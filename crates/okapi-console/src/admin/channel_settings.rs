@@ -87,6 +87,21 @@ pub(super) fn ensure_settings_balance(settings: Option<&Value>) -> Result<(), Ap
     Ok(())
 }
 
+/// `settings.health_probe`（被动探测开关）：`"off"` / `"on"`，避免拼错静默失效。
+pub(super) fn ensure_settings_health_probe(settings: Option<&Value>) -> Result<(), AppError> {
+    let Some(value) = settings
+        .and_then(|s| s.get("health_probe"))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(());
+    };
+    if matches!(value.as_str(), Some("off" | "on")) {
+        Ok(())
+    } else {
+        Err(AppError::bad_request().with_param("health_probe"))
+    }
+}
+
 /// 已退役的 Claude Code 伪装开关（2026-10-05 起由 `extensions.client_profile` 取代）：
 /// 旧前端写进来只会被静默忽略，所以直接拒绝。
 pub(super) fn ensure_settings_mimic(settings: Option<&Value>) -> Result<(), AppError> {
@@ -148,6 +163,7 @@ pub(crate) async fn validate_channel_settings(
     ensure_settings_mimic(settings)?;
     ensure_settings_tool_loss_policy(settings)?;
     ensure_settings_balance(settings)?;
+    ensure_settings_health_probe(settings)?;
     ensure_request_extensions(provider, settings)?;
     ensure_account_control(settings)
 }
