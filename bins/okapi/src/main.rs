@@ -181,6 +181,14 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+struct StopOnDrop(tokio::sync::watch::Sender<bool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
 /// Run all three roles in one process with a shared runtime substrate and isolated PG pools
 /// (data-plane gateway pool vs. background console/worker pool), running migrations once.
 async fn run_all(cfg: Config) -> anyhow::Result<()> {
@@ -201,12 +209,6 @@ async fn run_all(cfg: Config) -> anyhow::Result<()> {
     let worker_state = gateway_state.with_isolated_pg(background_pg, bg_max);
 
     let (stop_tx, _) = tokio::sync::watch::channel(false);
-    struct StopOnDrop(tokio::sync::watch::Sender<bool>);
-    impl Drop for StopOnDrop {
-        fn drop(&mut self) {
-            self.0.send_replace(true);
-        }
-    }
     let _stop_guard = StopOnDrop(stop_tx.clone());
     let signal_tx = stop_tx.clone();
     tokio::spawn(async move {
