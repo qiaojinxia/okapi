@@ -84,6 +84,8 @@ fn body(
     cand: &ChannelCandidate,
     work: &Work,
 ) -> Result<Bytes, UpstreamError> {
+    let original: Value =
+        serde_json::from_slice(&work.body).map_err(|e| UpstreamError::Build(e.to_string()))?;
     // 没写输出上限时按预扣封顶补上，由 build_upstream_body 在转换前对 Responses 原文做（与 HTTP 同一处）
     let built = build_upstream_body(
         bill,
@@ -91,10 +93,9 @@ fn body(
         cand,
         &work.body,
         cand.upstream_model(&bill.model),
+        Some(&original),
     )?;
     let shaped = shape_upstream_body(bill, cand, built)?;
-    let original: Value =
-        serde_json::from_slice(&work.body).map_err(|e| UpstreamError::Build(e.to_string()))?;
     let mut value: Value =
         serde_json::from_slice(&shaped).map_err(|e| UpstreamError::Build(e.to_string()))?;
     // Channel customization cannot turn a warmup into generation, alter lanes or inject history.

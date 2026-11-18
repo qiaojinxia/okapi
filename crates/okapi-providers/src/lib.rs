@@ -61,7 +61,10 @@ pub use custom_pass::PassUpstream;
 pub use error::UpstreamError;
 pub use gemini::GeminiUpstream;
 pub use http::{HttpPool, Outbound};
-pub use openai::{ChatResponse, OpenAiUpstream, StreamHandle, ensure_stream_usage, rewrite_model};
+pub use openai::{
+    ChatResponse, OpenAiUpstream, StreamHandle, ensure_stream_usage, ensure_stream_usage_value,
+    rewrite_model, rewrite_model_value,
+};
 pub use reasoning::{ReasoningDirective, split_reasoning_suffix};
 pub use types::ChatEvent;
 pub use vertex::VertexUpstream;

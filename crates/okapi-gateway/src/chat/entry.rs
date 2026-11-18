@@ -57,6 +57,7 @@ pub async fn chat_completions(
         &state,
         &headers,
         &body,
+        Some(&value),
         request_id,
         started,
         Ingress::OpenAi,
@@ -88,12 +89,6 @@ pub async fn responses_compact(
     .await
 }
 
-pub(super) fn compact_request_body(body: &Bytes) -> Result<Bytes, serde_json::Error> {
-    let mut fields: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(body)?;
-    fields.remove("stream");
-    serde_json::to_vec(&fields).map(Bytes::from)
-}
-
 pub(super) async fn responses_entry(
     state: AppState,
     headers: HeaderMap,
@@ -107,7 +102,7 @@ pub(super) async fn responses_entry(
         Err(error) => return error.into_response_with(Some(request_id)),
     };
     // 请求体只解析成 Value 一次，探针从 Value 取（不再按字节各解析一遍）
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
     let Ok(probe) = <ResponsesRequestProbe as serde::Deserialize>::deserialize(&value) else {
@@ -129,11 +124,18 @@ pub(super) async fn responses_entry(
                 .with_param("stream")
                 .into_response_with(Some(request_id));
         }
-        // 通用字段剥除器会保护 stream；compact 协议须单独移除该字段。
-        let Ok(body) = compact_request_body(&body) else {
-            return AppError::bad_request().into_response_with(Some(request_id));
-        };
-        body
+        // 通用字段剥除器会保护 stream；compact 协议须单独移除该字段（复用已解析的 value）。
+        let removed = value
+            .as_object_mut()
+            .is_some_and(|fields| fields.remove("stream").is_some());
+        if removed {
+            let Ok(encoded) = serde_json::to_vec(&value) else {
+                return AppError::bad_request().into_response_with(Some(request_id));
+            };
+            Bytes::from(encoded)
+        } else {
+            body
+        }
     } else {
         body
     };
@@ -158,7 +160,14 @@ pub(super) async fn responses_entry(
         foreign_tools: features.foreign_tools,
     };
     match Box::pin(handle_chat(
-        &state, &headers, &body, request_id, started, ingress, &info,
+        &state,
+        &headers,
+        &body,
+        Some(&value),
+        request_id,
+        started,
+        ingress,
+        &info,
     ))
     .await
     {
@@ -252,6 +261,7 @@ pub async fn gemini_generate(
         &state,
         &headers,
         &body,
+        Some(&value),
         request_id,
         started,
         Ingress::Gemini,
@@ -309,6 +319,7 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
         &state,
         &headers,
         &body,
+        Some(&value),
         request_id,
         started,
         Ingress::Anthropic,

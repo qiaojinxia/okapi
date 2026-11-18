@@ -77,6 +77,16 @@ pub async fn resolve_parent(
     body: &[u8],
 ) -> Result<Option<ResponseParent>, AppError> {
     let value: Value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    resolve_parent_value(sched, user, key, &value).await
+}
+
+/// 同 [`resolve_parent`]，复用调用方已解析好的请求体 `Value`，免去一次全量 JSON 解码。
+pub async fn resolve_parent_value(
+    sched: &SchedulerRedis,
+    user: i64,
+    key: i64,
+    value: &Value,
+) -> Result<Option<ResponseParent>, AppError> {
     let Some(previous) = value.get("previous_response_id").filter(|v| !v.is_null()) else {
         return Ok(None);
     };

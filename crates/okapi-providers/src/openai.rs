@@ -83,6 +83,22 @@ pub fn rewrite_model(
     }
     let mut value: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    if !rewrite_model_value(&mut value, requested, upstream_model)? {
+        return Ok(body.clone());
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    Ok(Bytes::from(bytes))
+}
+
+/// 在已解析请求体上原地重写 `model`；无需修改时返回 `Ok(false)`。
+pub fn rewrite_model_value(
+    value: &mut serde_json::Value,
+    requested: &str,
+    upstream_model: &str,
+) -> Result<bool, UpstreamError> {
+    if requested == upstream_model {
+        return Ok(false);
+    }
     let Some(obj) = value.as_object_mut() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
@@ -90,8 +106,7 @@ pub fn rewrite_model(
         "model".to_owned(),
         serde_json::Value::String(upstream_model.to_owned()),
     );
-    let bytes = serde_json::to_vec(&value).map_err(|e| UpstreamError::Build(e.to_string()))?;
-    Ok(Bytes::from(bytes))
+    Ok(true)
 }
 
 /// 流式补 `stream_options.include_usage`（对齐 new-api `ForceStreamOption`
@@ -108,13 +123,23 @@ pub fn rewrite_model(
 pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
     let mut value: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    if !ensure_stream_usage_value(&mut value)? {
+        return Ok(body.clone());
+    }
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 在已解析请求体上原地确保 `stream_options.include_usage == true`；已满足时返回 `Ok(false)`。
+pub fn ensure_stream_usage_value(value: &mut serde_json::Value) -> Result<bool, UpstreamError> {
     let Some(obj) = value.as_object_mut() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
     match obj.get_mut("stream_options") {
         Some(serde_json::Value::Object(options)) => {
             if options.get("include_usage") == Some(&serde_json::Value::Bool(true)) {
-                return Ok(body.clone());
+                return Ok(false);
             }
             options.insert("include_usage".to_owned(), serde_json::Value::Bool(true));
         }
@@ -125,9 +150,7 @@ pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
             );
         }
     }
-    serde_json::to_vec(&value)
-        .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+    Ok(true)
 }
 
 #[derive(Clone)]

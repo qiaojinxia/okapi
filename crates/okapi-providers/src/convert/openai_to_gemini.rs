@@ -22,6 +22,14 @@ use std::collections::HashMap;
 pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
     let src: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let out = request_openai_to_gemini_value(&src)?;
+    serde_json::to_vec(&out)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 在已解析 `Value` 上完成 OpenAI → Gemini 请求转换（两跳转换直接传入内存对象）。
+pub fn request_openai_to_gemini_value(src: &Value) -> Result<Value, UpstreamError> {
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
@@ -110,9 +118,7 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
 
     convert_tools(src, &mut out);
 
-    serde_json::to_vec(&Value::Object(out))
-        .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+    Ok(Value::Object(out))
 }
 
 /// tool_call_id → 函数名（functionResponse 必须带 name）。

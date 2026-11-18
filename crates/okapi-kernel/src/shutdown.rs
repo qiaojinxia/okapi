@@ -61,7 +61,7 @@ struct PendingTask(Arc<Inner>);
 impl Drop for PendingTask {
     fn drop(&mut self) {
         if self.0.count.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.0.idle.notify_one();
+            self.0.idle.notify_waiters();
         }
     }
 }

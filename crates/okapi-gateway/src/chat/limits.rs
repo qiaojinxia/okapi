@@ -1,6 +1,7 @@
 //! 预扣上限：请求级单价上限、补全上限的准入值，以及写进上游请求的缺省输出上限。
 use super::super::ingress::Ingress;
 use super::{DEFAULT_COMPLETION_CAP, MAX_COMPLETION_CAP};
+#[cfg(test)]
 use bytes::Bytes;
 
 /// 报价单价是否越过请求声明的上限；越过则返回 "轴:实际单价" 供 param 回显。
@@ -81,18 +82,54 @@ pub(super) fn default_output_cap(requested: Option<u32>, max_output: Option<u32>
 /// Gemini 请求里生成配置对象的两种键名（写入时首选 camelCase）。
 pub(super) const GEMINI_CONFIG_KEYS: [&str; 2] = ["generationConfig", "generation_config"];
 
-/// 按入口方言写入缺省输出上限（转换路径各自翻译成上游字段）。已有上限的不动；
-/// compact 端点不接受输出上限参数，跳过。作用在入口方言的原文上，必须先于出向转换
-/// （见 `build_upstream_body`）：转换之后的体已经是上游方言，再按入口方言写字段名就错位了。
-pub(super) fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Bytes {
-    let Some(cap) = cap else {
-        return body;
+fn has_non_null(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+    obj.get(key).is_some_and(|v| !v.is_null())
+}
+
+/// 零克隆预判：是否需要往当前请求体写入缺省输出上限。
+pub(super) fn needs_default_output_bound(
+    ingress: Ingress,
+    cap: Option<u32>,
+    current: &serde_json::Value,
+) -> bool {
+    if cap.is_none() || ingress == Ingress::ResponsesCompact {
+        return false;
+    }
+    let Some(obj) = current.as_object() else {
+        return false;
     };
-    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return body;
+    match ingress {
+        Ingress::OpenAi => {
+            !has_non_null(obj, "max_tokens") && !has_non_null(obj, "max_completion_tokens")
+        }
+        Ingress::Anthropic => !has_non_null(obj, "max_tokens"),
+        Ingress::Responses => !has_non_null(obj, "max_output_tokens"),
+        Ingress::Gemini => {
+            let cfg_key = GEMINI_CONFIG_KEYS
+                .into_iter()
+                .find(|key| obj.get(*key).is_some_and(|v| !v.is_null()));
+            match cfg_key.and_then(|key| obj.get(key)) {
+                None => true,
+                Some(v) => v
+                    .as_object()
+                    .is_some_and(|config| !has_non_null(config, "maxOutputTokens")),
+            }
+        }
+        Ingress::ResponsesCompact => false,
+    }
+}
+
+/// 按入口方言在已解析请求体上原地写入缺省输出上限；无改动时返回 `false`。
+pub(super) fn bound_default_output_value(
+    ingress: Ingress,
+    cap: Option<u32>,
+    value: &mut serde_json::Value,
+) -> bool {
+    let Some(cap) = cap else {
+        return false;
     };
     let Some(obj) = value.as_object_mut() else {
-        return body;
+        return false;
     };
     // `"max_tokens": null` 在 admission 侧与缺席同形（serde null → None，预扣照封顶档
     // 冻结），但"键存在即已声明"会让上限写不进请求——上游照模型 max_output 生成、
@@ -120,11 +157,11 @@ pub(super) fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Byt
             }
         }
     }
-    let inserted = match ingress {
+    match ingress {
         Ingress::OpenAi => {
             // max_tokens 兼容面最广；推理模型由 model_parameters 改写成 max_completion_tokens
             if obj.contains_key("max_tokens") || obj.contains_key("max_completion_tokens") {
-                return body;
+                return false;
             }
             obj.insert("max_tokens".into(), cap.into());
             true
@@ -142,15 +179,30 @@ pub(super) fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Byt
                 .or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
             else {
-                return body;
+                return false;
             };
             config
                 .insert("maxOutputTokens".into(), cap.into())
                 .is_none()
         }
         Ingress::ResponsesCompact => false,
+    }
+}
+
+/// 按入口方言写入缺省输出上限（转换路径各自翻译成上游字段）。已有上限的不动；
+/// compact 端点不接受输出上限参数，跳过。作用在入口方言的原文上，必须先于出向转换
+/// （见 `build_upstream_body`）：转换之后的体已经是上游方言，再按入口方言写字段名就错位了。
+#[cfg(test)]
+pub(super) fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Bytes {
+    if cap.is_none() || ingress == Ingress::ResponsesCompact {
+        return body;
+    }
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
     };
-    if !inserted {
+    if !needs_default_output_bound(ingress, cap, &value)
+        || !bound_default_output_value(ingress, cap, &mut value)
+    {
         return body;
     }
     serde_json::to_vec(&value).map_or(body, Bytes::from)

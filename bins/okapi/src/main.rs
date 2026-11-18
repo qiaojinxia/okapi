@@ -105,16 +105,7 @@ async fn main() -> anyhow::Result<()> {
         Role::Gateway => gateway::run(cfg).await,
         Role::Worker => worker::run(cfg).await,
         Role::Console => console::run(cfg).await,
-        Role::All => {
-            let worker_cfg = cfg.clone();
-            let console_cfg = cfg.clone();
-            tokio::try_join!(
-                gateway::run(cfg),
-                worker::run(worker_cfg),
-                console::run(console_cfg)
-            )
-            .map(|_| ())
-        }
+        Role::All => run_all(cfg).await,
         Role::Migrate {
             from,
             dir,
@@ -188,6 +179,71 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Run all three roles in one process with a shared runtime substrate and isolated PG pools
+/// (data-plane gateway pool vs. background console/worker pool), running migrations once.
+async fn run_all(cfg: Config) -> anyhow::Result<()> {
+    let gw_max = okapi_store::default_pg_pool_size();
+    let bg_max = okapi_store::background_pg_pool_size();
+    let gateway_pg = okapi_store::connect_pg_with_max(&cfg.database_url, gw_max).await?;
+    okapi_store::run_migrations(&gateway_pg).await?;
+    let background_pg = okapi_store::connect_pg_with_max(&cfg.database_url, bg_max).await?;
+    let redis = okapi_store::connect_redis(&cfg.redis_url).await?;
+    let nats = gateway::connect_nats_optional(cfg.nats_url.as_deref()).await;
+    let ch = gateway::build_ch_optional(cfg.clickhouse_url.as_deref())?;
+    let gateway_state =
+        gateway::build_state_with_clients(gateway_pg, gw_max, redis.clone(), &cfg.node, ch, nats)
+            .await?;
+    gateway::spawn_state_sync(&gateway_state);
+
+    let console_state = gateway_state.with_isolated_pg(background_pg.clone(), bg_max);
+    let worker_state = gateway_state.with_isolated_pg(background_pg, bg_max);
+
+    let (stop_tx, _) = tokio::sync::watch::channel(false);
+    struct StopOnDrop(tokio::sync::watch::Sender<bool>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.send_replace(true);
+        }
+    }
+    let _stop_guard = StopOnDrop(stop_tx.clone());
+    let signal_tx = stop_tx.clone();
+    tokio::spawn(async move {
+        okapi_kernel::shutdown::signal().await;
+        signal_tx.send_replace(true);
+    });
+    let wait_stop = |rx: tokio::sync::watch::Receiver<bool>| {
+        let mut rx = rx;
+        async move {
+            let _ = rx.wait_for(|stop| *stop).await;
+        }
+    };
+
+    let gw_cfg = cfg.clone();
+    let worker_cfg = cfg.clone();
+    tokio::try_join!(
+        Box::pin(gateway::run_with_state(
+            gw_cfg,
+            gateway_state,
+            false,
+            wait_stop(stop_tx.subscribe()),
+        )),
+        Box::pin(worker::run_with_state(
+            worker_cfg,
+            worker_state,
+            redis,
+            false,
+            wait_stop(stop_tx.subscribe()),
+        )),
+        Box::pin(console::run_with_state(
+            cfg,
+            console_state,
+            false,
+            wait_stop(stop_tx.subscribe()),
+        )),
+    )
+    .map(|_| ())
 }
 
 /// `okapi seal-credentials`：把存量明文渠道凭证一次性封成 AES-GCM 信封。

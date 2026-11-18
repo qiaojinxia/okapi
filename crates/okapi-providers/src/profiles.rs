@@ -10,6 +10,12 @@ pub mod codex_client;
 pub mod identity;
 mod wire_order;
 
+/// 持久化在 `settings` 表里、由各角色后台同步钩子热加载的扩展配置键。
+pub const RUNTIME_SETTING_KEYS: &[&str] = &[];
+
+/// 同步一条 `settings` 扩展配置到进程内激活清单。
+pub fn apply_runtime_setting(_key: &str, _value: Option<&Value>) {}
+
 #[derive(Clone, Debug, Default)]
 pub struct RequestContext {
     pub extensions: Value,

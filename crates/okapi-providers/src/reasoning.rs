@@ -278,6 +278,11 @@ pub fn strip_unified(body: &Bytes) -> Option<Bytes> {
     strip_unified_keeping(body, &[])
 }
 
+/// 在已解析请求体上原地摘除已消化的统一 `reasoning` 键；有任何改动返回 `true`。
+pub fn strip_unified_value(value: &mut Value) -> bool {
+    strip_unified_keeping_value(value, &[])
+}
+
 /// Responses 同方言直转前的处理：`reasoning.effort` 正是上游的原生键，**必须留下**；
 /// 只摘走 OpenRouter 形状里 Responses 不认的 `max_tokens` / `enabled`
 /// （二者已折进 directive，由 [`apply_responses`] 以 effort 档位补回）。
@@ -286,22 +291,38 @@ pub fn strip_unified_for_responses(body: &Bytes) -> Option<Bytes> {
     strip_unified_keeping(body, &["effort"])
 }
 
+/// 在已解析请求体上原地执行 [`strip_unified_for_responses`]；有任何改动返回 `true`。
+pub fn strip_unified_for_responses_value(value: &mut Value) -> bool {
+    strip_unified_keeping_value(value, &["effort"])
+}
+
 fn strip_unified_keeping(body: &Bytes, keep: &[&str]) -> Option<Bytes> {
     if !mentions_reasoning(body) {
         return None;
     }
     let mut value: Value = serde_json::from_slice(body).ok()?;
-    let root = value.as_object_mut()?;
-    let obj = root.get_mut(UNIFIED_FIELD)?.as_object_mut()?;
+    if !strip_unified_keeping_value(&mut value, keep) {
+        return None;
+    }
+    Some(Bytes::from(serde_json::to_vec(&value).ok()?))
+}
+
+fn strip_unified_keeping_value(value: &mut Value, keep: &[&str]) -> bool {
+    let Some(root) = value.as_object_mut() else {
+        return false;
+    };
+    let Some(obj) = root.get_mut(UNIFIED_FIELD).and_then(Value::as_object_mut) else {
+        return false;
+    };
     let before = obj.len();
     obj.retain(|k, v| keep.contains(&k.as_str()) || !consumed_key(k, v));
     if obj.len() == before {
-        return None; // 一个都没消化：原样透传，别动它
+        return false; // 一个都没消化：原样透传，别动它
     }
     if obj.is_empty() {
         root.remove(UNIFIED_FIELD);
     }
-    Some(Bytes::from(serde_json::to_vec(&value).ok()?))
+    true
 }
 
 /// 剥离 reasoning 后缀：`gpt-x-high` → (`gpt-x`, effort=high)；
@@ -358,20 +379,56 @@ pub fn split_reasoning_suffix(name: &str) -> Option<(&str, ReasoningDirective)> 
 
 /// OpenAI 方向注入：effort → `reasoning_effort`（已有同名字段不覆盖——尊重显式请求）。
 pub fn apply_openai(body: &Bytes, directive: ReasoningDirective) -> Result<Bytes, UpstreamError> {
-    // 只给了预算（anthropic 方言客户端 / `-thinking-N`）时折成档位：
-    // OpenAI 没有预算参数，但有档位，硬丢掉等于收了钱不干活
-    let effort = directive.effective_effort();
     let mut value: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
-    let Some(obj) = value.as_object_mut() else {
-        return Err(UpstreamError::Build("body_not_object".to_owned()));
-    };
-    if !obj.contains_key("reasoning_effort") {
-        obj.insert("reasoning_effort".into(), json!(effort.as_str()));
+    if !apply_openai_value(&mut value, directive)? {
+        return Ok(body.clone());
     }
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 在已解析请求体上原地执行 OpenAI reasoning 注入；无改动时返回 `Ok(false)`。
+pub fn needs_apply_openai(value: &Value) -> Result<bool, UpstreamError> {
+    let Some(obj) = value.as_object() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    Ok(!obj.contains_key("reasoning_effort"))
+}
+
+/// 在已解析请求体上原地执行 OpenAI reasoning 注入；无改动时返回 `Ok(false)`。
+pub fn apply_openai_value(
+    value: &mut Value,
+    directive: ReasoningDirective,
+) -> Result<bool, UpstreamError> {
+    // 只给了预算（anthropic 方言客户端 / `-thinking-N`）时折成档位：
+    // OpenAI 没有预算参数，但有档位，硬丢掉等于收了钱不干活
+    let effort = directive.effective_effort();
+    let Some(obj) = value.as_object_mut() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    if obj.contains_key("reasoning_effort") {
+        return Ok(false);
+    }
+    obj.insert("reasoning_effort".into(), json!(effort.as_str()));
+    Ok(true)
+}
+
+/// 判断是否需要执行 Responses reasoning 注入（零拷贝预检查）。
+pub fn needs_apply_responses(value: &Value) -> Result<bool, UpstreamError> {
+    let Some(obj) = value.as_object() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    if let Some(existing) = obj.get(UNIFIED_FIELD) {
+        let Some(reasoning) = existing.as_object() else {
+            return Ok(false);
+        };
+        if reasoning.contains_key("effort") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Responses 方向注入（同方言直转体）：effort → `reasoning.effort`。
@@ -380,26 +437,41 @@ pub fn apply_responses(
     body: &Bytes,
     directive: ReasoningDirective,
 ) -> Result<Bytes, UpstreamError> {
-    let effort = directive.effective_effort();
     let mut value: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
-    let Some(obj) = value.as_object_mut() else {
-        return Err(UpstreamError::Build("body_not_object".to_owned()));
-    };
-    let slot = obj
-        .entry(UNIFIED_FIELD)
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let Some(reasoning) = slot.as_object_mut() else {
-        // 客户端写了个非对象的 reasoning：不是我们能修的，原样送上游让它报错
-        return Ok(body.clone());
-    };
-    if reasoning.contains_key("effort") {
+    if !apply_responses_value(&mut value, directive)? {
         return Ok(body.clone());
     }
-    reasoning.insert("effort".into(), json!(effort.as_str()));
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 在已解析请求体上原地执行 Responses reasoning 注入；无改动时返回 `Ok(false)`。
+pub fn apply_responses_value(
+    value: &mut Value,
+    directive: ReasoningDirective,
+) -> Result<bool, UpstreamError> {
+    let effort = directive.effective_effort();
+    let Some(obj) = value.as_object_mut() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    if let Some(existing) = obj.get(UNIFIED_FIELD) {
+        let Some(reasoning) = existing.as_object() else {
+            // 客户端写了个非对象的 reasoning：不是我们能修的，原样送上游让它报错
+            return Ok(false);
+        };
+        if reasoning.contains_key("effort") {
+            return Ok(false);
+        }
+    }
+    let reasoning = obj
+        .entry(UNIFIED_FIELD)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| UpstreamError::Build("reasoning".to_owned()))?;
+    reasoning.insert("effort".into(), json!(effort.as_str()));
+    Ok(true)
 }
 
 /// Anthropic 方向注入（转换产物或透传体均适用）：
@@ -411,11 +483,32 @@ pub fn apply_anthropic(
 ) -> Result<Bytes, UpstreamError> {
     let mut value: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    if !apply_anthropic_value(&mut value, directive)? {
+        return Ok(body.clone());
+    }
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 判断是否需要执行 Anthropic thinking 注入（零拷贝预检查）。
+pub fn needs_apply_anthropic(value: &Value) -> Result<bool, UpstreamError> {
+    let Some(obj) = value.as_object() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    Ok(!obj.contains_key("thinking"))
+}
+
+/// 在已解析请求体上原地执行 Anthropic thinking 注入；无改动时返回 `Ok(false)`。
+pub fn apply_anthropic_value(
+    value: &mut Value,
+    directive: ReasoningDirective,
+) -> Result<bool, UpstreamError> {
     let Some(obj) = value.as_object_mut() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
     if obj.contains_key("thinking") {
-        return Ok(body.clone());
+        return Ok(false);
     }
     let budget = directive.effective_budget().max(1_024);
     let max_tokens = obj.get("max_tokens").and_then(Value::as_u64).unwrap_or(0);
@@ -427,33 +520,60 @@ pub fn apply_anthropic(
         "thinking".into(),
         json!({"type": "enabled", "budget_tokens": budget}),
     );
-    serde_json::to_vec(&value)
-        .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+    Ok(true)
 }
 
 /// Gemini 方向注入：`generationConfig.thinkingConfig`（已带不覆盖）。
 pub fn apply_gemini(body: &Bytes, directive: ReasoningDirective) -> Result<Bytes, UpstreamError> {
     let mut value: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
-    let Some(obj) = value.as_object_mut() else {
-        return Err(UpstreamError::Build("body_not_object".to_owned()));
-    };
-    let cfg = obj.entry("generationConfig").or_insert_with(|| json!({}));
-    if let Some(cfg) = cfg.as_object_mut()
-        && !cfg.contains_key("thinkingConfig")
-    {
-        cfg.insert(
-            "thinkingConfig".into(),
-            json!({
-                "thinkingBudget": directive.effective_budget(),
-                "includeThoughts": true,
-            }),
-        );
+    if !apply_gemini_value(&mut value, directive)? {
+        return Ok(body.clone());
     }
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 判断是否需要执行 Gemini thinkingConfig 注入（零拷贝预检查）。
+pub fn needs_apply_gemini(value: &Value) -> Result<bool, UpstreamError> {
+    let Some(obj) = value.as_object() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    Ok(!obj
+        .get("generationConfig")
+        .is_some_and(|cfg| !cfg.is_object() || cfg.get("thinkingConfig").is_some()))
+}
+
+/// 在已解析请求体上原地执行 Gemini thinkingConfig 注入；无改动时返回 `Ok(false)`。
+pub fn apply_gemini_value(
+    value: &mut Value,
+    directive: ReasoningDirective,
+) -> Result<bool, UpstreamError> {
+    let Some(obj) = value.as_object_mut() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    if obj
+        .get("generationConfig")
+        .is_some_and(|cfg| !cfg.is_object() || cfg.get("thinkingConfig").is_some())
+    {
+        return Ok(false);
+    }
+    let Some(cfg) = obj
+        .entry("generationConfig")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        return Ok(false);
+    };
+    cfg.insert(
+        "thinkingConfig".into(),
+        json!({
+            "thinkingBudget": directive.effective_budget(),
+            "includeThoughts": true,
+        }),
+    );
+    Ok(true)
 }
 
 #[cfg(test)]

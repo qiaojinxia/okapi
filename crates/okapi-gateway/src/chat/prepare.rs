@@ -62,19 +62,30 @@ pub(super) async fn resolve_with_directive(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_chat(
     state: &AppState,
     headers: &HeaderMap,
     body: &Bytes,
+    parsed: Option<&serde_json::Value>,
     request_id: Uuid,
     started: Instant,
     ingress: Ingress,
     info: &ProbeInfo,
 ) -> Result<Response, AppError> {
-    let bill = prepare_chat(state, headers, body, request_id, started, ingress, info).await?;
+    let owned_parsed: Option<serde_json::Value> = if parsed.is_none() {
+        serde_json::from_slice(body).ok()
+    } else {
+        None
+    };
+    let parsed_ref = parsed.or(owned_parsed.as_ref());
+    let bill = prepare_chat(
+        state, headers, body, parsed_ref, request_id, started, ingress, info,
+    )
+    .await?;
     // 预扣已建立且两行之间没有 await：此后 handler 被丢弃也会退款
     let cancel = CancelRefund::arm(&bill);
-    let outcome = match Box::pin(forward(&bill, info, body)).await {
+    let outcome = match Box::pin(forward(&bill, info, body, parsed_ref)).await {
         Ok(resp) => Ok(resp),
         Err(failure) => {
             settle_failure(&bill, &failure).await;
@@ -91,11 +102,12 @@ pub(super) async fn handle_chat(
 }
 
 // HTTP 与 Responses WS 每轮共用的鉴权、限额、报价与预扣链。
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn prepare_chat(
     state: &AppState,
     headers: &HeaderMap,
     body: &Bytes,
+    parsed: Option<&serde_json::Value>,
     request_id: Uuid,
     started: Instant,
     ingress: Ingress,
@@ -121,8 +133,21 @@ pub(super) async fn prepare_chat(
         ));
     }
 
+    // 请求体只在缺席（如 WS 入口）时解析一次：图片 / 附件估算、Responses 父绑定、原生工具与推理意图共用。
+    let owned_parsed: Option<serde_json::Value> = if parsed.is_none() {
+        serde_json::from_slice(body).ok()
+    } else {
+        None
+    };
+    let parsed = parsed.or(owned_parsed.as_ref());
+
     let response_parent = if matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact) {
-        response_affinity::resolve_parent(&state.sched, key.user_id, key.key_id, body).await?
+        if let Some(value) = parsed {
+            response_affinity::resolve_parent_value(&state.sched, key.user_id, key.key_id, value)
+                .await?
+        } else {
+            response_affinity::resolve_parent(&state.sched, key.user_id, key.key_id, body).await?
+        }
     } else {
         None
     };
@@ -148,10 +173,8 @@ pub(super) async fn prepare_chat(
     // 估价（预扣补全缺省 = models.max_output，无则 2048，§5.1）
     let est_prompt = info.prompt_tokens;
     let density = estimate::prompt_density(est_prompt, info.prompt_chars);
-    // 请求体在这里只解析一次：图片 / 附件估算与原生工具准入共用（大请求体每多解析一遍都是毫秒级 CPU）
-    let parsed: Option<serde_json::Value> = serde_json::from_slice(body).ok();
     // 图片输入另计（密度只描述文本，先算完再加）
-    let est_prompt = parsed.as_ref().map_or(est_prompt, |v| {
+    let est_prompt = parsed.map_or(est_prompt, |v| {
         est_prompt
             .saturating_add(image_inputs(ingress, v).saturating_mul(IMAGE_INPUT_TOKENS))
             .saturating_add(attachment_tokens(ingress, v))
@@ -162,7 +185,6 @@ pub(super) async fn prepare_chat(
         meta.max_output.and_then(|v| u32::try_from(v).ok()),
     );
     let mut server_tools = parsed
-        .as_ref()
         .ok_or("tools")
         .and_then(super::super::server_tools::ToolAdmission::from_value)
         .map_err(|param| AppError::bad_request().with_param(param))?;
@@ -198,14 +220,14 @@ pub(super) async fn prepare_chat(
     // 与 OpenRouter 一致，只有模型名上的变体改计价，请求参数不改。
     // 请求体上面已经解析过一次（`parsed`），推理意图与路由偏好直接从它取，别再各读一遍原文：
     // 带 thinking 的请求（Claude Code 几乎全是）会让原文版的子串粗筛恒为真，白白多出整份解析。
-    let request_reasoning = match parsed.as_ref() {
+    let request_reasoning = match parsed {
         Some(value) => reasoning::parse_request_value(value),
         None => reasoning::parse_request(body),
     };
     let directive = request_reasoning.merge(directive);
     // 顶层有没有统一 `reasoning` 对象：没有的话转发前的摘除什么也摘不到。解析失败（理论上不会：
     // 入口已经解析过）按「有」走原来的路径。
-    let unified_reasoning = if parsed.as_ref().is_none_or(reasoning::has_unified_object) {
+    let unified_reasoning = if parsed.is_none_or(reasoning::has_unified_object) {
         UnifiedReasoning::Present
     } else {
         UnifiedReasoning::Absent
@@ -213,7 +235,7 @@ pub(super) async fn prepare_chat(
 
     // 请求级单价上限（§11.24）：拿快照里的**最终**单价判——它已经过模型/分组/个人系数与
     // 修饰器全链，正是这次真会按之的价。判在预扣之前：超限直接拒，别扣了钱再让用户发现贵。
-    let prefs = match parsed.as_ref() {
+    let prefs = match parsed {
         Some(value) => super::super::routing_prefs::parse_value(value)?,
         None => super::super::routing_prefs::parse(body)?,
     };
@@ -401,8 +423,9 @@ pub(super) async fn forward(
     bill: &RequestBilling,
     info: &ProbeInfo,
     body: &Bytes,
+    parsed: Option<&serde_json::Value>,
 ) -> Result<Response, ForwardFailure> {
-    let first = try_model(bill, info, body).await;
+    let first = try_model(bill, info, body, parsed).await;
     let zero_candidates = matches!(
         &first,
         Err(f) if matches!(
@@ -424,7 +447,7 @@ pub(super) async fn forward(
             fallback = %fb_bill.model,
             "请求模型零可用候选，模型级降级"
         );
-        match try_model(&fb_bill, info, body).await {
+        match try_model(&fb_bill, info, body, parsed).await {
             // 降级模型同样零候选 → 链上下一个
             Err(f)
                 if matches!(

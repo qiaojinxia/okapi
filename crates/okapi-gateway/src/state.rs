@@ -452,6 +452,33 @@ impl AppState {
         }
     }
 
+    /// 为共享同一进程运行时（`okapi all`）衍生一份隔离的 PostgreSQL 连接池、结算计数与流控闸；
+    /// PriceBook、路由缓存、settings 缓存、健康标记、上游连接池、OAuth 单飞闸、Redis/NATS/CH 共用同一份实例。
+    #[must_use]
+    pub fn with_isolated_pg(&self, pg: sqlx::PgPool, pg_pool_max: u32) -> Self {
+        Self {
+            core: CoreState {
+                pg,
+                ledger: self.core.ledger.clone(),
+                sched: self.core.sched.clone(),
+                pricebook: Arc::clone(&self.core.pricebook),
+                node: Arc::clone(&self.core.node),
+                ch: self.core.ch.clone(),
+                stats_query_cache: self.core.stats_query_cache.clone(),
+                nats: self.core.nats.clone(),
+                master_key: self.core.master_key.clone(),
+                settings_cache: self.core.settings_cache.clone(),
+                in_flight: self.core.in_flight.clone(),
+                settlements: okapi_kernel::shutdown::Pending::default(),
+            },
+            upstreams: self.upstreams.clone(),
+            routing: self.routing.clone(),
+            health: self.health.clone(),
+            flow: super::flow_control_for_pool(pg_pool_max),
+            media: self.media.clone(),
+        }
+    }
+
     /// 只失效本进程（广播的接收端用；避免收到自己的广播再转发出去打环）。
     pub fn invalidate_routing_caches_local(&self) {
         self.routing.model_cache.invalidate_all();
@@ -460,5 +487,117 @@ impl AppState {
         self.routing.channel_control_cache.invalidate_all();
         self.routing.request_policy.invalidate_all();
         self.settings_cache.invalidate_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn isolated_pg_shares_runtime_caches_and_isolates_pool_flow() {
+        let gw_pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_gw")
+            .expect("lazy pool parses");
+        let bg_pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_bg")
+            .expect("lazy pool parses");
+        let redis = fred::prelude::Builder::from_config(fred::prelude::Config::default())
+            .build()
+            .expect("redis client builds without connect");
+        let sched = okapi_kernel::sched_redis::SchedulerRedis::new(redis.clone());
+        let ledger = okapi_ledger::BalanceLedger::new(redis);
+        let in_flight = okapi_kernel::inflight::InFlightGauge::new(sched.clone(), "test-node");
+        let resources = okapi_providers::inference::Resources::new().expect("resources");
+        let inference =
+            okapi_providers::inference::Registry::builtin(&resources).expect("inference registry");
+        let openai = resources.openai.clone();
+
+        let gw = AppState {
+            core: CoreState {
+                pg: gw_pg,
+                ledger,
+                sched,
+                pricebook: Arc::new(okapi_pricing::PriceBookHandle::new(
+                    okapi_pricing::book::compile(okapi_pricing::PriceBookSource {
+                        epoch: 0,
+                        models: Vec::new(),
+                        groups: Vec::new(),
+                        overrides: Vec::new(),
+                        rules: Vec::new(),
+                    })
+                    .expect("empty pricebook compiles"),
+                )),
+                node: Arc::from("test-node"),
+                ch: None,
+                stats_query_cache: okapi_kernel::state::build_query_cache(),
+                nats: None,
+                master_key: None,
+                settings_cache: Cache::builder().max_capacity(16).build(),
+                in_flight,
+                settlements: okapi_kernel::shutdown::Pending::default(),
+            },
+            upstreams: Upstreams {
+                azure: okapi_providers::AzureUpstream::new(openai.clone()),
+                openai,
+                inference,
+                anthropic: resources.anthropic,
+                bedrock: resources.bedrock,
+                vertex: resources.vertex,
+                pass: okapi_providers::PassUpstream::new().expect("pass client"),
+                refresh_gate: Arc::default(),
+            },
+            routing: RoutingCaches {
+                model_cache: Cache::builder().max_capacity(16).build(),
+                cand_cache: Cache::builder().max_capacity(16).build(),
+                channel_cost_cache: Cache::builder().max_capacity(16).build(),
+                channel_control_cache: Cache::builder().max_capacity(16).build(),
+                margin_cache: Cache::builder().max_capacity(1).build(),
+                request_policy: Cache::builder().max_capacity(1).build(),
+            },
+            health: HealthMarks {
+                key_failures: Cache::builder().max_capacity(16).build(),
+                egress_failures: Cache::builder().max_capacity(16).build(),
+                egress_verifying: Cache::builder().max_capacity(16).build(),
+            },
+            flow: crate::flow_control_for_pool(16),
+            media: Media {
+                image_download_gate: Arc::new(tokio::sync::Semaphore::new(4)),
+                batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
+                image_storage: Arc::new(
+                    crate::images::tasks::objects::Storage::from_env().expect("storage"),
+                ),
+            },
+        };
+
+        let bg = gw.with_isolated_pg(bg_pg, 4);
+        assert!(Arc::ptr_eq(&gw.core.pricebook, &bg.core.pricebook));
+        assert!(Arc::ptr_eq(
+            &gw.upstreams.refresh_gate,
+            &bg.upstreams.refresh_gate
+        ));
+        assert_eq!(gw.flow.settle_gate.available_permits(), 8);
+        assert_eq!(bg.flow.settle_gate.available_permits(), 2);
+
+        gw.routing
+            .model_cache
+            .insert("gpt-5".into(), Arc::new(None))
+            .await;
+        assert!(bg.routing.model_cache.get("gpt-5").await.is_some());
+        bg.invalidate_routing_caches_local();
+        assert!(gw.routing.model_cache.get("gpt-5").await.is_none());
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        gw.core.settlements.spawn(async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+        });
+        started_rx.await.expect("settlement task started");
+        assert_eq!(gw.core.settlements.in_flight(), 1);
+        assert_eq!(bg.core.settlements.in_flight(), 0);
+        let _ = release_tx.send(());
+        gw.core
+            .settlements
+            .wait_idle(std::time::Duration::from_secs(2))
+            .await;
     }
 }

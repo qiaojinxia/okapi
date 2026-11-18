@@ -3,19 +3,21 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 
-/// 建立 PG 连接池。
-///
-/// 连接池大小：`OKAPI_PG_POOL` 覆写（缺省 16；8vCPU 单实例生产建议 32+，
-/// 结算写入并发由 gateway 侧信号量钳制为本值一半，见 `AppState::settle_write`）。
-///
-/// **多副本必须自己算这笔账**：每个 pod 各开一套池，总连接数 = Σ(副本数 × 本值)；`okapi all`
-/// 一个进程里 gateway / console / worker 各调一次本函数，占 3 × 本值。
-/// 按 deploy/k8s 的 gateway HPA 上限 10 + console 2 + worker 1，走缺省 16 就是 208 条，
-/// 而 PostgreSQL 缺省 `max_connections=100`——扩到一半开始报连接耗尽，且现象是
-/// `acquire_timeout` 超时而不是"连不上"，很难一眼归因。所以启动即把生效值打进日志，
-/// 让"这个 pod 到底占了几条"在 pod 日志里可查；部署侧的取值见 deploy/k8s/okapi.yaml。
-pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
-    let max = crate::env_config::number("OKAPI_PG_POOL", 16u32, |v| *v > 0);
+/// 读主数据面 PG 连接池上限（`OKAPI_PG_POOL`，缺省 16）。
+pub fn default_pg_pool_size() -> u32 {
+    crate::env_config::number("OKAPI_PG_POOL", 16u32, |v| *v > 0)
+}
+
+/// `okapi all` 单机模式下 console / worker 共用的后台 PG 连接池上限（`OKAPI_PG_BACKGROUND_POOL`，缺省沿用 `OKAPI_PG_POOL`）。
+pub fn background_pg_pool_size() -> u32 {
+    crate::env_config::number("OKAPI_PG_BACKGROUND_POOL", default_pg_pool_size(), |v| {
+        *v > 0
+    })
+}
+
+/// 建立指定 `max_connections` 上限的 PG 连接池。
+pub async fn connect_pg_with_max(database_url: &str, max: u32) -> Result<PgPool, StoreError> {
+    let max = max.max(1);
     let pool = PgPoolOptions::new()
         .max_connections(max)
         .acquire_timeout(Duration::from_secs(5))
@@ -33,9 +35,17 @@ pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
         .await?;
     tracing::info!(
         max_connections = max,
-        "PG 连接池已建立（多副本部署：总连接数 = Σ 副本数 × 本值，all 模式每进程 3 份，须 ≤ PG max_connections）"
+        "PG 连接池已建立（多副本部署：总连接数 = Σ 副本数 × 本值；okapi all 拆为 gateway 与 console/worker 两个隔离池）"
     );
     Ok(pool)
+}
+
+/// 建立 PG 连接池。
+///
+/// 连接池大小：`OKAPI_PG_POOL` 覆写（缺省 16；8vCPU 单实例生产建议 32+，
+/// 结算写入并发由 gateway 侧信号量钳制为本值一半，见 `AppState::settle_write`）。
+pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
+    connect_pg_with_max(database_url, default_pg_pool_size()).await
 }
 
 /// 迁移排队用的会话级咨询锁（"OKMIGRAT"）。

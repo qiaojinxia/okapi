@@ -304,134 +304,285 @@ pub fn apply_effort(
     directive: Option<ReasoningDirective>,
     native_responses: bool,
 ) -> Option<Result<Bytes, UpstreamError>> {
-    if profile.mode == Mode::Budget && dialect == "anthropic" {
-        return directive.and_then(|d| preserve_budget_cap(built, source, d));
-    }
-    if matches!(profile.mode, Mode::Passthrough | Mode::Budget) {
+    let budget_anthropic = profile.mode == Mode::Budget && dialect == "anthropic";
+    if budget_anthropic && directive.is_none() {
         return None;
     }
-    let result = (|| {
-        let original: Value =
-            serde_json::from_slice(source).map_err(|e| UpstreamError::Build(e.to_string()))?;
-        let unified = original
-            .pointer("/reasoning/effort")
-            .or_else(|| original.get("reasoning_effort"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        // 同方言的原生写法：客户端自己写了 `output_config.effort`（Claude Code 一直带着）是显式选择，
-        // 原样保留。`thinking` 对象折出的档位只是缺省猜测（没有预算时恒为 medium），不能压过它；
-        // 上游认不认这个档位也由上游裁决，这张表可能落后于上游，不替它拒。统一字段另有明说才改写。
-        let keep_native = dialect == "anthropic"
-            && unified.is_none()
-            && original
-                .pointer("/output_config/effort")
-                .is_some_and(Value::is_string);
-        let level = unified.or_else(|| directive.map(|d| d.effective_effort().as_str().to_owned()));
-        let Some(level) = level else {
-            return Ok(built.clone());
-        };
-        if !keep_native && !profile.efforts.contains(&level.as_str()) {
-            return Err(UpstreamError::Status { status: 400, body: Bytes::from(serde_json::to_vec(&json!({"error": {"type": "invalid_request_error", "code": "invalid_request_error", "param": "reasoning_effort", "message": format!("Unsupported reasoning effort: {level}")}})).unwrap_or_default()), retry_after_secs: None });
-        }
-        let mut v: Value =
-            serde_json::from_slice(built).map_err(|e| UpstreamError::Build(e.to_string()))?;
-        let obj = v
-            .as_object_mut()
-            .ok_or_else(|| UpstreamError::Build("invalid_body".into()))?;
-        obj.remove("reasoning_effort");
-        if !native_responses {
-            obj.remove("reasoning");
-        }
-        match dialect {
-            "anthropic" => {
-                if !keep_native {
-                    obj.entry("output_config")
-                        .or_insert_with(|| json!({}))
-                        .as_object_mut()
-                        .ok_or_else(|| UpstreamError::Build("output_config".into()))?
-                        .insert("effort".into(), json!(level));
-                }
-                // Opus 4.5 supports effort independently of thinking; newer
-                // models support adaptive. Don't overwrite explicit native thinking.
-                if original.get("thinking").is_none()
-                    && obj
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .is_none_or(|m| claude_alias(m) != "claude-opus-4-5")
-                {
-                    obj.insert("thinking".into(), json!({"type":"adaptive"}));
-                }
-            }
-            "gemini" => {
-                let config = obj.entry("generationConfig").or_insert_with(|| json!({}));
-                let thinking = config
-                    .as_object_mut()
-                    .ok_or_else(|| UpstreamError::Build("generationConfig".into()))?
-                    .entry("thinkingConfig")
-                    .or_insert_with(|| json!({}));
-                let thinking = thinking
-                    .as_object_mut()
-                    .ok_or_else(|| UpstreamError::Build("thinkingConfig".into()))?;
-                if !thinking.contains_key("thinkingLevel")
-                    && !thinking.contains_key("thinkingBudget")
-                {
-                    thinking.insert("thinkingLevel".into(), json!(level));
-                    thinking.insert("includeThoughts".into(), json!(true));
-                }
-            }
-            _ if native_responses => {
-                obj.entry("reasoning")
-                    .or_insert_with(|| json!({}))
-                    .as_object_mut()
-                    .ok_or_else(|| UpstreamError::Build("reasoning".into()))?
-                    .insert("effort".into(), json!(level));
-            }
-            _ => {
-                obj.insert("reasoning_effort".into(), json!(level));
-            }
-        }
-        // Reasoning models use the total completion cap, not the deprecated
-        // visible-text-only max_tokens. Never increase an explicit cap.
-        if dialect == "openai"
-            && !native_responses
-            && let Some(cap) = obj.remove("max_tokens")
-        {
-            obj.entry("max_completion_tokens").or_insert(cap);
-        }
-        serde_json::to_vec(&v)
-            .map(Bytes::from)
-            .map_err(|e| UpstreamError::Build(e.to_string()))
-    })();
-    Some(result)
+    if matches!(profile.mode, Mode::Passthrough | Mode::Budget) && !budget_anthropic {
+        return None;
+    }
+    let original: Value = match serde_json::from_slice(source) {
+        Ok(v) => v,
+        Err(_) if budget_anthropic => return None,
+        Err(e) => return Some(Err(UpstreamError::Build(e.to_string()))),
+    };
+    let mut value: Value = match serde_json::from_slice(built) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(UpstreamError::Build(e.to_string()))),
+    };
+    match apply_effort_value(
+        profile,
+        dialect,
+        &mut value,
+        &original,
+        directive,
+        native_responses,
+    )? {
+        Ok(false) => Some(Ok(built.clone())),
+        Ok(true) => Some(
+            serde_json::to_vec(&value)
+                .map(Bytes::from)
+                .map_err(|e| UpstreamError::Build(e.to_string())),
+        ),
+        Err(err) => Some(Err(err)),
+    }
 }
 
-/// Legacy Anthropic injection reserves answer headroom by growing max_tokens.
-/// A user-supplied output limit is a hard limit: don't enlarge it just because a
-/// budget was requested. An omitted limit retains the legacy default behavior.
-fn preserve_budget_cap(
-    built: &Bytes,
-    source: &Bytes,
-    directive: ReasoningDirective,
-) -> Option<Result<Bytes, UpstreamError>> {
-    let original: Value = serde_json::from_slice(source).ok()?;
-    let cap = original
-        .get("max_completion_tokens")
-        .or_else(|| original.get("max_tokens"))?
-        .as_u64()?;
-    Some((|| {
-        if cap <= u64::from(directive.effective_budget().max(1024)) {
+/// Pre-computed mutation plan for [`apply_effort`], enabling copy-on-write bodies to inspect
+/// without cloning unless a mutation is needed.
+pub enum EffortPlan {
+    Fallback,
+    Unchanged,
+    PreserveBudget {
+        cap: u64,
+        directive: ReasoningDirective,
+    },
+    Apply {
+        level: String,
+        keep_native: bool,
+    },
+}
+
+/// Inspect `current` and `source` without mutating or cloning `current`.
+pub fn plan_effort(
+    profile: &ParameterProfile,
+    dialect: &str,
+    current: &Value,
+    source: &Value,
+    directive: Option<ReasoningDirective>,
+    native_responses: bool,
+) -> Result<EffortPlan, UpstreamError> {
+    if profile.mode == Mode::Budget && dialect == "anthropic" {
+        let Some(d) = directive else {
+            return Ok(EffortPlan::Fallback);
+        };
+        let Some(cap) = source
+            .get("max_completion_tokens")
+            .or_else(|| source.get("max_tokens"))
+            .and_then(Value::as_u64)
+        else {
+            return Ok(EffortPlan::Fallback);
+        };
+        if cap <= u64::from(d.effective_budget().max(1024)) {
             return Err(UpstreamError::Build(
                 "max_tokens_must_exceed_thinking_budget".into(),
             ));
         }
-        let translated = crate::reasoning::apply_anthropic(built, directive)?;
-        let mut v: Value =
-            serde_json::from_slice(&translated).map_err(|e| UpstreamError::Build(e.to_string()))?;
-        v["max_tokens"] = json!(cap);
-        serde_json::to_vec(&v)
-            .map(Bytes::from)
-            .map_err(|e| UpstreamError::Build(e.to_string()))
-    })())
+        let needs_thinking = current
+            .as_object()
+            .is_none_or(|o| !o.contains_key("thinking"));
+        let needs_cap = current.get("max_tokens").and_then(Value::as_u64) != Some(cap);
+        if !needs_thinking && !needs_cap {
+            return Ok(EffortPlan::Unchanged);
+        }
+        return Ok(EffortPlan::PreserveBudget { cap, directive: d });
+    }
+    if matches!(profile.mode, Mode::Passthrough | Mode::Budget) {
+        return Ok(EffortPlan::Fallback);
+    }
+    let unified = source
+        .pointer("/reasoning/effort")
+        .or_else(|| source.get("reasoning_effort"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    // 同方言的原生写法：客户端自己写了 `output_config.effort`（Claude Code 一直带着）是显式选择，
+    // 原样保留。`thinking` 对象折出的档位只是缺省猜测（没有预算时恒为 medium），不能压过它；
+    // 上游认不认这个档位也由上游裁决，这张表可能落后于上游，不替它拒。统一字段另有明说才改写。
+    let keep_native = dialect == "anthropic"
+        && unified.is_none()
+        && source
+            .pointer("/output_config/effort")
+            .is_some_and(Value::is_string);
+    let level = unified.or_else(|| directive.map(|d| d.effective_effort().as_str().to_owned()));
+    let Some(level) = level else {
+        return Ok(EffortPlan::Unchanged);
+    };
+    if !keep_native && !profile.efforts.contains(&level.as_str()) {
+        return Err(UpstreamError::Status {
+            status: 400,
+            body: Bytes::from(
+                serde_json::to_vec(&json!({"error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "param": "reasoning_effort",
+                    "message": format!("Unsupported reasoning effort: {level}")
+                }}))
+                .unwrap_or_default(),
+            ),
+            retry_after_secs: None,
+        });
+    }
+    if !current.is_object() {
+        return Err(UpstreamError::Build("invalid_body".into()));
+    }
+    if dialect == "anthropic"
+        && keep_native
+        && current.get("reasoning_effort").is_none()
+        && (native_responses || current.get("reasoning").is_none())
+        && (source.get("thinking").is_some()
+            || current
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|m| claude_alias(m) == "claude-opus-4-5"))
+    {
+        return Ok(EffortPlan::Unchanged);
+    }
+    Ok(EffortPlan::Apply { level, keep_native })
+}
+
+/// Apply a pre-computed [`EffortPlan`] in-place on `v`.
+pub fn apply_effort_plan(
+    plan: EffortPlan,
+    dialect: &str,
+    v: &mut Value,
+    source: &Value,
+    native_responses: bool,
+) -> Result<bool, UpstreamError> {
+    match plan {
+        EffortPlan::Fallback | EffortPlan::Unchanged => Ok(false),
+        EffortPlan::PreserveBudget { cap, directive } => {
+            let needs_cap = v.get("max_tokens").and_then(Value::as_u64) != Some(cap);
+            let changed = crate::reasoning::apply_anthropic_value(v, directive)?;
+            v["max_tokens"] = json!(cap);
+            Ok(changed || needs_cap)
+        }
+        EffortPlan::Apply { level, keep_native } => {
+            let obj = v
+                .as_object_mut()
+                .ok_or_else(|| UpstreamError::Build("invalid_body".into()))?;
+            obj.remove("reasoning_effort");
+            if !native_responses {
+                obj.remove("reasoning");
+            }
+            match dialect {
+                "anthropic" => {
+                    if !keep_native {
+                        obj.entry("output_config")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut()
+                            .ok_or_else(|| UpstreamError::Build("output_config".into()))?
+                            .insert("effort".into(), json!(level));
+                    }
+                    // Opus 4.5 supports effort independently of thinking; newer
+                    // models support adaptive. Don't overwrite explicit native thinking.
+                    if source.get("thinking").is_none()
+                        && obj
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .is_none_or(|m| claude_alias(m) != "claude-opus-4-5")
+                    {
+                        obj.insert("thinking".into(), json!({"type": "adaptive"}));
+                    }
+                }
+                "gemini" => {
+                    let config = obj.entry("generationConfig").or_insert_with(|| json!({}));
+                    let thinking = config
+                        .as_object_mut()
+                        .ok_or_else(|| UpstreamError::Build("generationConfig".into()))?
+                        .entry("thinkingConfig")
+                        .or_insert_with(|| json!({}));
+                    let thinking = thinking
+                        .as_object_mut()
+                        .ok_or_else(|| UpstreamError::Build("thinkingConfig".into()))?;
+                    if !thinking.contains_key("thinkingLevel")
+                        && !thinking.contains_key("thinkingBudget")
+                    {
+                        thinking.insert("thinkingLevel".into(), json!(level));
+                        thinking.insert("includeThoughts".into(), json!(true));
+                    }
+                }
+                _ if native_responses => {
+                    obj.entry("reasoning")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .ok_or_else(|| UpstreamError::Build("reasoning".into()))?
+                        .insert("effort".into(), json!(level));
+                }
+                _ => {
+                    obj.insert("reasoning_effort".into(), json!(level));
+                }
+            }
+            // Reasoning models use the total completion cap, not the deprecated
+            // visible-text-only max_tokens. Never increase an explicit cap.
+            if dialect == "openai"
+                && !native_responses
+                && let Some(cap) = obj.remove("max_tokens")
+            {
+                obj.entry("max_completion_tokens").or_insert(cap);
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// 同 [`apply_effort`]，只在需要改写时克隆一次。
+pub fn apply_effort_value(
+    profile: &ParameterProfile,
+    dialect: &str,
+    built: &mut Value,
+    source: &Value,
+    directive: Option<ReasoningDirective>,
+    native_responses: bool,
+) -> Option<Result<bool, UpstreamError>> {
+    let plan = match plan_effort(profile, dialect, built, source, directive, native_responses) {
+        Ok(EffortPlan::Fallback) => return None,
+        Ok(EffortPlan::Unchanged) => return Some(Ok(false)),
+        Ok(plan) => plan,
+        Err(err) => return Some(Err(err)),
+    };
+    Some(apply_effort_plan(
+        plan,
+        dialect,
+        built,
+        source,
+        native_responses,
+    ))
+}
+
+/// 判断是否需要把 `max_tokens` 转写为 `max_completion_tokens`（零写预检查用）。
+#[must_use]
+pub fn needs_completion_cap(
+    profile: &ParameterProfile,
+    dialect: &str,
+    value: &Value,
+    native_responses: bool,
+) -> bool {
+    dialect == "openai"
+        && !native_responses
+        && matches!(profile.mode, Mode::OpenAi | Mode::Kimi)
+        && value
+            .as_object()
+            .is_some_and(|o| o.contains_key("max_tokens"))
+}
+
+/// 在已解析请求体上原地执行 `max_tokens` → `max_completion_tokens`；无改动返回 `Ok(false)`。
+pub fn completion_cap_value(
+    profile: &ParameterProfile,
+    dialect: &str,
+    value: &mut Value,
+    native_responses: bool,
+) -> Result<bool, UpstreamError> {
+    if !needs_completion_cap(profile, dialect, value, native_responses) {
+        return Ok(false);
+    }
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(cap) = obj.remove("max_tokens") else {
+        return Ok(false);
+    };
+    obj.entry("max_completion_tokens").or_insert(cap);
+    Ok(true)
 }
 
 /// Translate a total output cap even when effort is omitted (follow model).
@@ -447,11 +598,8 @@ pub fn completion_cap(
     }
     let mut v: Value =
         serde_json::from_slice(&body).map_err(|e| UpstreamError::Build(e.to_string()))?;
-    if let Some(cap) = v.as_object_mut().and_then(|o| o.remove("max_tokens")) {
-        v.as_object_mut()
-            .unwrap()
-            .entry("max_completion_tokens")
-            .or_insert(cap);
+    if !completion_cap_value(profile, dialect, &mut v, native_responses)? {
+        return Ok(body);
     }
     serde_json::to_vec(&v)
         .map(Bytes::from)
@@ -751,5 +899,34 @@ mod tests {
         let out = native_messages("claude-opus-5-5", &source).unwrap();
         assert_eq!(out["output_config"]["effort"], "high");
         assert_eq!(out["thinking"], source["thinking"]);
+    }
+
+    #[test]
+    fn native_adaptive_effort_is_zero_copy_passthrough() {
+        let raw = br#"{"messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"high"},"thinking":{"type":"adaptive"},"max_tokens":4096,"model":"claude-sonnet-5-5"}"#;
+        let bytes = Bytes::from_static(raw);
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let directive = crate::reasoning::parse_request_value(&source).merge(None);
+        let out = apply_effort(
+            &profile("anthropic", "claude-sonnet-5-5", None),
+            "anthropic",
+            &bytes,
+            &bytes,
+            directive,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.as_ref(), raw);
+        let plan = plan_effort(
+            &profile("anthropic", "claude-sonnet-5-5", None),
+            "anthropic",
+            &source,
+            &source,
+            directive,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(plan, EffortPlan::Unchanged));
     }
 }

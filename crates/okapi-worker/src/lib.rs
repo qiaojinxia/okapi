@@ -62,22 +62,18 @@ const RECONCILE_OVERLAP: Duration = Duration::from_mins(10);
 /// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
 const SUBSCRIPTION_BATCH: i64 = 500;
 
-/// 连接 NATS 并确保 JetStream 拓扑；失败回退单机直连形态（None）。
-async fn connect_jetstream(nats_url: Option<&str>) -> Option<async_nats::jetstream::Context> {
-    let url = nats_url?;
-    match async_nats::connect(url).await {
-        Ok(client) => match nats_relay::ensure_topology(&client).await {
-            Ok(ctx) => {
-                tracing::info!("NATS relay 就绪（outbox → JetStream → chsink）");
-                Some(ctx)
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "JetStream 拓扑创建失败，回退直连形态");
-                None
-            }
-        },
+/// 基于共享 NATS 客户端确保 JetStream 拓扑就绪；未配或创建失败回退单机直连形态（None）。
+async fn ensure_jetstream(
+    nats: Option<&async_nats::Client>,
+) -> Option<async_nats::jetstream::Context> {
+    let client = nats?;
+    match nats_relay::ensure_topology(client).await {
+        Ok(ctx) => {
+            tracing::info!("NATS relay 就绪（outbox → JetStream → chsink）");
+            Some(ctx)
+        }
         Err(err) => {
-            tracing::warn!(error = %err, "NATS 连接失败，回退直连形态");
+            tracing::warn!(error = %err, "JetStream 拓扑创建失败，回退直连形态");
             None
         }
     }
@@ -115,18 +111,49 @@ async fn transport_tick(
     }
 }
 
-// 六个周期任务 tick 的选择循环，拆分损害调度全貌可读性
-#[allow(clippy::too_many_lines)]
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let pg = okapi_store::connect_pg(&cfg.database_url).await?;
     okapi_store::run_migrations(&pg).await?;
     let redis = okapi_store::connect_redis(&cfg.redis_url).await?;
+    let nats = okapi_gateway::connect_nats_optional(cfg.nats_url.as_deref()).await;
+    let ch = okapi_gateway::build_ch_optional(cfg.clickhouse_url.as_deref())?;
+    let image_state = okapi_gateway::build_state_with_clients(
+        pg,
+        okapi_store::default_pg_pool_size(),
+        redis.clone(),
+        &cfg.node,
+        ch,
+        nats,
+    )
+    .await?;
+    Box::pin(run_with_state(
+        cfg,
+        image_state,
+        redis,
+        true,
+        okapi_kernel::shutdown::signal(),
+    ))
+    .await
+}
+
+/// Run the background worker on an already-assembled `AppState` and Redis client (shared in `okapi all`).
+// 六个周期任务 tick 的选择循环，拆分损害调度全貌可读性
+#[allow(clippy::too_many_lines)]
+pub async fn run_with_state<F>(
+    cfg: Config,
+    image_state: okapi_gateway::state::AppState,
+    redis: fred::clients::Client,
+    spawn_sync: bool,
+    stop: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    let pg = image_state.pg.clone();
     let notifier = notify::Notifier::new(pg.clone(), redis.clone());
     let ledger = BalanceLedger::new(redis.clone());
 
-    let ch = if let Some(url) = &cfg.clickhouse_url {
-        let client = okapi_store::ChClient::new(url, "okapi")
-            .map_err(|e| anyhow::anyhow!("clickhouse client: {e}"))?;
+    let ch = if let Some(client) = image_state.ch.clone() {
         let sink = ChSink::new(client);
         if sink.ready().await.is_none() {
             tracing::warn!(
@@ -139,12 +166,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         None
     };
 
-    let js = connect_jetstream(cfg.nats_url.as_deref()).await;
-    let image_state =
-        okapi_gateway::build_state_with_resources(pg.clone(), redis.clone(), &cfg.node, None, None)
-            .await?;
-    // worker 的原生批量 / 图片任务同样直连上游：策略改了不能要重启才生效
-    okapi_gateway::spawn_ssrf_policy_sync(image_state.clone());
+    let js = ensure_jetstream(image_state.nats.as_ref()).await;
+    if spawn_sync {
+        // Keep PriceBook, routing caches and SSRF/runtime settings fresh in standalone worker mode.
+        okapi_gateway::spawn_state_sync(&image_state);
+    }
     let (image_stop, image_stopped) = tokio::sync::watch::channel(false);
     let native_batch_worker =
         tokio::spawn(supervision::run("image_batches", image_stopped.clone(), {
@@ -270,7 +296,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             },
         )));
     }
-    okapi_kernel::shutdown::signal().await;
+    stop.await;
     let _ = image_stop.send(true);
     // Cancel-safe maintenance transactions roll back on stop. Other workers get a bounded drain.
     if tokio::time::timeout(
@@ -285,6 +311,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         }
         futures::future::join_all(workers).await;
     }
+    image_state.settlements.drain();
+    image_state
+        .settlements
+        .wait_idle(okapi_gateway::SETTLE_DRAIN_CAP)
+        .await;
     tracing::info!("worker 已下线");
     Ok(())
 }

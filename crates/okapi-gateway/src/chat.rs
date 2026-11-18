@@ -65,8 +65,11 @@ pub(super) use self::input::{check_input, request_features};
 #[cfg(test)]
 use self::json::non_stream_content_chars;
 use self::json::{RespMeta, attempt_json, capture_chunk_meta, upstream_passthrough_response};
+#[cfg(test)]
+use self::limits::bound_default_output;
 use self::limits::{
-    admitted_completion_cap, bound_default_output, default_output_cap, price_above_max,
+    admitted_completion_cap, bound_default_output_value, default_output_cap,
+    needs_default_output_bound, price_above_max,
 };
 #[cfg(test)]
 use self::prepare::reserved_token_count;

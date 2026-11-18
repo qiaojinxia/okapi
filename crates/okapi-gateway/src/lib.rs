@@ -55,41 +55,30 @@ use std::time::Duration;
 use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 
-/// 装配 gateway 共享状态（bin 启动与集成测试共用）。
-// Keep state initialization together so its resource limits are reviewable.
-#[allow(clippy::too_many_lines)]
-pub async fn build_state(
-    database_url: &str,
-    redis_url: &str,
-    node: &str,
-    clickhouse_url: Option<&str>,
-    nats_url: Option<&str>,
-) -> anyhow::Result<AppState> {
-    let pg = okapi_store::connect_pg(database_url).await?;
-    okapi_store::run_migrations(&pg).await?;
-    let redis = okapi_store::connect_redis(redis_url).await?;
-    build_state_with_resources(pg, redis, node, clickhouse_url, nats_url).await
+/// 按 PG 连接池大小构造结算/准入流控（`settle_gate` 钳制为连接池一半，留一半给前台点查）。
+pub fn flow_control_for_pool(pg_pool_max: u32) -> state::FlowControl {
+    let pool = usize::try_from(pg_pool_max.max(1)).unwrap_or(usize::MAX);
+    state::FlowControl {
+        admission_turns: user_turns::UserTurns::default(),
+        settlement_turns: user_turns::UserTurns::default(),
+        // 容量 = pool 的一半：留一半连接给点查/鉴权回源等前台路径
+        settle_gate: Arc::new(tokio::sync::Semaphore::new(pool.div_ceil(2))),
+        settle_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        // 缺省 ≈ 档位一 PG 记账速率（约 1k TPS）× 30s 下线窗口（§12.2 / §14.3）
+        settle_backlog_max: okapi_store::env_config::number(
+            "OKAPI_SETTLE_BACKLOG_MAX",
+            20_000usize,
+            |_| true,
+        ),
+        settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(test)]
+        settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
+    }
 }
 
-/// Assemble services around shared connections, including worker endpoint execution.
-/// The caller has already applied migrations; this never opens another storage pool.
-#[allow(clippy::too_many_lines)] // Service graph construction lists resource/cache fields together.
-pub async fn build_state_with_resources(
-    pg: sqlx::PgPool,
-    redis: fred::clients::Client,
-    node: &str,
-    clickhouse_url: Option<&str>,
-    nats_url: Option<&str>,
-) -> anyhow::Result<AppState> {
-    estimate::warm_up();
-    let ledger = BalanceLedger::new(redis.clone());
-    let sched = okapi_kernel::sched_redis::SchedulerRedis::new(redis);
-    let in_flight = okapi_kernel::inflight::InFlightGauge::new(sched.clone(), node);
-
-    let book = okapi_kernel::pricing_loader::load_pricebook(&pg).await?;
-    tracing::info!(epoch = book.epoch(), "PriceBook 已装载");
-
-    let nats = match nats_url {
+/// 可选连接 NATS；连接失败降级为单机轮询/直连，不阻断启动。
+pub async fn connect_nats_optional(nats_url: Option<&str>) -> Option<async_nats::Client> {
+    match nats_url {
         Some(url) => match async_nats::connect(url).await {
             Ok(client) => {
                 tracing::info!("NATS 已连接（epoch 广播/事件总线可用）");
@@ -101,15 +90,79 @@ pub async fn build_state_with_resources(
             }
         },
         None => None,
-    };
+    }
+}
 
-    let ch = match clickhouse_url {
-        Some(url) => Some(
+/// 可选初始化 ClickHouse HTTP 客户端。
+pub fn build_ch_optional(
+    clickhouse_url: Option<&str>,
+) -> anyhow::Result<Option<okapi_store::ChClient>> {
+    match clickhouse_url {
+        Some(url) => Ok(Some(
             okapi_store::ChClient::new(url, "okapi")
                 .map_err(|e| anyhow::anyhow!("clickhouse client: {e}"))?,
-        ),
-        None => None,
-    };
+        )),
+        None => Ok(None),
+    }
+}
+
+/// 装配 gateway 共享状态（bin 启动与集成测试共用）。
+// Keep state initialization together so its resource limits are reviewable.
+pub async fn build_state(
+    database_url: &str,
+    redis_url: &str,
+    node: &str,
+    clickhouse_url: Option<&str>,
+    nats_url: Option<&str>,
+) -> anyhow::Result<AppState> {
+    let pool_max = okapi_store::default_pg_pool_size();
+    let pg = okapi_store::connect_pg_with_max(database_url, pool_max).await?;
+    okapi_store::run_migrations(&pg).await?;
+    let redis = okapi_store::connect_redis(redis_url).await?;
+    let ch = build_ch_optional(clickhouse_url)?;
+    let nats = connect_nats_optional(nats_url).await;
+    build_state_with_clients(pg, pool_max, redis, node, ch, nats).await
+}
+
+/// Assemble services around shared connections, including worker endpoint execution.
+/// The caller has already applied migrations; this never opens another storage pool.
+pub async fn build_state_with_resources(
+    pg: sqlx::PgPool,
+    redis: fred::clients::Client,
+    node: &str,
+    clickhouse_url: Option<&str>,
+    nats_url: Option<&str>,
+) -> anyhow::Result<AppState> {
+    let ch = build_ch_optional(clickhouse_url)?;
+    let nats = connect_nats_optional(nats_url).await;
+    build_state_with_clients(
+        pg,
+        okapi_store::default_pg_pool_size(),
+        redis,
+        node,
+        ch,
+        nats,
+    )
+    .await
+}
+
+/// 使用已建好的共享 PG / Redis / CH / NATS 客户端装配 [`AppState`]（`Role::All` 与 `Role::Worker` 共用）。
+#[allow(clippy::too_many_lines)] // Service graph construction lists resource/cache fields together.
+pub async fn build_state_with_clients(
+    pg: sqlx::PgPool,
+    pg_pool_max: u32,
+    redis: fred::clients::Client,
+    node: &str,
+    ch: Option<okapi_store::ChClient>,
+    nats: Option<async_nats::Client>,
+) -> anyhow::Result<AppState> {
+    estimate::warm_up();
+    let ledger = BalanceLedger::new(redis.clone());
+    let sched = okapi_kernel::sched_redis::SchedulerRedis::new(redis);
+    let in_flight = okapi_kernel::inflight::InFlightGauge::new(sched.clone(), node);
+
+    let book = okapi_kernel::pricing_loader::load_pricebook(&pg).await?;
+    tracing::info!(epoch = book.epoch(), "PriceBook 已装载");
 
     let resources = okapi_providers::inference::Resources::new()
         .map_err(|e| anyhow::anyhow!("provider resources: {e}"))?;
@@ -188,24 +241,7 @@ pub async fn build_state_with_resources(
                 .time_to_live(Duration::from_mins(1))
                 .build(),
         },
-        flow: state::FlowControl {
-            admission_turns: user_turns::UserTurns::default(),
-            settlement_turns: user_turns::UserTurns::default(),
-            // 容量 = pool 的一半：留一半连接给点查/鉴权回源等前台路径
-            settle_gate: Arc::new(tokio::sync::Semaphore::new(
-                okapi_store::env_config::number("OKAPI_PG_POOL", 16usize, |v| *v > 0).div_ceil(2),
-            )),
-            settle_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            // 缺省 ≈ 档位一 PG 记账速率（约 1k TPS）× 30s 下线窗口（§12.2 / §14.3）
-            settle_backlog_max: okapi_store::env_config::number(
-                "OKAPI_SETTLE_BACKLOG_MAX",
-                20_000usize,
-                |_| true,
-            ),
-            settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
-        },
+        flow: flow_control_for_pool(pg_pool_max),
         media: state::Media {
             image_download_gate: Arc::new(tokio::sync::Semaphore::new(4)),
             batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -217,7 +253,7 @@ pub async fn build_state_with_resources(
     Ok(state)
 }
 
-/// 把 `settings.ssrf_policy.allow_private` 同步给出站直连的连接时校验（`okapi_providers::ssrf`，进程级开关）。
+/// 把 `settings.ssrf_policy.allow_private` 及扩展运行时设置同步给出站连接（`okapi_providers` 进程级配置）。
 /// 读不到（PG 暂不可用）就沿用上一次的值，不往宽松或严格任一边猜。
 pub async fn sync_ssrf_policy(state: &AppState) {
     match state.try_setting_cached("ssrf_policy").await {
@@ -235,6 +271,11 @@ pub async fn sync_ssrf_policy(state: &AppState) {
                 error_code = error.code,
                 "ssrf_policy 读取失败，沿用上一次的出站校验策略"
             );
+        }
+    }
+    for &key in okapi_providers::profiles::RUNTIME_SETTING_KEYS {
+        if let Ok(value) = state.try_setting_cached(key).await {
+            okapi_providers::profiles::apply_runtime_setting(key, value.as_ref().as_ref());
         }
     }
 }
@@ -289,6 +330,7 @@ pub fn spawn_routing_invalidate_subscriber(state: AppState) {
         while sub.next().await.is_some() {
             // 只清本地：清完再广播会打环
             state.invalidate_routing_caches_local();
+            sync_ssrf_policy(&state).await;
             tracing::debug!("路由缓存已按广播失效");
         }
     });
@@ -340,6 +382,14 @@ pub fn spawn_epoch_poller(state: AppState) {
     });
 }
 
+/// 启动共享状态的后台同步（epoch 轮询/广播、路由缓存失效广播、SSRF 与扩展运行时配置同步）。
+pub fn spawn_state_sync(state: &AppState) {
+    spawn_epoch_poller(state.clone());
+    spawn_epoch_subscriber(state.clone());
+    spawn_routing_invalidate_subscriber(state.clone());
+    spawn_ssrf_policy_sync(state.clone());
+}
+
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let state = build_state(
         &cfg.database_url,
@@ -349,7 +399,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.nats_url.as_deref(),
     )
     .await?;
+    run_with_state(cfg, state, true, okapi_kernel::shutdown::signal()).await
+}
 
+/// Run the gateway HTTP server on an already-assembled `AppState` (shared in `okapi all`).
+pub async fn run_with_state<F>(
+    cfg: Config,
+    state: AppState,
+    spawn_sync: bool,
+    stop: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     // §6.5 生产护栏：release 构建启用单用户模式须显式二次确认
     if cfg.single_user_mode
         && !cfg!(debug_assertions)
@@ -362,10 +424,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     if cfg.single_user_mode {
         bootstrap::ensure_single_user(&state).await?;
     }
-    spawn_epoch_poller(state.clone());
-    spawn_epoch_subscriber(state.clone());
-    spawn_routing_invalidate_subscriber(state.clone());
-    spawn_ssrf_policy_sync(state.clone());
+    if spawn_sync {
+        spawn_state_sync(&state);
+    }
 
     let settlements = state.settlements.clone();
     let app = router(state);
@@ -376,7 +437,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(okapi_kernel::shutdown::signal())
+    .with_graceful_shutdown(stop)
     .await?;
     // 连接排完 ≠ 账已落：流式/非流式 chat 的结算在响应之后的后台任务里，
     // 这里等它们归零再退出，否则最后一批请求只剩 Redis 预扣、要靠对账才能收口

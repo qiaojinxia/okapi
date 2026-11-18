@@ -26,6 +26,18 @@ pub fn request_openai_to_anthropic(
 ) -> Result<Bytes, UpstreamError> {
     let src: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let out = request_openai_to_anthropic_value(&src, upstream_model, default_max_tokens)?;
+    serde_json::to_vec(&out)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 在已解析 `Value` 上完成 OpenAI → Anthropic 请求转换（两跳转换直接传入内存对象）。
+pub fn request_openai_to_anthropic_value(
+    src: &Value,
+    upstream_model: &str,
+    default_max_tokens: u32,
+) -> Result<Value, UpstreamError> {
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
@@ -122,9 +134,7 @@ pub fn request_openai_to_anthropic(
 
     convert_tools(src, &mut out);
 
-    serde_json::to_vec(&Value::Object(out))
-        .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+    Ok(Value::Object(out))
 }
 
 /// 采样参数透传，唯 temperature 按方言契约收敛：OpenAI 合法到 2.0，Anthropic

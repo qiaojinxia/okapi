@@ -205,9 +205,18 @@ pub fn strip(body: &Bytes) -> Option<Bytes> {
         return None;
     }
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let obj = value.as_object_mut()?;
-    obj.remove(PROVIDER_FIELD)?;
+    if !strip_value(&mut value) {
+        return None;
+    }
     Some(Bytes::from(serde_json::to_vec(&value).ok()?))
+}
+
+/// 在已解析请求体上原地剥掉 `provider` 键；返回是否确实移除。
+pub fn strip_value(value: &mut serde_json::Value) -> bool {
+    value
+        .as_object_mut()
+        .and_then(|obj| obj.remove(PROVIDER_FIELD))
+        .is_some()
 }
 
 #[cfg(test)]

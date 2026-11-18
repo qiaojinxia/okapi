@@ -4,6 +4,7 @@
 //! `file_search`、`code_interpreter`、`googleSearch` 等）不在这里识别，原样透传给上游，
 //! 网关既不按 `max_uses` 限次，也不计量计费——上游按次收取的工具费由平台承担，只收 token 费。
 //! 要收口得另立这些厂商的价格结构与用量解析（`ServerToolPrices` 目前只有 Anthropic 一种契约）。
+#[cfg(test)]
 use bytes::Bytes;
 use okapi_domain::{AnthropicToolUsage, Money, ServerToolUsage};
 use okapi_pricing::{
@@ -136,32 +137,42 @@ impl ToolAdmission {
         ))
     }
 
-    /// Directional converters handle ordinary tools. Restore the authorized native
-    /// definitions afterwards, without changing them into client function tools.
-    pub(super) fn restore(&self, body: Bytes, dialect: &str) -> Result<Bytes, UpstreamError> {
+    /// Pre-check on an immutable `Value` before cloning a copy-on-write body.
+    pub(super) fn needs_restore(
+        &self,
+        current: &Value,
+        dialect: &str,
+    ) -> Result<bool, UpstreamError> {
         if self.has_tools() && dialect != "anthropic" {
             return Err(build_error("tools.provider"));
         }
-        let mut value: Value = serde_json::from_slice(&body).map_err(|_| build_error("tools"))?;
-        let mut tools = value
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut ordinary = Vec::new();
-        for tool in tools.drain(..) {
-            if kind(&tool).map_err(build_error)?.is_none() {
-                ordinary.push(tool);
+        let mut has_native = false;
+        if let Some(tools) = current.get("tools").and_then(Value::as_array) {
+            for tool in tools {
+                if kind(tool).map_err(build_error)?.is_some() {
+                    has_native = true;
+                }
             }
         }
-        if ordinary.len()
-            == value
-                .get("tools")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len)
-            && !self.has_tools()
-        {
-            return Ok(body);
+        Ok(has_native || self.has_tools())
+    }
+
+    /// Mutate `value` in place to strip native tools and restore the admitted definitions.
+    pub(super) fn restore_value(
+        &self,
+        value: &mut Value,
+        dialect: &str,
+    ) -> Result<(), UpstreamError> {
+        if self.has_tools() && dialect != "anthropic" {
+            return Err(build_error("tools.provider"));
+        }
+        let mut ordinary = Vec::new();
+        if let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools.drain(..) {
+                if kind(&tool).map_err(build_error)?.is_none() {
+                    ordinary.push(tool);
+                }
+            }
         }
         ordinary.extend(self.tools.iter().cloned());
         if ordinary.is_empty() {
@@ -171,15 +182,28 @@ impl ToolAdmission {
         } else {
             value["tools"] = Value::Array(ordinary);
         }
+        Ok(())
+    }
+
+    /// Directional converters handle ordinary tools. Restore the authorized native
+    /// definitions afterwards, without changing them into client function tools.
+    #[cfg(test)]
+    pub(super) fn restore(&self, body: Bytes, dialect: &str) -> Result<Bytes, UpstreamError> {
+        if self.has_tools() && dialect != "anthropic" {
+            return Err(build_error("tools.provider"));
+        }
+        let mut value: Value = serde_json::from_slice(&body).map_err(|_| build_error("tools"))?;
+        if !self.needs_restore(&value, dialect)? {
+            return Ok(body);
+        }
+        self.restore_value(&mut value, dialect)?;
         serde_json::to_vec(&value)
             .map(Bytes::from)
             .map_err(|_| build_error("tools"))
     }
 
-    /// Check the final body after channel injection/stripping. Missing max_uses
-    /// must not be normalized back to our default here: it is no longer bounded.
-    pub(super) fn verify_outbound(&self, body: &[u8]) -> Result<(), UpstreamError> {
-        let value: Value = serde_json::from_slice(body).map_err(|_| build_error("tools"))?;
+    /// Check a parsed outbound body after channel injection/stripping.
+    pub(super) fn verify_outbound_value(&self, value: &Value) -> Result<(), UpstreamError> {
         let mut native = Vec::new();
         for tool in value
             .get("tools")
@@ -195,6 +219,19 @@ impl ToolAdmission {
             return Err(build_error("tools.admission_changed"));
         }
         Ok(())
+    }
+
+    /// Check the final body after channel injection/stripping. Missing max_uses
+    /// must not be normalized back to our default here: it is no longer bounded.
+    pub(super) fn verify_outbound(&self, body: &[u8]) -> Result<(), UpstreamError> {
+        if !self.has_tools()
+            && memchr::memmem::find(body, b"\"tools\"").is_none()
+            && memchr::memchr(b'\\', body).is_none()
+        {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_slice(body).map_err(|_| build_error("tools"))?;
+        self.verify_outbound_value(&value)
     }
 
     pub(super) fn validate_usage(

@@ -42,5 +42,7 @@ pub use auth::AuthedKey;
 pub use ch::ChClient;
 pub use channels::ChannelCandidate;
 pub use error::StoreError;
-pub use pg::{connect_pg, run_migrations};
+pub use pg::{
+    background_pg_pool_size, connect_pg, connect_pg_with_max, default_pg_pool_size, run_migrations,
+};
 pub use redis::connect_redis;

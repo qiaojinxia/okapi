@@ -27,6 +27,18 @@ pub fn request_gemini_to_openai(
 ) -> Result<Bytes, UpstreamError> {
     let src: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let out = request_gemini_to_openai_value(&src, upstream_model, stream)?;
+    serde_json::to_vec(&out)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 在已解析 `Value` 上完成 Gemini → OpenAI 请求转换（供单次解析管道直接复用）。
+pub fn request_gemini_to_openai_value(
+    src: &Value,
+    upstream_model: &str,
+    stream: bool,
+) -> Result<Value, UpstreamError> {
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
@@ -91,9 +103,7 @@ pub fn request_gemini_to_openai(
     }
     convert_tools(src, &mut out);
 
-    serde_json::to_vec(&Value::Object(out))
-        .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+    Ok(Value::Object(out))
 }
 
 /// 只携带元数据、没有内容的 part 键（思维签名、媒体分辨率等）：跳过不算丢内容。

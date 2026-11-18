@@ -94,12 +94,24 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.nats_url.as_deref(),
     )
     .await?;
+    run_with_state(cfg, state, true, okapi_kernel::shutdown::signal()).await
+}
+
+/// Run the console HTTP/MCP server on an already-assembled `AppState` (shared in `okapi all`).
+pub async fn run_with_state<F>(
+    cfg: Config,
+    state: AppState,
+    spawn_sync: bool,
+    stop: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     // console 也是多副本，各有各的缓存：管理员在 A 上改的配置，B 也得立刻弃用旧值，
     // 否则同一个后台在两个副本上会给出不一样的答案。定价与路由两条广播都要订。
-    gateway::spawn_epoch_subscriber(state.clone());
-    gateway::spawn_epoch_poller(state.clone());
-    gateway::spawn_routing_invalidate_subscriber(state.clone());
-    gateway::spawn_ssrf_policy_sync(state.clone());
+    if spawn_sync {
+        gateway::spawn_state_sync(&state);
+    }
     let settlements = state.settlements.clone();
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.console_bind).await?;
@@ -109,7 +121,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(okapi_kernel::shutdown::signal())
+    .with_graceful_shutdown(stop)
     .await?;
     // 同 gateway：Playground 中继与渠道试用走的是数据面处理器，结算在响应之后的后台任务里，
     // 连接排完不等于账已落，等它们归零再退出，免得滚动发布时留下只剩 Redis 预扣的请求

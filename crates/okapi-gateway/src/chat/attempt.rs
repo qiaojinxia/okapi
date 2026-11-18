@@ -22,6 +22,7 @@ pub(super) async fn try_model(
     bill: &RequestBilling,
     info: &ProbeInfo,
     body: &Bytes,
+    parsed: Option<&serde_json::Value>,
 ) -> Result<Response, ForwardFailure> {
     let (candidates, sticky_key) = eligible_candidates(bill, info, false).await?;
 
@@ -52,20 +53,21 @@ pub(super) async fn try_model(
         attempted += 1;
 
         let upstream_model = cand.upstream_model(&bill.model).to_owned();
-        let mut body_up = match build_upstream_body(bill, info, &cand, body, &upstream_model) {
-            Ok(body_up) => body_up,
-            Err(err) => {
-                let rejection = match &err {
-                    UpstreamError::Build(reason) => build_rejection(reason),
-                    _ => AppError::bad_request(),
-                };
-                return Err(ForwardFailure::app(
-                    rejection,
-                    failover,
-                    Some((cand.channel_id, cand.channel_key_id)),
-                ));
-            }
-        };
+        let mut body_up =
+            match build_upstream_body(bill, info, &cand, body, &upstream_model, parsed) {
+                Ok(body_up) => body_up,
+                Err(err) => {
+                    let rejection = match &err {
+                        UpstreamError::Build(reason) => build_rejection(reason),
+                        _ => AppError::bad_request(),
+                    };
+                    return Err(ForwardFailure::app(
+                        rejection,
+                        failover,
+                        Some((cand.channel_id, cand.channel_key_id)),
+                    ));
+                }
+            };
         let base = cand.api_base.clone().unwrap_or_else(|| {
             okapi_providers::registry::lookup(&cand.provider)
                 .and_then(|adapter| adapter.default_base)
@@ -248,7 +250,7 @@ pub(super) async fn try_model(
                     "上游无 /responses，本次改走降级链（可在渠道设置关闭 responses_native）"
                 );
                 cand.responses_native = false;
-                match build_upstream_body(bill, info, &cand, body, &upstream_model) {
+                match build_upstream_body(bill, info, &cand, body, &upstream_model, parsed) {
                     Ok(b) => {
                         body_up = b;
                         last_upstream = Some((
