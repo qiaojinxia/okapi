@@ -62,7 +62,8 @@ pub(super) fn prepared_with_calibration(
     let base = uncalibrated(keys, predicate);
     if !historical {
         return format!(
-            "(SELECT u.*,toInt64(0) AS legacy_characters,toInt64(0) AS legacy_character_n FROM {base} u)"
+            "(SELECT u.*,toInt64(0) AS legacy_characters,toInt64(0) AS legacy_character_n FROM {} u)",
+            super::analysis_source::as_view(&base),
         );
     }
     let keys = if keys.is_empty() {
@@ -90,7 +91,12 @@ pub(super) fn prepared_with_calibration(
         "toInt64(throwIf({count}+u.unit_character_n+u.unit_token_n>greatest(e.expected,u.unit_observed)))"
     );
     format!(
-        "(SELECT {selected},greatest(u.unit_observed,u.unit_character_n+u.unit_token_n+{count})+{guard} AS unit_observed,u.unit_characters+{quantity} AS unit_characters,u.unit_character_n+{count} AS unit_character_n,u.unit_token_n AS unit_token_n,{quantity} AS legacy_characters,{count} AS legacy_character_n FROM {base} u LEFT JOIN {legacy} c USING ({keys}) LEFT JOIN {expected} e USING ({keys}))"
+        "(SELECT {selected},greatest(u.unit_observed,u.unit_character_n+u.unit_token_n+{count})+{guard} AS unit_observed,u.unit_characters+{quantity} AS unit_characters,u.unit_character_n+{count} AS unit_character_n,u.unit_token_n AS unit_token_n,{quantity} AS legacy_characters,{count} AS legacy_character_n FROM {} u LEFT JOIN {} c ON {} LEFT JOIN {} e ON {})",
+        super::analysis_source::as_view(&base),
+        super::analysis_source::as_view(&legacy),
+        super::analysis_source::join_on("u", "c", keys),
+        super::analysis_source::as_view(&expected),
+        super::analysis_source::join_on("u", "e", keys),
     )
 }
 

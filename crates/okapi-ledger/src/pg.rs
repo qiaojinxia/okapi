@@ -285,48 +285,156 @@ pub async fn record_settlement_in_tx(
     let (input_unit, input_characters) = input_units(input.usage, input.pricing_snapshot.as_ref())?;
     // 两参形式与单参 bigint 形式的锁互不相撞（sqlx 迁移锁用的是单参）；
     // 不同 request_id 撞上同一个 hashtext 只是短暂串行，不影响正确性
-    okapi_store::history::read_lock(tx).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
-        .bind(SETTLEMENT_LOCK_NS)
-        .bind(input.request_id.to_string())
-        .execute(&mut **tx)
+    okapi_store::history::read_and_xact_lock(tx, SETTLEMENT_LOCK_NS, &input.request_id.to_string())
         .await?;
 
-    let already_recorded = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM billing_financial_records WHERE request_id = $1) AS "exists!""#,
-        input.request_id
-    )
-    .fetch_one(&mut **tx)
-    .await?;
-    if already_recorded {
-        tracing::warn!(request_id = %input.request_id, "结算重放：request_id 已落账，跳过");
-        return Ok(false);
-    }
+    let usage_details = serde_json::json!({
+        "tokens": input.usage,
+        "input_unit": input_unit,
+        "input_characters": input_characters,
+        "prompt_source": input.usage.prompt_source(),
+        "completion_source": input.usage.completion_source(),
+        "requested_model": input.dimensions.requested_model,
+        "endpoint": input.dimensions.endpoint,
+        "diagnostics": input.dimensions.diagnostics,
+    });
+    let event_payload = serde_json::json!({
+        "model": input.model_name,
+        "requested_model": input.dimensions.requested_model,
+        "upstream_model": input.dimensions.upstream_model,
+        "endpoint": input.dimensions.endpoint,
+        "upstream_endpoint": input.dimensions.upstream_endpoint,
+        "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
+        "upstream_cost_known": input.upstream_cost.is_some(),
+        "amount_micro": input.amount.as_micros(),
+        "source_window": input.source_window,
+        "error_code": input.error_code,
+    });
+    let outbox_payload = with_request_diagnostics(
+        with_usage_source(
+            serde_json::json!({
+                "request_id": input.request_id,
+                "user_id": input.user_id,
+                "api_key_id": input.api_key_id,
+                "group": input.group_code,
+                "model": input.model_name,
+                "requested_model": input.dimensions.requested_model,
+                "upstream_model": input.dimensions.upstream_model,
+                "endpoint": input.dimensions.endpoint,
+                "upstream_endpoint": input.dimensions.upstream_endpoint,
+                "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
+                "upstream_cost_known": input.upstream_cost.is_some(),
+                "channel_id": input.channel_id,
+                "channel_key_id": input.channel_key_id,
+                "log_type": input.log_type,
+                "status": input.state.as_i16(),
+                "prompt_tokens": input.usage.prompt_tokens,
+                "cached_tokens": input.usage.cached_tokens,
+                "cache_write_tokens": input.usage.cache_write_tokens,
+                "cache_read_reported": input.usage.cache_read_reported,
+                "cache_write_reported": input.usage.cache_write_reported,
+                "completion_tokens": input.usage.completion_tokens,
+                "reasoning_tokens": input.usage.reasoning_tokens,
+                "amount_micro": input.amount.as_micros(),
+                "original_amount_micro": input.original.as_micros(),
+                "discount_micro": input.discount.as_micros(),
+                "upstream_cost_micro": input.upstream_cost.map_or(0, Money::as_micros),
+                "pricing_epoch": input.pricing_epoch,
+                "ratio_snapshot": input.pricing_snapshot.as_ref().map(std::string::ToString::to_string).unwrap_or_default(),
+                "latency_ms": input.latency_ms,
+                "ttft_ms": input.ttft_ms,
+                "is_stream": input.is_stream,
+                "retry_count": input.retry_count,
+                "failover_count": input.failover_count,
+                "error_code": input.error_code,
+                "upstream_status": input.upstream_status,
+                "upstream_request_id": input.upstream_request_id.map(bounded_upstream_id),
+                "node": input.node,
+                "sticky_layer": input.sticky_layer,
+                "client_type": input.client_type,
+                "client_ip": input.client_ip,
+                "pool": input.pool.as_i16(),
+            }),
+            input.usage,
+            input_unit,
+            input_characters,
+        ),
+        input.dimensions.diagnostics.as_ref(),
+    );
 
-    sqlx::query(
+    let (already_recorded, user_rows, key_rows): (bool, i64, i64) = sqlx::query_as(
         r"
-        INSERT INTO billing_records (
-            request_id, upstream_request_id, log_type, user_id, api_key_id,
-            group_code, model_name, channel_id, channel_key_id, status,
-            prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,
-            amount_micro, original_amount_micro, discount_micro,
-            pricing_epoch, pricing_snapshot,
-            latency_ms, ttft_ms, is_stream, retry_count, failover_count,
-            upstream_status, error_code, node, sticky_layer, client_type,
-            upstream_cost_micro, client_ip, pool, usage_details, source_window
-        ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9, $10,
-            $11, $12, $13, $14,
-            $15, $16, $17,
-            $18, $19,
-            $20, $21, $22, $23, $24,
-            $25, $26, $27, $28, $29,
-            -- client_ip 是 INET。写成 $31::text::inet 而非 $31::inet：后者会让 PG 把入参
-            -- 类型报成 inet，sqlx 就要求打开 ipnetwork feature——为一列拉一整套网络类型
-            -- 不值当。先按 text 绑定再转，值只可能来自 `clients::client_ip`（已 parse 过）。
-            $30, $31::text::inet, $32, $33, $34
+        WITH existing AS (
+            SELECT EXISTS(
+                SELECT 1 FROM billing_financial_records WHERE request_id = $1
+            ) AS present
+        ),
+        ins_record AS (
+            INSERT INTO billing_records (
+                request_id, upstream_request_id, log_type, user_id, api_key_id,
+                group_code, model_name, channel_id, channel_key_id, status,
+                prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,
+                amount_micro, original_amount_micro, discount_micro,
+                pricing_epoch, pricing_snapshot,
+                latency_ms, ttft_ms, is_stream, retry_count, failover_count,
+                upstream_status, error_code, node, sticky_layer, client_type,
+                upstream_cost_micro, client_ip, pool, usage_details, source_window
+            )
+            SELECT
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13, $14,
+                $15, $16, $17,
+                $18, $19,
+                $20, $21, $22, $23, $24,
+                $25, $26, $27, $28, $29,
+                -- client_ip 是 INET。写成 $31::text::inet 而非 $31::inet：后者会让 PG 把入参
+                -- 类型报成 inet，sqlx 就要求打开 ipnetwork feature——为一列拉一整套网络类型
+                -- 不值当。先按 text 绑定再转，值只可能来自 `clients::client_ip`（已 parse 过）。
+                $30, $31::text::inet, $32, $33, $34
+            FROM existing
+            WHERE NOT existing.present
+            RETURNING 1
+        ),
+        ins_event AS (
+            INSERT INTO billing_events (
+                user_id, request_id, event_type, delta_micro, balance_after_micro, payload, actor, pool
+            )
+            SELECT $4, $1, $35, $36, $37, $38, 'system:gateway', $32
+            FROM existing
+            WHERE NOT existing.present
+            RETURNING 1
+        ),
+        upd_user AS (
+            UPDATE users
+               SET balance_micro = balance_micro + $36,
+                   updated_at = now()
+              FROM existing
+             WHERE users.id = $4
+               AND NOT existing.present
+               AND $32 = 0::smallint
+            RETURNING 1
+        ),
+        upd_key AS (
+            UPDATE api_keys
+               SET used_micro = used_micro + $15,
+                   last_used_at = now()
+              FROM existing
+             WHERE api_keys.id = $5
+               AND NOT existing.present
+            RETURNING 1
+        ),
+        ins_outbox AS (
+            INSERT INTO billing_outbox (topic, payload)
+            SELECT 'billing.completed', $39
+              FROM existing
+             WHERE NOT existing.present
+            RETURNING 1
         )
+        SELECT existing.present,
+               (SELECT count(*) FROM upd_user) AS user_rows,
+               (SELECT count(*) FROM upd_key) AS key_rows
+          FROM existing
         ",
     )
     .bind(input.request_id)
@@ -361,124 +469,31 @@ pub async fn record_settlement_in_tx(
     .bind(input.upstream_cost.map(Money::as_micros))
     .bind(input.client_ip)
     .bind(input.pool.as_i16())
-    .bind(serde_json::json!({
-        "tokens": input.usage,
-        "input_unit": input_unit,
-        "input_characters": input_characters,
-        "prompt_source": input.usage.prompt_source(),
-        "completion_source": input.usage.completion_source(),
-        "requested_model": input.dimensions.requested_model,
-        "endpoint": input.dimensions.endpoint,
-        "diagnostics": input.dimensions.diagnostics,
-    }))
+    .bind(usage_details)
     .bind(&input.source_window)
-    .execute(&mut **tx)
+    .bind(input.event_type)
+    .bind(input.delta_micro)
+    .bind(input.balance_after.map(Money::as_micros))
+    .bind(event_payload)
+    .bind(outbox_payload)
+    .fetch_one(&mut **tx)
     .await?;
 
-    sqlx::query!(
-        r#"
-        INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, balance_after_micro, payload, actor, pool)
-        VALUES ($1, $2, $3, $4, $5, $6, 'system:gateway', $7)
-        "#,
-        input.user_id,
-        input.request_id,
-        input.event_type,
-        input.delta_micro,
-        input.balance_after.map(Money::as_micros),
-        serde_json::json!({
-            "model": input.model_name,
-            "requested_model": input.dimensions.requested_model,
-            "upstream_model": input.dimensions.upstream_model,
-            "endpoint": input.dimensions.endpoint,
-            "upstream_endpoint": input.dimensions.upstream_endpoint,
-            "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
-            "upstream_cost_known": input.upstream_cost.is_some(),
-            "amount_micro": input.amount.as_micros(),
-            "source_window": input.source_window,
-            "error_code": input.error_code,
-        }),
-        input.pool.as_i16()
-    )
-    .execute(&mut **tx)
-    .await?;
-
+    if already_recorded {
+        tracing::warn!(request_id = %input.request_id, "结算重放：request_id 已落账，跳过");
+        return Ok(false);
+    }
     // 钱包余额快照列（展示用；真理源 = 事件流，M2 reconciler 校准）。订阅池不落 PG 快照。
     // 两条快照 UPDATE 都必须命中一行：应用不硬删用户与 key，命中 0 行只能是库被绕过应用改过。
     // 整笔回滚并报 InvalidSettlement（重试日志按永久失败隔离待修），不留下事件与快照对不上的账。
-    if input.pool == Pool::Wallet {
-        let updated = sqlx::query!(
-            r#"UPDATE users SET balance_micro = balance_micro + $2, updated_at = now() WHERE id = $1"#,
-            input.user_id,
-            input.delta_micro
-        )
-        .execute(&mut **tx)
-        .await?;
-        if updated.rows_affected() != 1 {
-            tracing::error!(user_id = input.user_id, request_id = %input.request_id, "settlement user row missing");
-            return Err(LedgerError::InvalidSettlement);
-        }
+    if input.pool == Pool::Wallet && user_rows != 1 {
+        tracing::error!(user_id = input.user_id, request_id = %input.request_id, "settlement user row missing");
+        return Err(LedgerError::InvalidSettlement);
     }
-
-    let updated = sqlx::query!(
-        r#"UPDATE api_keys SET used_micro = used_micro + $2, last_used_at = now() WHERE id = $1"#,
-        input.api_key_id,
-        input.amount.as_micros()
-    )
-    .execute(&mut **tx)
-    .await?;
-    if updated.rows_affected() != 1 {
+    if key_rows != 1 {
         tracing::error!(api_key_id = input.api_key_id, request_id = %input.request_id, "settlement api key row missing");
         return Err(LedgerError::InvalidSettlement);
     }
-
-    sqlx::query!(
-        r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.completed', $1)"#,
-        with_request_diagnostics(with_usage_source(serde_json::json!({
-            "request_id": input.request_id,
-            "user_id": input.user_id,
-            "api_key_id": input.api_key_id,
-            "group": input.group_code,
-            "model": input.model_name,
-            "requested_model": input.dimensions.requested_model,
-            "upstream_model": input.dimensions.upstream_model,
-            "endpoint": input.dimensions.endpoint,
-            "upstream_endpoint": input.dimensions.upstream_endpoint,
-            "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
-            "upstream_cost_known": input.upstream_cost.is_some(),
-            "channel_id": input.channel_id,
-            "channel_key_id": input.channel_key_id,
-            "log_type": input.log_type,
-            "status": input.state.as_i16(),
-            "prompt_tokens": input.usage.prompt_tokens,
-            "cached_tokens": input.usage.cached_tokens,
-            "cache_write_tokens": input.usage.cache_write_tokens,
-            "cache_read_reported": input.usage.cache_read_reported,
-            "cache_write_reported": input.usage.cache_write_reported,
-            "completion_tokens": input.usage.completion_tokens,
-            "reasoning_tokens": input.usage.reasoning_tokens,
-            "amount_micro": input.amount.as_micros(),
-            "original_amount_micro": input.original.as_micros(),
-            "discount_micro": input.discount.as_micros(),
-            "upstream_cost_micro": input.upstream_cost.map_or(0, Money::as_micros),
-            "pricing_epoch": input.pricing_epoch,
-            "ratio_snapshot": input.pricing_snapshot.as_ref().map(std::string::ToString::to_string).unwrap_or_default(),
-            "latency_ms": input.latency_ms,
-            "ttft_ms": input.ttft_ms,
-            "is_stream": input.is_stream,
-            "retry_count": input.retry_count,
-            "failover_count": input.failover_count,
-            "error_code": input.error_code,
-            "upstream_status": input.upstream_status,
-            "upstream_request_id": input.upstream_request_id.map(bounded_upstream_id),
-            "node": input.node,
-            "sticky_layer": input.sticky_layer,
-            "client_type": input.client_type,
-            "client_ip": input.client_ip,
-            "pool": input.pool.as_i16(),
-        }), input.usage, input_unit, input_characters), input.dimensions.diagnostics.as_ref())
-    )
-    .execute(&mut **tx)
-    .await?;
 
     Ok(true)
 }

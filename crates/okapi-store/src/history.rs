@@ -8,15 +8,37 @@ use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 const RETENTION_LOCK: i64 = 0x4F4B_4849_5354;
 
 pub async fn read_lock(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
-    sqlx::query("SET LOCAL lock_timeout='5s'")
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("SET LOCAL statement_timeout='10s'")
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query!("SELECT pg_advisory_xact_lock_shared($1)", RETENTION_LOCK)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        "SELECT CASE
+             WHEN set_config('lock_timeout', '5s', true) IS NOT NULL
+              AND set_config('statement_timeout', '10s', true) IS NOT NULL
+             THEN pg_advisory_xact_lock_shared($1)
+         END",
+    )
+    .bind(RETENTION_LOCK)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn read_and_xact_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    namespace: i32,
+    key: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "SELECT CASE
+             WHEN set_config('lock_timeout', '5s', true) IS NOT NULL
+              AND set_config('statement_timeout', '10s', true) IS NOT NULL
+             THEN pg_advisory_xact_lock_shared($1)
+         END,
+         pg_advisory_xact_lock($2, hashtext($3))",
+    )
+    .bind(RETENTION_LOCK)
+    .bind(namespace)
+    .bind(key)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 pub async fn read(pg: &PgPool) -> Result<Transaction<'static, Postgres>, StoreError> {

@@ -73,7 +73,12 @@ pub(super) fn prepared_with_calibration(
     // `e.n` is read from another MV and may trail in-flight inserts; the rate MV's own
     // request count bounds its known units atomically.
     format!(
-        "(SELECT {selected_keys},greatest(r.output_rate_observed,{known})+toInt64(throwIf({known}>greatest(e.n,r.output_rate_observed))) AS output_rate_observed,r.output_rate_sum,r.output_rate_samples,r.output_rate_output,{known} AS output_rate_known,r.output_rate_tokens FROM {base} r LEFT JOIN {correction} c USING ({keys}) LEFT JOIN {expected} e USING ({keys}))"
+        "(SELECT {selected_keys},greatest(r.output_rate_observed,{known})+toInt64(throwIf({known}>greatest(e.n,r.output_rate_observed))) AS output_rate_observed,r.output_rate_sum,r.output_rate_samples,r.output_rate_output,{known} AS output_rate_known,r.output_rate_tokens FROM {} r LEFT JOIN {} c ON {} LEFT JOIN {} e ON {})",
+        super::analysis_source::as_view(&base),
+        super::analysis_source::as_view(&correction),
+        super::analysis_source::join_on("r", "c", keys),
+        super::analysis_source::as_view(&expected),
+        super::analysis_source::join_on("r", "e", keys),
     )
 }
 

@@ -35,7 +35,7 @@ pub(super) async fn overview_sources(
     // Calendar conversion may replace the daily table with an aliased subquery.
     // Give the outer facts their own alias so that conversion cannot add two aliases.
     let totals_sql =
-        format!("SELECT {OVERVIEW_COLS} FROM (SELECT * FROM mv_user_day) AS u WHERE {predicate}");
+        format!("SELECT {OVERVIEW_COLS} FROM (SELECT * FROM mv_user_day WHERE {predicate}) AS u");
     let source = super::super::token_details::with_provenance("", "mv_user_day", predicate);
     let sources_sql = format!("SELECT * FROM {source}");
     let (mut rows, sources) = tokio::try_join!(

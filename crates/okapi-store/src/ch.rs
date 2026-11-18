@@ -18,12 +18,12 @@ use std::time::Duration;
 /// 永久判为历史不完整，所以投递入口按它拦截。
 pub const STATISTICS_LOG_TYPES: [i64; 3] = [2, 5, 6];
 
-const AGGREGATION_GUARD: &str = "max_size_to_preallocate_for_aggregation=8192&max_block_size=8192&max_insert_block_size=8192&min_insert_block_size_rows_for_materialized_views=8192&min_insert_block_size_bytes_for_materialized_views=4194304&input_format_parallel_parsing=0";
+const AGGREGATION_GUARD: &str = "max_size_to_preallocate_for_aggregation=8192&max_block_size=8192&max_insert_block_size=8192&min_insert_block_size_rows_for_materialized_views=8192&min_insert_block_size_bytes_for_materialized_views=4194304&input_format_parallel_parsing=0&max_threads=2";
 
 /// `join_algorithm`：统计查询把几十个小汇总源 LEFT JOIN 起来，哈希连接每个至少占十来 MiB，
 /// 一条看板查询就到 ~375MiB（线上只有几千行时也是），几个面板并发就撞 4GB 机器的内存上限；
 /// partial_merge 同一条只用 ~48MiB、耗时不变，结果逐行一致。它不支持的连接回落到 hash。
-const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192&join_algorithm=partial_merge%2Chash";
+const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192&join_algorithm=partial_merge%2Chash&max_threads=2";
 
 #[derive(Clone)]
 pub struct ChClient {
@@ -31,6 +31,7 @@ pub struct ChClient {
     base: String,
     database: String,
     credentials: Option<(String, String)>,
+    query_gate: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 /// 拆出 URL 内嵌凭证（`http://user:pass@host:port`）→（纯净 base，凭证）。
@@ -99,6 +100,7 @@ impl ChClient {
             base,
             database: database.to_owned(),
             credentials,
+            query_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
         })
     }
 
@@ -166,6 +168,35 @@ impl ChClient {
         Ok(())
     }
 
+    async fn execute_concurrent(&self, statements: Vec<String>) -> Result<(), StoreError> {
+        if statements.is_empty() {
+            return Ok(());
+        }
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+        let mut tasks = tokio::task::JoinSet::new();
+        for sql in statements {
+            let client = self.clone();
+            let gate = std::sync::Arc::clone(&gate);
+            tasks.spawn(async move {
+                let _permit = gate
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| StoreError::InvalidData("clickhouse_schema_gate_closed"))?;
+                client.execute(&sql).await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.map_err(|err| {
+                StoreError::InvalidData(if err.is_panic() {
+                    "clickhouse_schema_task_panic"
+                } else {
+                    "clickhouse_schema_task_cancelled"
+                })
+            })??;
+        }
+        Ok(())
+    }
+
     /// 应用嵌入式 schema（幂等；okapi 库需已存在，容器由 CLICKHOUSE_DB 创建）。
     pub async fn ensure_schema(&self) -> Result<(), StoreError> {
         // 建库兜底（本地/CI 容器已建时是 no-op）
@@ -179,16 +210,29 @@ impl ChClient {
         // Windows 检出（core.autocrlf）会带 CRLF，切不开则整份当作一条语句下发，
         // 而 ClickHouse HTTP 接口拒绝 multi-statement。
         let schema = include_str!("ch_schema.sql").replace('\r', "");
+        let mut base_ddl = Vec::new();
+        let mut materialized_views = Vec::new();
         for statement in schema.split(";\n") {
             let sql = statement.trim();
             if sql.is_empty() || sql.lines().all(|l| l.trim_start().starts_with("--")) {
                 continue;
             }
-            self.execute(sql).await?;
+            if sql.lines().any(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("--") && trimmed.starts_with("CREATE MATERIALIZED VIEW")
+            }) {
+                materialized_views.push(sql.to_owned());
+            } else {
+                base_ddl.push(sql.to_owned());
+            }
         }
-        for statement in population::schema()? {
-            self.execute(&statement).await?;
+        for sql in base_ddl {
+            self.execute(&sql).await?;
         }
+        let (population_mvs, population_views) = population::schema_waves()?;
+        materialized_views.extend(population_mvs);
+        self.execute_concurrent(materialized_views).await?;
+        self.execute_concurrent(population_views).await?;
         server_tools::schema::ensure(self).await?;
         Ok(())
     }
@@ -252,15 +296,19 @@ impl ChClient {
             Vec::new()
         } else {
             let url = self.query_url(zone, params);
-            let rows = self
-                .post(
-                    url,
-                    format!(
-                        "{} FORMAT JSONEachRow",
-                        population::coverage(&sql, &referenced)
-                    ),
-                )
-                .await?;
+            let body = format!(
+                "{} FORMAT JSONEachRow",
+                population::coverage(&sql, &referenced)
+            );
+            let weight: u32 = if referenced.len() >= 4 { 2 } else { 1 };
+            let rows = {
+                let _permit = self
+                    .query_gate
+                    .acquire_many(weight)
+                    .await
+                    .map_err(|_| StoreError::InvalidData("clickhouse_query_gate_closed"))?;
+                self.post(url, body).await?
+            };
             parse_rows(&rows)?
                 .into_iter()
                 .filter(|row| row["missing"] == "0" || row["missing"] == 0)
@@ -270,7 +318,19 @@ impl ChClient {
         let names = complete.iter().map(String::as_str).collect::<Vec<_>>();
         let sql = population::sql(&sql, &names)?;
         let url = self.query_url(zone, params);
-        let text = self.post(url, format!("{sql} FORMAT JSONEachRow")).await?;
+        let weight: u32 = if sql.len() >= 16 * 1024 || referenced.len() >= 4 {
+            2
+        } else {
+            1
+        };
+        let text = {
+            let _permit = self
+                .query_gate
+                .acquire_many(weight)
+                .await
+                .map_err(|_| StoreError::InvalidData("clickhouse_query_gate_closed"))?;
+            self.post(url, format!("{sql} FORMAT JSONEachRow")).await?
+        };
         parse_rows(&text)
     }
 }

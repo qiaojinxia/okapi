@@ -123,6 +123,24 @@ pub struct CubeQuery {
     pub compare: Option<bool>,
 }
 
+async fn read_both_coverages(
+    state: &AppState,
+    current_predicate: &str,
+    previous_predicate: &str,
+    params: &[(&str, &str)],
+) -> Result<
+    (
+        super::measurement_coverage::Coverage,
+        super::measurement_coverage::Coverage,
+    ),
+    AppError,
+> {
+    tokio::try_join!(
+        super::measurement_coverage::Coverage::read(state, current_predicate, params),
+        super::measurement_coverage::Coverage::read(state, previous_predicate, params),
+    )
+}
+
 /// 编译后的过滤：整数已进 SQL，字符串留在绑定参数里。
 struct Scope {
     clause: String,
@@ -200,13 +218,22 @@ impl CubeQuery {
         // 当期与上期各自判断有没有历史字符口径（老语音计费数据要做 prompt_tokens 校正）。
         let primary = self.primary_scope();
         let params = primary.borrow();
-        let predicate = format!("{}{}", self.window(false), primary.clause);
-        self.coverage =
-            super::measurement_coverage::Coverage::read(state, &predicate, &params).await?;
+        let current_predicate = format!("{}{}", self.window(false), primary.clause);
         if self.compares() {
-            let predicate = format!("{}{}", self.window(true), primary.clause);
-            self.previous_coverage =
-                super::measurement_coverage::Coverage::read(state, &predicate, &params).await?;
+            let previous_predicate = format!("{}{}", self.window(true), primary.clause);
+            let (coverage, previous_coverage) = Box::pin(read_both_coverages(
+                state,
+                &current_predicate,
+                &previous_predicate,
+                &params,
+            ))
+            .await?;
+            self.coverage = coverage;
+            self.previous_coverage = previous_coverage;
+        } else {
+            self.coverage =
+                super::measurement_coverage::Coverage::read(state, &current_predicate, &params)
+                    .await?;
         }
         Ok(())
     }

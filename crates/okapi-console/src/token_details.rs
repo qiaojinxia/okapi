@@ -114,7 +114,12 @@ pub(super) fn prepared(keys: &str, table: &str, predicate: &str, historical: boo
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "(SELECT {keys_selected}, {details_selected}, {selected}, {ttl_selected} FROM {details} td LEFT JOIN {units} iu USING ({keys}) LEFT JOIN {ttl} ct USING ({keys}))"
+        "(SELECT {keys_selected}, {details_selected}, {selected}, {ttl_selected} FROM {} td LEFT JOIN {} iu ON {} LEFT JOIN {} ct ON {})",
+        super::analysis_source::as_view(&details),
+        super::analysis_source::as_view(&units),
+        super::analysis_source::join_on("td", "iu", keys),
+        super::analysis_source::as_view(&ttl),
+        super::analysis_source::join_on("td", "ct", keys),
     )
 }
 
@@ -166,7 +171,10 @@ pub(super) fn with_provenance(keys: &str, table: &str, predicate: &str) -> Strin
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "(SELECT {keys_selected}, {source_fields}, {selected} FROM {provenance} us LEFT JOIN {details} td USING ({keys}))"
+        "(SELECT {keys_selected}, {source_fields}, {selected} FROM {} us LEFT JOIN {} td ON {})",
+        super::analysis_source::as_view(&provenance),
+        super::analysis_source::as_view(&details),
+        super::analysis_source::join_on("us", "td", keys),
     )
 }
 

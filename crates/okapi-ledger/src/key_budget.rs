@@ -14,19 +14,30 @@ pub(crate) async fn check(
     amount: Money,
     exclude_hold: Option<Uuid>,
 ) -> Result<(), LedgerError> {
-    let (mode, limit, spent): (i16, Option<i64>, i64) = sqlx::query_as(
-        "SELECT quota_mode,quota_micro,used_micro FROM api_keys WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL"
-    ).bind(key_id).bind(user_id).fetch_optional(guard.connection()?).await?
-        .ok_or(LedgerError::InvalidReservation)?;
+    let (mode, limit, spent, held): (i16, Option<i64>, i64, i64) = sqlx::query_as(
+        "SELECT quota_mode,
+                quota_micro,
+                used_micro,
+                CASE WHEN quota_mode = 1 THEN
+                    COALESCE((SELECT SUM(maximum_micro)::bigint FROM balance_holds
+                              WHERE api_key_id = $1 AND state IN ('pending', 'held')
+                                AND ($3::uuid IS NULL OR id <> $3)), 0)
+                ELSE 0::bigint END
+           FROM api_keys
+          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(key_id)
+    .bind(user_id)
+    .bind(exclude_hold)
+    .fetch_optional(guard.connection()?)
+    .await?
+    .ok_or(LedgerError::InvalidReservation)?;
     if mode != 1 {
         return Ok(());
     }
     if amount.as_micros() < 0 || spent < 0 {
         return Err(LedgerError::AdmissionStateInvalid);
     }
-    let held: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(maximum_micro),0)::bigint FROM balance_holds WHERE api_key_id=$1 AND state IN ('pending','held') AND ($2::uuid IS NULL OR id<>$2)"
-    ).bind(key_id).bind(exclude_hold).fetch_one(guard.connection()?).await?;
     let mut total = i128::from(spent) + i128::from(held) + i128::from(amount.as_micros());
     for reservation in ledger.list_reservations(user_id).await? {
         if reservation.api_key_id == 0 || reservation.amount.as_micros() < 0 {

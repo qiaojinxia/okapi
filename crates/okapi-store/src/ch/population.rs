@@ -167,11 +167,11 @@ fn read_view(spec: &Spec) -> String {
     ))
 }
 
-pub(super) fn schema() -> Result<Vec<String>, StoreError> {
+pub(super) fn schema_waves() -> Result<(Vec<String>, Vec<String>), StoreError> {
     let specs = spec::specs()?;
-    let mut statements = Vec::new();
+    let mut mvs_and_base = Vec::with_capacity(specs.len() + 1);
     for spec in specs {
-        statements.push(format!(
+        mvs_and_base.push(format!(
             "{}AS {} FROM request_log_raw AS r WHERE {} GROUP BY {}",
             spec.prefix.replace(&spec.name, &shadow(&spec.name)),
             raw_select(spec),
@@ -179,9 +179,16 @@ pub(super) fn schema() -> Result<Vec<String>, StoreError> {
             spec.dimensions
         ));
     }
-    statements.push("CREATE VIEW IF NOT EXISTS request_log_calls AS SELECT * FROM request_log_raw WHERE log_type IN (2,5)".to_owned());
-    statements.extend(specs.iter().filter(|s| canonical(s)).map(read_view));
-    Ok(statements)
+    mvs_and_base.push(
+        "CREATE VIEW IF NOT EXISTS request_log_calls AS SELECT * FROM request_log_raw WHERE log_type IN (2,5)"
+            .to_owned(),
+    );
+    let read_views = specs
+        .iter()
+        .filter(|s| canonical(s))
+        .map(read_view)
+        .collect();
+    Ok((mvs_and_base, read_views))
 }
 
 /// Rewrite only table identifiers following FROM/JOIN. A single pass prevents

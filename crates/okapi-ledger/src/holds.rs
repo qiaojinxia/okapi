@@ -114,21 +114,18 @@ impl Drop for UserGuard {
             // close_on_drop remains armed on every error, cancellation or shutdown.
             // Reuse is explicit and only follows a verified unlock and session reset.
             let cleanup = async {
-                let unlocked: bool =
-                    sqlx::query_scalar("SELECT pg_advisory_unlock($1, hashtext($2))")
-                        .bind(LOCK_NAMESPACE)
-                        .bind(user_id)
-                        .fetch_one(&mut *connection)
-                        .await?;
+                let unlocked: bool = sqlx::query_scalar(
+                    "SELECT pg_advisory_unlock($1, hashtext($2))
+                     WHERE set_config('lock_timeout', '0', false) IS NOT NULL
+                       AND set_config('statement_timeout', '0', false) IS NOT NULL",
+                )
+                .bind(LOCK_NAMESPACE)
+                .bind(user_id)
+                .fetch_one(&mut *connection)
+                .await?;
                 if !unlocked {
                     return Err(sqlx::Error::Protocol("user lock not held".into()));
                 }
-                sqlx::query("RESET lock_timeout")
-                    .execute(&mut *connection)
-                    .await?;
-                sqlx::query("RESET statement_timeout")
-                    .execute(&mut *connection)
-                    .await?;
                 Ok::<(), sqlx::Error>(())
             };
             if matches!(
@@ -153,17 +150,17 @@ impl UserGuard {
     pub async fn acquire(pg: &PgPool, user_id: i64) -> Result<Self, LedgerError> {
         let mut connection = pg.acquire().await?;
         connection.close_on_drop();
-        sqlx::query("SET lock_timeout = '5s'")
-            .execute(&mut *connection)
-            .await?;
-        sqlx::query("SET statement_timeout = '10s'")
-            .execute(&mut *connection)
-            .await?;
-        sqlx::query("SELECT pg_advisory_lock($1, hashtext($2))")
-            .bind(LOCK_NAMESPACE)
-            .bind(user_id.to_string())
-            .execute(&mut *connection)
-            .await?;
+        sqlx::query(
+            "SELECT CASE
+                 WHEN set_config('lock_timeout', '5s', false) IS NOT NULL
+                  AND set_config('statement_timeout', '10s', false) IS NOT NULL
+                 THEN pg_advisory_lock($1, hashtext($2))
+             END",
+        )
+        .bind(LOCK_NAMESPACE)
+        .bind(user_id.to_string())
+        .execute(&mut *connection)
+        .await?;
         Ok(Self {
             connection: Some(connection),
             user_id,
@@ -226,26 +223,32 @@ impl UserGuard {
     pub async fn synchronize(&mut self, ledger: &BalanceLedger) -> Result<(), LedgerError> {
         // Every admission and settlement runs this inside the user's lock. One probe
         // covers the four recovery queues, so an idle fence costs a single round trip.
-        let pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM billing_sync WHERE user_id = $1)
-                 OR EXISTS(SELECT 1 FROM balance_holds WHERE user_id = $1 AND state = 'closing')
-                 OR EXISTS(SELECT 1 FROM fund_transfers WHERE user_id = $1 AND cleaned_at IS NULL)
-                 OR EXISTS(SELECT 1 FROM subscription_sync WHERE user_id = $1)",
-        )
-        .bind(self.user_id)
-        .fetch_one(self.connection()?)
-        .await?;
-        if !pending {
-            return Ok(());
+        let (has_billing, has_holds, has_transfers, has_subs): (bool, bool, bool, bool) =
+            sqlx::query_as(
+                "SELECT EXISTS(SELECT 1 FROM billing_sync WHERE user_id = $1),
+                        EXISTS(SELECT 1 FROM balance_holds WHERE user_id = $1 AND state = 'closing'),
+                        EXISTS(SELECT 1 FROM fund_transfers WHERE user_id = $1 AND cleaned_at IS NULL),
+                        EXISTS(SELECT 1 FROM subscription_sync WHERE user_id = $1)",
+            )
+            .bind(self.user_id)
+            .fetch_one(self.connection()?)
+            .await?;
+        if has_billing {
+            crate::sync::synchronize(self, ledger, self.user_id).await?;
         }
-        crate::sync::synchronize(self, ledger, self.user_id).await?;
-        let rows = db::closing(self).await?;
-        for row in rows {
-            hot::close(ledger, &row).await?;
-            db::closed(self, row.id).await?;
+        if has_holds {
+            let rows = db::closing(self).await?;
+            for row in rows {
+                hot::close(ledger, &row).await?;
+                db::closed(self, row.id).await?;
+            }
         }
-        crate::transfers::synchronize(self, ledger, self.user_id).await?;
-        crate::subscriptions::effects::synchronize(self, ledger, self.user_id).await?;
+        if has_transfers {
+            crate::transfers::synchronize(self, ledger, self.user_id).await?;
+        }
+        if has_subs {
+            crate::subscriptions::effects::synchronize(self, ledger, self.user_id).await?;
+        }
         Ok(())
     }
 }

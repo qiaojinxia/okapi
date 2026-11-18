@@ -89,12 +89,21 @@ pub(super) const METRICS: [(&str, &str); 77] = [
 /// 数秒，其中 ~90% 在 `getTreeHash`。`view(...)` 在外层分析里只是一张带 schema 的表，哈希
 /// 很小；子查询本身仍被完整分析，语义与结果与直接内联完全一致（对照用例逐值核对）。
 /// 不是括号子查询的片段原样返回。
-fn as_view(subquery: &str) -> String {
+pub(super) fn as_view(subquery: &str) -> String {
     if subquery.starts_with('(') {
         format!("view{subquery}")
     } else {
         subquery.to_owned()
     }
+}
+
+pub(super) fn join_on(left: &str, right: &str, keys: &str) -> String {
+    keys.split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(|key| format!("{left}.{key}={right}.{key}"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// `window` 和 `scope` 是已校验的 SQL，字符串过滤均由调用方绑定。
@@ -201,11 +210,7 @@ fn joined_measurements(
 
 fn join_measurement(from: &mut String, source: &str, alias: &str, keys: &str) {
     use std::fmt::Write as _;
-    let on = keys
-        .split(", ")
-        .map(|key| format!("m.{key}={alias}.{key}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    let on = join_on("m", alias, keys);
     let _ = write!(from, " LEFT JOIN {} {alias} ON {on}", as_view(source));
 }
 
@@ -310,13 +315,13 @@ mod tests {
             assert!(balanced(&sql));
             // 近百个列表达式引用 d 与测量子源：任何一个退回 CTE 或括号子查询都会让规划耗时数倍。
             assert!(!sql.contains("WITH d AS"), "不得使用 CTE");
-            // 本层的 join：每个测量子源（`ON m.hour=…`）都必须是 view(...)。
-            // 子源内部（别的模块生成的 e / a / r 等）的普通 join 不在此列。
+            // 每个连接（含测量子源及其内部连接）都必须以 view(...) 引用，不得退回内联括号子查询。
             assert_eq!(
                 sql.matches(" LEFT JOIN view(").count(),
-                sql.matches(" ON m.hour=").count(),
+                sql.matches(" LEFT JOIN ").count(),
                 "测量子源必须以 view(...) 引用"
             );
+            assert!(sql.matches(" ON m.hour=").count() >= 6);
             // 只读明细聚合，d 只出现一次：旧立方体剩余那一支会把 d 再分析一遍。
             assert_eq!(sql.matches("FROM view(SELECT ").count(), 1);
             assert!(!sql.contains("mv_cube_hour") && !sql.contains("UNION ALL SELECT l."));
