@@ -82,20 +82,63 @@ pub(crate) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
 /// 此前 401 与 403 一并判 `Invalid`（`status=6`，无冷却、不自愈，控制面也没有复活入口），
 /// 于是调一次未开通的模型就把该渠道**所有**模型打死，只能靠重置凭证救回来。
 /// 故 403 改为：body 明说凭证问题才算失效，否则不改变 key 健康状态。
+///
+/// 「明说」只认上游自己写的位置：`error.code` / `error.type` / 顶层 `code` 的枚举值，`error.message` /
+/// 顶层 `message` 的**句首**；不是 JSON 的短正文（代理的纯文本 403）也只看句首。正文里常回显调用方
+/// 传的模型名、字段值，整段子串匹配会让任何用户用一个带 `unauthorized` 的模型名把共用 key 打成
+/// 永久失效（与 `okapi_providers::account_fault` 同一条规矩）。
 fn body_says_credential_rejected(body: &Bytes) -> bool {
-    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
-    [
+    const CODES: [&str; 5] = [
         "invalid_api_key",
-        "invalid api key",
-        "incorrect api key",
         "invalid_authentication",
         "authentication_error",
+        "unauthorized",
+        "invalid_token",
+    ];
+    const PREFIXES: [&str; 6] = [
+        "invalid api key",
+        "incorrect api key",
+        "invalid authentication",
         "invalid token",
         "api key not valid",
         "unauthorized",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
+    ];
+    let starts_with = |text: &str| {
+        let text = text.trim_start();
+        PREFIXES.iter().any(|prefix| {
+            text.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        })
+    };
+    if body.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        // 纯文本 / 网页：只认句首（`Unauthorized`、`Invalid token`）
+        return starts_with(&String::from_utf8_lossy(body));
+    };
+    let error = value.get("error");
+    let codes = [
+        error.and_then(|e| e.get("code")),
+        error.and_then(|e| e.get("type")),
+        value.get("code"),
+    ];
+    let messages = [
+        error.and_then(|e| e.get("message")),
+        value.get("message"),
+        // `{"error": "Unauthorized"}` 这种平铺字符串
+        error.filter(|e| e.is_string()),
+    ];
+    codes
+        .iter()
+        .flatten()
+        .filter_map(|code| code.as_str())
+        .any(|code| CODES.iter().any(|known| code.eq_ignore_ascii_case(known)))
+        || messages
+            .iter()
+            .flatten()
+            .filter_map(|message| message.as_str())
+            .any(starts_with)
 }
 
 fn body_says_insufficient_quota(body: &Bytes) -> bool {
@@ -140,6 +183,35 @@ mod tests {
             status,
             body: Bytes::copy_from_slice(body.as_bytes()),
             retry_after_secs: None,
+        }
+    }
+
+    /// 403 正文里回显的调用方内容（模型名、字段值）不能把共用 key 打成永久失效：只认上游自己写的位置。
+    #[test]
+    fn a_403_echoing_caller_input_does_not_invalidate_the_key() {
+        for echoed in [
+            r#"{"error":{"code":"model_not_allowed","message":"model 'gpt-unauthorized' is not enabled for this token group"}}"#,
+            r#"{"error":{"message":"No access to model invalid token-x"},"type":"error"}"#,
+            r#"{"message":"Model invalid_api_key-mini is not available in your plan"}"#,
+            "access denied for model unauthorized-preview",
+        ] {
+            assert!(
+                matches!(failure_kind_of(&status(403, echoed)), KeyFailure::Request),
+                "{echoed}"
+            );
+        }
+        for rejected in [
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+            r#"{"error":{"message":"Invalid token (request id: 2026)","type":"new_api_error"}}"#,
+            r#"{"error":"Unauthorized"}"#,
+            r#"{"code":"UNAUTHORIZED","message":"denied"}"#,
+            "Unauthorized",
+            "  invalid api key provided",
+        ] {
+            assert!(
+                matches!(failure_kind_of(&status(403, rejected)), KeyFailure::Invalid),
+                "{rejected}"
+            );
         }
     }
 
