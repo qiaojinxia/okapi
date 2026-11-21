@@ -1,14 +1,96 @@
+<div align="center">
+
 # Okapi
+
+**自托管的 AI API 网关：一个入口接入多家大模型，按倍率精确计费，每一笔账都能展开成算式。**
+
+Rust 单二进制 · 自带管理后台与用户门户 · OpenAI / Anthropic / Gemini 协议兼容
+
+<sub>A self-hosted AI API gateway written in Rust: one OpenAI / Anthropic / Gemini compatible endpoint in front of many LLM providers, with exact, explainable billing and a built-in admin console.</sub>
 
 [![ci](https://github.com/qiaojinxia/okapi/actions/workflows/ci.yml/badge.svg)](https://github.com/qiaojinxia/okapi/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/qiaojinxia/okapi)](LICENSE)
 
-AI API 中转网关（[ok-api](https://github.com/qiaojinxia/ok-api) v2 重构）：Rust 单二进制三角色
-（gateway / console / worker），倍率计费模型，PostgreSQL + Redis（+ 可选 ClickHouse / NATS），
-React 19 管理后台与用户门户。
+[快速开始](#快速开始) · [界面截图](#界面截图) · [功能清单](#功能清单) · [部署](#部署) · [文档](#文档)
 
-一句话：把多家上游 LLM 供应商收敛成一个 OpenAI / Anthropic / Gemini 兼容入口，按倍率精确计费，
-每一分钱可解释。
+</div>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/admin-dashboard-dark.png">
+  <img alt="Okapi 运营概览：请求量与收入趋势、调用质量、模型用量分布" src="docs/screenshots/admin-dashboard.png">
+</picture>
+
+## 适合谁
+
+- **运营 API 中转站**：分组定价、充值支付、兑换码、套餐、邀请返利、三方对账，计费后台开箱即用。
+- **团队统一出口**：各家 API key 和云厂商账号收到一处，按成员 / 密钥限额，用量与成本按人、按模型、按渠道拆开看。
+- **个人自用**：自己的 Claude Pro / Max、ChatGPT Codex 订阅登录成渠道，Claude Code、Codex CLI 直接切到网关（实验性）。
+
+## 快速开始
+
+只需要 Docker。镜像在本机从源码构建，不用装 Rust：
+
+```bash
+git clone https://github.com/qiaojinxia/okapi.git && cd okapi
+cat > deploy/.env <<EOF
+POSTGRES_PASSWORD=$(openssl rand -hex 16)
+CLICKHOUSE_PASSWORD=$(openssl rand -hex 16)
+OKAPI_MASTER_KEY=$(openssl rand -hex 32)
+OKAPI_SETUP_TOKEN=$(openssl rand -hex 16)
+EOF
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml --profile single up -d --build
+```
+
+首次构建要编译 Rust 和 BoringSSL，视机器需要 15–40 分钟。起来之后：
+
+1. 打开控制台 <http://127.0.0.1:8081>，按向导创建超管（需要填 `deploy/.env` 里的 `OKAPI_SETUP_TOKEN`）。
+2. 在「渠道」里接入上游（填 API key，或用 OAuth 登录订阅账号）；在「模型定价」里给模型定价，点「发布定价」生效。
+3. 在门户「密钥」页新建一把 key，把客户端的 base URL 换成网关地址：
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer <你的 key>" -H "content-type: application/json" \
+  -d '{"model":"gpt-5.1","messages":[{"role":"user","content":"hello"}]}'
+```
+
+网关（8080）对外，控制台（8081）只绑本机。上公网前请先看[部署](#部署)里的反代与信任来源说明。
+
+## 界面截图
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/admin-channels.png" alt="渠道列表">
+      <p><b>渠道</b>：多家上游集中管理，测活结果、上游余额、订阅额度窗口、密钥冷却都在一行里。</p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/admin-analytics.png" alt="用量分析">
+      <p><b>用量分析</b>：趋势 / 拆分 / 流向三视图，按模型、渠道、用户、密钥任意过滤与比较。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/screenshots/portal-log-bill.png" alt="账单解释">
+      <p><b>账单解释</b>：任意一笔请求展开成「用量 × 当时快照单价」的逐项算式，附分组、规则等倍率快照。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/screenshots/portal-overview.png" alt="用户门户">
+      <p><b>用户门户</b>：用户自己的用量趋势、模型消费排行、实时 RPM / TPM 与余额。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/screenshots/public-pricing.png" alt="模型广场">
+      <p><b>模型广场</b>：公开价格页，按厂商、能力、分组比价，每个模型附调用示例。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/screenshots/admin-dashboard-dark.png" alt="深色主题">
+      <p><b>深色主题</b>：全站支持浅色 / 深色主题，界面有简体中文与英文。</p>
+    </td>
+  </tr>
+</table>
+
+<sub>截图里是虚构的演示数据，由 <code>frontend/e2e/readme-shots.spec.ts</code> 生成：在 <code>frontend/</code> 下执行 <code>pnpm build && pnpm exec playwright test -c playwright.readme.config.ts</code>。</sub>
 
 ## 为什么是 Okapi
 
@@ -53,7 +135,8 @@ flowchart LR
 [IMPLEMENTATION.md](IMPLEMENTATION.md) §11 / §13，自动化用例覆盖见
 [docs/verification-checklist.md](docs/verification-checklist.md)。
 
-### 数据面：入口协议
+<details>
+<summary><b>数据面：入口协议</b>（10 项，待办 1）</summary>
 
 - [x] `/v1/chat/completions` 流式 + 非流式，SSE 首字前缓冲与 failover
 - [x] Anthropic `/v1/messages` 原生入口（+ `count_tokens`，x-api-key 鉴权，错误壳对齐）
@@ -67,7 +150,10 @@ flowchart LR
 - [x] `/v1/models`、new-api 兼容余额端点 `/v1/dashboard/billing/*`
 - [ ] 图片 variations；任务型异步中转（Midjourney / Suno 形态）
 
-### 上游供应商
+</details>
+
+<details>
+<summary><b>上游供应商</b>（8 项，待办 1）</summary>
 
 - [x] OpenAI / OpenAI 兼容、Anthropic、Gemini、Azure OpenAI（部署名映射）
 - [x] AWS Bedrock（SigV4 或 Bedrock API key，EventStream 流解码）
@@ -79,14 +165,20 @@ flowchart LR
 - [x] 渠道凭证 AES-GCM 信封加密、上游 URL SSRF 校验
 - [ ] Bedrock 非 Anthropic 模型（Converse 转换）
 
-### reasoning 与模型修饰符
+</details>
+
+<details>
+<summary><b>reasoning 与模型修饰符</b>（4 项）</summary>
 
 - [x] `reasoning_effort` / `thinking` / `reasoning:{effort,max_tokens}` 三写法归一，按 openai / anthropic / gemini 方言展开
 - [x] 模型名修饰符 `模型名@effort:high`、`-thinking-128` 后缀，变体可单独定价
 - [x] thinking-to-content（客户端不支持 reasoning 输出时转正文）
 - [x] 按上游实际响应模型计费、service_tier 档位倍率（只降不升）
 
-### 路由与容错
+</details>
+
+<details>
+<summary><b>路由与容错</b>（11 项）</summary>
 
 - [x] 渠道池 + 优先级加权 / least_latency 策略，能力感知过滤，成本感知权重
 - [x] 三层会话粘性、双层并发控制、重试矩阵（全局缺省 + 渠道级覆盖）
@@ -100,7 +192,10 @@ flowchart LR
 - [x] 结算积压背压闸（超上界 503，不预扣不打上游）、优雅下线（SIGTERM 排水后再退出）
 - [x] 多副本一致：在途计数汇总、路由失效广播、定价 epoch 热更
 
-### 计费与账本
+</details>
+
+<details>
+<summary><b>计费与账本</b>（9 项，待办 1）</summary>
 
 - [x] 三种计价模式（倍率 / 阶梯 / 按次）× 分组倍率 × 用户系数
 - [x] 四类修饰器规则（量级 / 时段 / 折扣 / 负载加价），每步落快照
@@ -113,7 +208,10 @@ flowchart LR
 - [x] 限流四件套：分组级 `[rpm, rph]`、key 级 RPD / 日 token 上限、用户×模型 RPM、无效 key 每 IP 限流
 - [ ] `reserve` 侧 Redis 缺键回源兜底；gateway 微批组提交（等压测确认 PG 写瓶颈）
 
-### 用户、身份与安全
+</details>
+
+<details>
+<summary><b>用户、身份与安全</b>（10 项，待办 1）</summary>
 
 - [x] 邮箱密码（argon2id）+ 邮件验证码 / 找回密码（SMTP）
 - [x] GitHub / Discord / LinuxDO 预设 + 任意标准 OAuth2 / OIDC 自定义接入
@@ -127,7 +225,10 @@ flowchart LR
 - [x] 单用户模式（release 下需二次确认）
 - [ ] Telegram 登录、LDAP；内容记录三态
 
-### 运营与控制面
+</details>
+
+<details>
+<summary><b>运营与控制面</b>（7 项）</summary>
 
 - [x] 渠道 / 池 / 模型 / 定价 / 规则 / 分组 / 用户 / 套餐 / 兑换码 / 团队 / 角色 全量 CRUD
 - [x] 定价 epoch 发布 + NATS 广播热更；new-api 倍率 JSON 一键导入
@@ -137,13 +238,19 @@ flowchart LR
 - [x] 用量分析立方体（ClickHouse）：趋势 / 拆解 / 流向三视图，质量看板，经营报表
 - [x] 日志检索、对账页、缓存清理、Setup 初始化向导
 
-### MCP（AI 远程管理）
+</details>
+
+<details>
+<summary><b>MCP（AI 远程管理）</b>（3 项）</summary>
 
 - [x] Streamable HTTP，协议 `2025-06-18`，Bearer key 鉴权
 - [x] 22 个精选工具按调用方 RBAC 过滤：普通用户 5 个只读，超管全量
 - [x] 写工具三道闸：站点级总开关（缺省关）+ `mcp.write` 权限点 + dry-run / confirm 两段式
 
-### 前端
+</details>
+
+<details>
+<summary><b>前端</b>（5 项）</summary>
 
 - [x] 管理后台 + 用户门户 + 公开价格页同一 SPA，按角色分区
 - [x] 账单解释器、定价模拟器、Playground 试用台（控制面同源中继）
@@ -151,13 +258,18 @@ flowchart LR
 - [x] i18n zh-CN / en（守卫零裸文案、中英键对齐）、暗色主题、响应式
 - [x] Playwright e2e：冒烟（真实 console）+ 交互（接口桩）
 
-### 部署与迁移
+</details>
+
+<details>
+<summary><b>部署与迁移</b>（4 项，待办 1）</summary>
 
 - [x] 单二进制多角色，前端产物 `embed-web` 嵌入
 - [x] Docker Compose 单机 / 多角色双 profile，K8s manifests（gateway HPA），Nginx SSE 反代模板
 - [x] `okapi migrate newapi` / `okapi migrate okapi-old` 双源迁移（幂等、dry-run）
 - [x] 压测：容器 8 vCPU json 10874 / stream 10402 RPS 全 0 错误
 - [ ] 裸金属正式压测
+
+</details>
 
 明确不做：长尾供应商专属渠道（OpenAI 兼容通道覆盖）、订阅账号池转售、后台一键自升级、
 沙盒插件运行时、内置敏感词中间件（交前置 WAF / 审核 API）。
@@ -193,8 +305,8 @@ cd frontend && pnpm build && npx playwright test smoke   # 前端构建 + e2e �
 ## 部署
 
 ```bash
-docker compose -f deploy/docker-compose.yml --profile single up -d   # 单机（okapi all）
-docker compose -f deploy/docker-compose.yml --profile multi  up -d   # 多角色
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml --profile single up -d   # 单机（okapi all）
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml --profile multi  up -d   # 多角色
 kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（gateway 带 HPA）
 ```
 
@@ -256,12 +368,17 @@ dry-run/confirm 两段式。总开关关闭时，写工具既不出现在 `tools
 
 ```
 crates/
-  okapi-domain     # 金额（i64 micro-USD）/ tokens / 计费状态机
+  okapi-domain     # 领域基元：金额（i64 micro-USD）/ tokens / 计费状态机
   okapi-pricing    # PriceBook 编译器 + 修饰器栈 + ArcSwap 热更
   okapi-ledger     # Redis Lua 预扣/结算 + PG 事件溯源 + outbox
   okapi-providers  # Provider trait + 按方向拆的协议转换 + Bedrock / Vertex / OAuth
   okapi-store      # sqlx / fred / clickhouse / async-nats 薄封装
   okapi-api        # OpenAI 兼容 DTO + 错误码 + 权限点清单
+  okapi-kernel     # 各角色共用的底层：配置、鉴权、调度 Redis、对账与修复
+  okapi-engine     # 共享运行时：AppState、凭证与账号控制、选路缓存、异步媒体执行器
+  okapi-gateway    # 数据面：鉴权准入、预扣 / 结算、选路、上游转发与流式
+  okapi-console    # 控制面：管理后台与用户门户 API、MCP
+  okapi-worker     # 异步面：结算补写、统计落库、对账告警、到期与分区维护
 bins/okapi         # 单二进制多角色入口：okapi gateway|console|worker|all|migrate|seal-credentials
 frontend/          # React 19 SPA（管理后台 + 用户门户 + 公开价格页）
 ```
