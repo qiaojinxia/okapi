@@ -19,3 +19,6 @@ frontend/dist/
 
 # 本地代理状态与记忆，可能包含私密会话内容
 .open-crab/
+.claude/
+.openidea/
+.workbuddy-ai/
