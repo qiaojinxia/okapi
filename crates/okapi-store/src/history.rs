@@ -5,7 +5,7 @@ use crate::StoreError;
 use chrono::{DateTime, Datelike, Months, NaiveDate, Utc};
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 
-const RETENTION_LOCK: i64 = 0x4F4B_4849_5354;
+pub const RETENTION_LOCK: i64 = 0x4F4B_4849_5354;
 
 pub async fn read_lock(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
     sqlx::query(

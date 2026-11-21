@@ -1,6 +1,9 @@
 //! PG-first completion for ordinary requests. No actual charge may disappear
 //! between Redis closure and the durable bill. UserGuard also fences repairs,
 //! subscription windows and expiry while a completion is being persisted.
+mod batch;
+pub use batch::{BatchOutcome, record_batch};
+
 use crate::{BalanceLedger, CommitOutcome, LedgerError, SettlementInput, holds::UserGuard};
 use okapi_domain::{BillingState, Money};
 use sqlx::{Connection, PgPool};

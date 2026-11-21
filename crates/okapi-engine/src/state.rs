@@ -5,6 +5,7 @@ use okapi_providers::{
     AnthropicUpstream, AzureUpstream, BedrockUpstream, OpenAiUpstream, PassUpstream, VertexUpstream,
 };
 use okapi_store::channels::{ChannelCandidate, ResolvedModel};
+pub use settlement::SettlementBatcher;
 use std::sync::Arc;
 
 /// 路由/配置缓存失效广播主题（与 `pricing.epoch` 同一条 NATS 通道）。
@@ -128,6 +129,8 @@ pub struct FlowControl {
     pub settle_backlog_max: usize,
     /// 当前是否处于泄压态——只在状态翻转时各记一条 WARN，不按请求刷日志。
     pub settle_shedding: Arc<std::sync::atomic::AtomicBool>,
+    /// 普通成功结算的进程内微批组提交器（每批最多 64 笔 / 2ms 聚合窗口，显著降低 PG WAL 与渠道热点行锁竞争）。
+    pub settle_batcher: Arc<settlement::SettlementBatcher>,
     /// Unit tests must not expose their settlement journal to a live worker.
     #[cfg(test)]
     pub(crate) settlement_journal_tag: Arc<str>,

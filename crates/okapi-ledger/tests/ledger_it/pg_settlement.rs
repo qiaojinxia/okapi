@@ -698,3 +698,140 @@ async fn oversized_upstream_request_id_is_truncated_not_quarantined() {
             .unwrap();
     assert_eq!(stored.as_deref().map(str::len), Some(128));
 }
+
+/// 微批组提交：同一批内合并多用户与同一主力渠道的落账，预聚合 channel_token_totals 与
+/// channel_usage_buckets 并跳过逐行触发器；被 UserGuard 占住的用户立即退回 Fallback 不阻塞同批其他用户。
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn record_batch_aggregates_totals_buckets_and_isolates_contended_users() {
+    use okapi_ledger::pg::OwnedSettlementInput;
+    use okapi_ledger::sync::{BatchOutcome, record_batch};
+    use okapi_ledger::{BalanceLedger, LimitCaps, ReserveRequest, holds::UserGuard};
+
+    let bed_a = bed().await;
+    let bed_b = bed().await;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let ledger = BalanceLedger::new(redis);
+    let now = chrono::Utc::now();
+
+    for b in [&bed_a, &bed_b] {
+        okapi_ledger::operations::credit(
+            &b.pg,
+            &ledger,
+            b.user_id,
+            Money::from_micros(10_000),
+            "recharge",
+            "system:test",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    }
+
+    let hot_channel = bed_a.user_id + 900_000;
+    let r1 = Uuid::new_v4();
+    let r2 = Uuid::new_v4();
+    let r3 = Uuid::new_v4();
+
+    for (b, rid) in [(&bed_a, r1), (&bed_a, r2), (&bed_b, r3)] {
+        ledger
+            .reserve_for_key(
+                &b.pg,
+                false,
+                ReserveRequest {
+                    user_id: b.user_id,
+                    api_key_id: b.key_id,
+                    request_id: rid,
+                    est: Money::from_micros(500),
+                    caps: LimitCaps::default(),
+                    est_tokens: 130,
+                },
+                now,
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut i1 = bed_a.committed(r1);
+    i1.channel_id = Some(hot_channel);
+    i1.upstream_cost = Some(Money::from_micros(70));
+    let mut i2 = bed_a.committed(r2);
+    i2.channel_id = Some(hot_channel);
+    i2.upstream_cost = None;
+    let mut i3 = bed_b.committed(r3);
+    i3.channel_id = Some(hot_channel);
+    i3.upstream_cost = Some(Money::from_micros(130));
+
+    // 1. 拿住 user_b 的 UserGuard：同一批里 user_a 两笔正常组提交，user_b 立即回 Fallback 不阻塞。
+    let guard_b = UserGuard::acquire(&bed_b.pg, bed_b.user_id).await.unwrap();
+    let batch1 = vec![
+        OwnedSettlementInput::from(i1.clone()),
+        OwnedSettlementInput::from(i2.clone()),
+        OwnedSettlementInput::from(i3.clone()),
+    ];
+    let out1 = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        record_batch(&bed_a.pg, &ledger, &batch1),
+    )
+    .await
+    .expect("contended user_b must not stall user_a in record_batch");
+    assert_eq!(out1.len(), 3);
+    assert_eq!(out1[0].as_ref().ok(), Some(&BatchOutcome::Inserted));
+    assert_eq!(out1[1].as_ref().ok(), Some(&BatchOutcome::Inserted));
+    assert_eq!(out1[2].as_ref().ok(), Some(&BatchOutcome::Fallback));
+    drop(guard_b);
+
+    // 2. 释放 user_b 后再批提交 [r1(重放), r3(新)]：r1 退回 Fallback，r3 正常组提交。
+    let batch2 = vec![
+        OwnedSettlementInput::from(i1),
+        OwnedSettlementInput::from(i3),
+    ];
+    let out2 = record_batch(&bed_a.pg, &ledger, &batch2).await;
+    assert_eq!(out2[0].as_ref().ok(), Some(&BatchOutcome::Fallback));
+    assert_eq!(out2[1].as_ref().ok(), Some(&BatchOutcome::Inserted));
+
+    // 验证快照余额、Redis 余额、key 用量、billing_sync 清理，以及渠道累计与 15m 桶完全精确。
+    assert_eq!(bed_a.wallet_snapshot().await, 10_000 - 480);
+    assert_eq!(bed_b.wallet_snapshot().await, 10_000 - 240);
+    assert_eq!(
+        ledger.balance(bed_a.user_id).await.unwrap().as_micros(),
+        10_000 - 480
+    );
+    assert_eq!(
+        ledger.balance(bed_b.user_id).await.unwrap().as_micros(),
+        10_000 - 240
+    );
+    assert_eq!(bed_a.key_used().await.0, 480);
+    assert_eq!(bed_b.key_used().await.0, 240);
+
+    let pending_sync: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM billing_sync WHERE request_id = ANY($1)")
+            .bind(vec![r1, r2, r3])
+            .fetch_one(&bed_a.pg)
+            .await
+            .unwrap();
+    assert_eq!(
+        pending_sync, 0,
+        "all committed items must be cleaned from billing_sync"
+    );
+
+    let total = okapi_store::channel_usage::local_usage(&bed_a.pg, hot_channel, "total")
+        .await
+        .unwrap();
+    assert_eq!((total.tokens, total.cost_micro), (390, 200));
+
+    let day = okapi_store::channel_usage::snapshot(&bed_a.pg, hot_channel, "day")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            day.requests,
+            day.tokens,
+            day.cost_micro,
+            day.unknown_cost_requests
+        ),
+        (3, 390, 200, 1)
+    );
+}

@@ -238,9 +238,9 @@ impl OwnedSettlementInput {
 }
 
 /// `record_settlement` 的 advisory lock 命名空间（"SETL"）。
-const SETTLEMENT_LOCK_NS: i32 = 0x5345_544C;
+pub(crate) const SETTLEMENT_LOCK_NS: i32 = 0x5345_544C;
 
-fn token_i32(v: u32) -> Result<i32, LedgerError> {
+pub(crate) fn token_i32(v: u32) -> Result<i32, LedgerError> {
     // Never persist a clamped count while outbox and usage_details keep the original.
     i32::try_from(v).map_err(|_| LedgerError::InvalidSettlement)
 }
@@ -271,42 +271,16 @@ pub async fn record_settlement(
 
 /// 上游请求 id 来自上游响应头 / 任务 id，长度不受我们控制，而列是 `varchar(128)`：超长会让 INSERT 报
 /// 22001、整笔结算被当永久失败隔离——一个超长响应头就能让成功请求的账单丢失。按字符截到 128。
-fn bounded_upstream_id(id: &str) -> &str {
+pub(crate) fn bounded_upstream_id(id: &str) -> &str {
     id.char_indices().nth(128).map_or(id, |(cut, _)| &id[..cut])
 }
 
-/// Result of the single-CTE settlement write inside a transaction.
-pub(crate) struct SettlementWrite {
-    pub inserted: bool,
-    pub has_other_pending: bool,
-}
-
-/// Allows a durable task result and its ledger entry to share one commit.
-/// The caller must commit/rollback; false means the request was already recorded.
-pub async fn record_settlement_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    input: SettlementInput<'_>,
-) -> Result<bool, LedgerError> {
-    Ok(record_settlement_with_sync_in_tx(tx, input, false)
-        .await?
-        .inserted)
-}
-
-/// Same single-CTE write as [`record_settlement_in_tx`], optionally folding the
-/// `billing_sync` intent row and pending-queue probe into the same round trip so
-/// `sync::record` holds row locks for one fewer RTT and can skip redundant probes.
+/// 构造 `usage_details`、`event_payload`、`outbox_payload` 三份 JSON，供单笔落账与微批落账共享，保证零口径漂移。
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn record_settlement_with_sync_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    input: SettlementInput<'_>,
-    insert_billing_sync: bool,
-) -> Result<SettlementWrite, LedgerError> {
+pub(crate) fn build_settlement_payloads(
+    input: &SettlementInput<'_>,
+) -> Result<(serde_json::Value, serde_json::Value, serde_json::Value), LedgerError> {
     let (input_unit, input_characters) = input_units(input.usage, input.pricing_snapshot.as_ref())?;
-    // 两参形式与单参 bigint 形式的锁互不相撞（sqlx 迁移锁用的是单参）；
-    // 不同 request_id 撞上同一个 hashtext 只是短暂串行，不影响正确性
-    okapi_store::history::read_and_xact_lock(tx, SETTLEMENT_LOCK_NS, &input.request_id.to_string())
-        .await?;
-
     let usage_details = serde_json::json!({
         "tokens": input.usage,
         "input_unit": input_unit,
@@ -380,6 +354,40 @@ pub(crate) async fn record_settlement_with_sync_in_tx(
         ),
         input.dimensions.diagnostics.as_ref(),
     );
+    Ok((usage_details, event_payload, outbox_payload))
+}
+
+/// Result of the single-CTE settlement write inside a transaction.
+pub(crate) struct SettlementWrite {
+    pub inserted: bool,
+    pub has_other_pending: bool,
+}
+
+/// Allows a durable task result and its ledger entry to share one commit.
+/// The caller must commit/rollback; false means the request was already recorded.
+pub async fn record_settlement_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: SettlementInput<'_>,
+) -> Result<bool, LedgerError> {
+    Ok(record_settlement_with_sync_in_tx(tx, input, false)
+        .await?
+        .inserted)
+}
+
+/// Same single-CTE write as [`record_settlement_in_tx`], optionally folding the
+/// `billing_sync` intent row and pending-queue probe into the same round trip so
+/// `sync::record` holds row locks for one fewer RTT and can skip redundant probes.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn record_settlement_with_sync_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: SettlementInput<'_>,
+    insert_billing_sync: bool,
+) -> Result<SettlementWrite, LedgerError> {
+    let (usage_details, event_payload, outbox_payload) = build_settlement_payloads(&input)?;
+    // 两参形式与单参 bigint 形式的锁互不相撞（sqlx 迁移锁用的是单参）；
+    // 不同 request_id 撞上同一个 hashtext 只是短暂串行，不影响正确性
+    okapi_store::history::read_and_xact_lock(tx, SETTLEMENT_LOCK_NS, &input.request_id.to_string())
+        .await?;
 
     let (already_recorded, user_rows, key_rows, has_other_pending): (bool, i64, i64, bool) =
         sqlx::query_as(

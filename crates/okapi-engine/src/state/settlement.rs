@@ -1,6 +1,98 @@
 use super::AppState;
-use okapi_ledger::SettlementInput;
-use sqlx::Connection as _;
+use okapi_ledger::pg::OwnedSettlementInput;
+use okapi_ledger::sync::BatchOutcome;
+use okapi_ledger::{BalanceLedger, LedgerError, SettlementInput};
+use sqlx::{Connection as _, PgPool};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{OnceCell, Semaphore, mpsc, oneshot};
+
+const BATCH_MAX_ITEMS: usize = 64;
+const BATCH_COALESCE_WINDOW: Duration = Duration::from_millis(2);
+const BATCH_QUEUE_CAPACITY: usize = 2048;
+
+struct BatchSubmit {
+    input: OwnedSettlementInput,
+    reply: oneshot::Sender<Result<BatchOutcome, LedgerError>>,
+}
+
+/// 普通成功结算的进程内微批组提交器：把 2ms 窗口内（最多 64 笔）的普通结算合并成一次
+/// PG `UNNEST` 组提交事务 + 一次并发 Redis `commit_in_source` + 一次批量 `DELETE billing_sync`。
+/// 被 `UserGuard` 阻塞的个别用户或特殊条目通过 `BatchOutcome::Fallback` 即刻退回调用方单笔路径，
+/// 不拖累同批其他用户。
+#[derive(Default)]
+pub struct SettlementBatcher {
+    tx: OnceCell<mpsc::Sender<BatchSubmit>>,
+}
+
+impl SettlementBatcher {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn submit(
+        &self,
+        pg: &PgPool,
+        ledger: &BalanceLedger,
+        gate: &Arc<Semaphore>,
+        input: OwnedSettlementInput,
+    ) -> Result<BatchOutcome, LedgerError> {
+        let tx = self
+            .tx
+            .get_or_init(|| async {
+                let (tx, rx) = mpsc::channel(BATCH_QUEUE_CAPACITY);
+                tokio::spawn(run_batcher(
+                    pg.clone(),
+                    ledger.clone(),
+                    Arc::clone(gate),
+                    rx,
+                ));
+                tx
+            })
+            .await;
+        let (reply, rx) = oneshot::channel();
+        if tx.try_send(BatchSubmit { input, reply }).is_err() {
+            return Ok(BatchOutcome::Fallback);
+        }
+        rx.await.unwrap_or(Ok(BatchOutcome::Fallback))
+    }
+}
+
+async fn run_batcher(
+    pg: PgPool,
+    ledger: BalanceLedger,
+    gate: Arc<Semaphore>,
+    mut rx: mpsc::Receiver<BatchSubmit>,
+) {
+    let mut pending: Vec<BatchSubmit> = Vec::with_capacity(BATCH_MAX_ITEMS);
+    while let Some(first) = rx.recv().await {
+        pending.push(first);
+        while pending.len() < BATCH_MAX_ITEMS {
+            match rx.try_recv() {
+                Ok(item) => pending.push(item),
+                Err(_) => break,
+            }
+        }
+        if pending.len() < BATCH_MAX_ITEMS {
+            let deadline = tokio::time::Instant::now() + BATCH_COALESCE_WINDOW;
+            while pending.len() < BATCH_MAX_ITEMS {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(item)) => pending.push(item),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
+        let batch = std::mem::take(&mut pending);
+        let (inputs, replies): (Vec<_>, Vec<_>) =
+            batch.into_iter().map(|b| (b.input, b.reply)).unzip();
+        let _permit = gate.acquire().await;
+        let outcomes = okapi_ledger::sync::record_batch(&pg, &ledger, &inputs).await;
+        for (reply, outcome) in replies.into_iter().zip(outcomes) {
+            let _ = reply.send(outcome);
+        }
+    }
+}
 
 impl AppState {
     pub(crate) async fn prepare_settlement(&self, input: &mut SettlementInput<'_>) {
@@ -118,6 +210,22 @@ impl AppState {
         &self,
         input: SettlementInput<'_>,
     ) -> Result<bool, okapi_ledger::LedgerError> {
+        if input.dimensions.endpoint != "/v1/videos" && input.source_window.is_none() {
+            match self
+                .flow
+                .settle_batcher
+                .submit(
+                    &self.pg,
+                    &self.ledger,
+                    &self.flow.settle_gate,
+                    OwnedSettlementInput::from(input.clone()),
+                )
+                .await?
+            {
+                BatchOutcome::Inserted => return Ok(true),
+                BatchOutcome::Fallback => {}
+            }
+        }
         // 先轮到该用户（结算队列）再占全局结算闸：排队的结算既不占闸也不占连接，
         // 一个大客户的结算堆积不会挡住其他用户落账；结算队列与准入队列分开，
         // 闸满时等待中的结算也不会挡住该用户的新请求预扣。

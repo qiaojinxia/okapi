@@ -64,6 +64,7 @@ pub fn flow_control_for_pool(pg_pool_max: u32) -> state::FlowControl {
             |_| true,
         ),
         settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        settle_batcher: Arc::new(state::SettlementBatcher::new()),
         #[cfg(test)]
         settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
     }

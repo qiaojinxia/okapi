@@ -17,7 +17,7 @@ pub use repair::Repaired;
 pub use settle::settle;
 pub const MAXIMUM_MICROS: i64 = 9_007_199_254_740_991;
 const MAX_ACTIVE: i64 = okapi_store::image_batches::MAX_ACTIVE_HOLDS;
-const LOCK_NAMESPACE: i32 = okapi_store::image_batches::HOLD_LOCK_NAMESPACE;
+pub(crate) const LOCK_NAMESPACE: i32 = okapi_store::image_batches::HOLD_LOCK_NAMESPACE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
