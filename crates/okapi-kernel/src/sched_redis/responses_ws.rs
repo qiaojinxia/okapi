@@ -2,9 +2,17 @@
 use super::SchedulerRedis;
 use crate::error::AppError;
 use axum::http::StatusCode;
-use fred::interfaces::{LuaInterface, SortedSetsInterface};
+use fred::interfaces::SortedSetsInterface;
 use okapi_api::codes;
+use okapi_store::CachedScript;
 use std::time::Duration;
+
+static ACQUIRE_SCRIPT: CachedScript = CachedScript::new(
+    "local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',now); if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[2]) then return 0 end; redis.call('ZADD',KEYS[1],now+60000,ARGV[3]); redis.call('PEXPIRE',KEYS[1],120000); return 1",
+);
+static RENEW_SCRIPT: CachedScript = CachedScript::new(
+    "local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local old=redis.call('ZSCORE',KEYS[1],ARGV[3]); if not old or tonumber(old)<=now then return 0 end; redis.call('ZADD',KEYS[1],now+60000,ARGV[3]); redis.call('PEXPIRE',KEYS[1],120000); return 1",
+);
 
 fn key(id: i64) -> String {
     format!("ws:responses:k:{id}")
@@ -39,14 +47,14 @@ impl SchedulerRedis {
         // 时间取 Redis 服务器时钟（同 ws_lease_acquire）：各副本本机时钟有偏差时，快的那台会把
         // 别的副本刚续上的存活租约当成过期清掉，放进超额连接
         let script = if renew {
-            "local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local old=redis.call('ZSCORE',KEYS[1],ARGV[3]); if not old or tonumber(old)<=now then return 0 end; redis.call('ZADD',KEYS[1],now+60000,ARGV[3]); redis.call('PEXPIRE',KEYS[1],120000); return 1"
+            &RENEW_SCRIPT
         } else {
-            "local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',now); if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[2]) then return 0 end; redis.call('ZADD',KEYS[1],now+60000,ARGV[3]); redis.call('PEXPIRE',KEYS[1],120000); return 1"
+            &ACQUIRE_SCRIPT
         };
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            self.client.eval::<i64, _, _, _>(
-                script,
+            script.eval::<i64, _, _>(
+                &self.client,
                 vec![key(id)],
                 // ARGV[1] 保留占位，脚本不再读它
                 vec!["0".to_owned(), limit.to_string(), connection.to_owned()],

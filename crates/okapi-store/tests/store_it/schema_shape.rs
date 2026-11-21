@@ -89,6 +89,11 @@ const REQUIRED: &[(&str, &[&str])] = &[
     ),
     // 渠道的累计用量（0006 加了成本）：渠道的累计上限读这一行
     ("channel_token_totals", &["tokens", "cost_micro"]),
+    // 渠道 15 分钟 UTC 物化用量桶（0008）：周期上限按主键范围求和，免扫 billing_records
+    (
+        "channel_usage_buckets",
+        &["requests", "tokens", "cost_micro", "unknown_cost_requests"],
+    ),
 ];
 
 /// 必须**不**存在：已被池取代的中间态。搬回来会让可见性同时有两处实现。

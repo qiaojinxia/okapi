@@ -2,9 +2,9 @@
 use super::SchedulerRedis;
 use crate::error::AppError;
 use axum::http::StatusCode;
-use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::interfaces::KeysInterface;
 use okapi_api::codes;
-use okapi_store::ChannelCandidate;
+use okapi_store::{CachedScript, ChannelCandidate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -12,6 +12,9 @@ use std::time::Duration;
 
 const TTL_SECONDS: i64 = 30 * 24 * 3600;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+static SET_BINDING_SCRIPT: CachedScript = CachedScript::new(
+    "local old=redis.call('GET',KEYS[1]); if old then if old==ARGV[1] then return 1 else return 0 end end; redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]); return 1",
+);
 
 /// 不存凭证明文。OAuth 刷新保持 account_id 不变时仍指向同一历史空间。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,10 +170,17 @@ impl SchedulerRedis {
             );
         }
         let raw = serde_json::to_string(binding).map_err(|_| storage_error())?;
-        let result = tokio::time::timeout(IO_TIMEOUT, self.client.eval::<i64, _, _, _>(
-            "local old=redis.call('GET',KEYS[1]); if old then if old==ARGV[1] then return 1 else return 0 end end; redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]); return 1",
-            vec![Self::response_key(user, key, response)], vec![raw, TTL_SECONDS.to_string()],
-        )).await.map_err(|_| storage_error())?.map_err(|_| storage_error())?;
+        let result = tokio::time::timeout(
+            IO_TIMEOUT,
+            SET_BINDING_SCRIPT.eval::<i64, _, _>(
+                &self.client,
+                vec![Self::response_key(user, key, response)],
+                vec![raw, TTL_SECONDS.to_string()],
+            ),
+        )
+        .await
+        .map_err(|_| storage_error())?
+        .map_err(|_| storage_error())?;
         if result == 1 {
             Ok(())
         } else {

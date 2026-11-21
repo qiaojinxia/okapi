@@ -15,8 +15,9 @@ pub struct LocalUsage {
     pub window_end: Option<DateTime<Utc>>,
 }
 
-/// Lifetime totals survive retention; calendar windows use retained bills and
-/// receipts under the same retention lock. No request/token estimation is used.
+/// Lifetime totals survive retention; calendar windows sum materialized 15-minute
+/// UTC buckets (`channel_usage_buckets`, aligned with every IANA timezone boundary)
+/// without acquiring retention locks or scanning `billing_records` / `billing_record_receipts`.
 pub async fn local_usage(
     pool: &PgPool,
     channel: i64,
@@ -41,26 +42,32 @@ pub async fn local_usage(
         _ => return Err(StoreError::InvalidData("usage_period")),
     };
     let zone = timezone::machine_timezone()?;
-    let mut tx = crate::history::read(pool).await?;
-    let usage = sqlx::query_as::<_, LocalUsage>(r"
+    Ok(sqlx::query_as::<_, LocalUsage>(
+        r"
         WITH bounds AS (SELECT date_trunc($2,now() AT TIME ZONE $3) AS start),
-        period_window AS (SELECT start AT TIME ZONE $3 AS window_start,
-            (start+$4::text::interval) AT TIME ZONE $3 AS window_end FROM bounds),
-        facts AS (
-            SELECT greatest(prompt_tokens,0)::bigint + greatest(completion_tokens,0)::bigint AS tokens,
-                   greatest(COALESCE(upstream_cost_micro,0),0)::numeric AS cost
-              FROM billing_records,period_window WHERE channel_id=$1 AND log_type IN (2,5)
-                AND created_at>=window_start AND created_at<window_end
-            UNION ALL
-            SELECT channel_receipt_tokens(usage_details),greatest(COALESCE(upstream_cost_micro,0),0)::numeric
-              FROM billing_record_receipts,period_window
-              WHERE channel_id=$1 AND created_at>=window_start AND created_at<window_end)
-        SELECT LEAST(COALESCE((SELECT SUM(tokens) FROM facts),0),9223372036854775807)::bigint AS tokens,
-            LEAST(COALESCE((SELECT SUM(cost) FROM facts),0),9223372036854775807)::bigint AS cost_micro,
-            window_start,window_end FROM period_window
-    ").bind(channel).bind(period).bind(zone).bind(interval).fetch_one(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(usage)
+        period_window AS (
+            SELECT start AT TIME ZONE $3 AS window_start,
+                   (start+$4::text::interval) AT TIME ZONE $3 AS window_end
+              FROM bounds
+        )
+        SELECT LEAST(COALESCE(SUM(b.tokens),0),9223372036854775807)::bigint AS tokens,
+               LEAST(COALESCE(SUM(b.cost_micro),0),9223372036854775807)::bigint AS cost_micro,
+               period_window.window_start,
+               period_window.window_end
+          FROM period_window
+          LEFT JOIN channel_usage_buckets b
+            ON b.channel_id=$1
+           AND b.bucket_start>=period_window.window_start
+           AND b.bucket_start<period_window.window_end
+         GROUP BY period_window.window_start, period_window.window_end
+    ",
+    )
+    .bind(channel)
+    .bind(period)
+    .bind(zone)
+    .bind(interval)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]
@@ -92,14 +99,18 @@ async fn read(
         period_window AS (SELECT window_start,
                   CASE WHEN $2='hour' THEN window_start + interval '1 hour'
                        ELSE (start + $4::text::interval) AT TIME ZONE $3 END AS window_end FROM bounds),
-        usage AS (SELECT count(*)::bigint AS completed,
-             COALESCE(sum(greatest(prompt_tokens,0)::bigint + greatest(completion_tokens,0)::bigint),0)::bigint AS tokens,
-             COALESCE(sum(greatest(upstream_cost_micro,0)),0)::bigint AS cost_micro,
-             count(*) FILTER (WHERE upstream_cost_micro IS NULL AND log_type=2)::bigint AS unknown_cost_requests
-          FROM billing_records, period_window WHERE channel_id=$1 AND log_type IN (2,5)
-             AND created_at >= window_start AND created_at < window_end)
+        usage AS (
+            SELECT COALESCE(SUM(requests),0)::bigint AS completed,
+                   LEAST(COALESCE(SUM(tokens),0),9223372036854775807)::bigint AS tokens,
+                   LEAST(COALESCE(SUM(cost_micro),0),9223372036854775807)::bigint AS cost_micro,
+                   COALESCE(SUM(unknown_cost_requests),0)::bigint AS unknown_cost_requests
+              FROM channel_usage_buckets, period_window
+             WHERE channel_id=$1
+               AND bucket_start >= window_start
+               AND bucket_start < window_end
+        )
         SELECT period_window.window_start,period_window.window_end,COALESCE(w.requests,usage.completed)::bigint AS requests,
-               tokens,cost_micro,unknown_cost_requests FROM period_window CROSS JOIN usage
+               usage.tokens,usage.cost_micro,usage.unknown_cost_requests FROM period_window CROSS JOIN usage
         LEFT JOIN channel_usage_windows w ON w.channel_id=$1 AND w.period=$2 AND w.window_start=period_window.window_start
     ").bind(channel).bind(period).bind(zone).bind(interval).fetch_one(&mut **tx).await?)
 }
@@ -118,7 +129,7 @@ async fn read_requests_only(
     };
     let zone = timezone::machine_timezone()?;
     // PostgreSQL short-circuits COALESCE: once channel_usage_windows has a row for
-    // this window, the billing_records fallback count is never executed.
+    // this window, the bucket fallback sum is never executed.
     Ok(sqlx::query_as(
         r"
         WITH bounds AS (SELECT date_trunc($2,now() AT TIME ZONE $3) AS start,
@@ -130,11 +141,11 @@ async fn read_requests_only(
                period_window.window_end,
                COALESCE(
                    w.requests,
-                   (SELECT count(*)::bigint
-                      FROM billing_records
-                     WHERE channel_id=$1 AND log_type IN (2,5)
-                       AND created_at >= period_window.window_start
-                       AND created_at < period_window.window_end)
+                   (SELECT COALESCE(SUM(requests),0)::bigint
+                      FROM channel_usage_buckets
+                     WHERE channel_id=$1
+                       AND bucket_start >= period_window.window_start
+                       AND bucket_start < period_window.window_end)
                )::bigint AS requests
           FROM period_window
           LEFT JOIN channel_usage_windows w
@@ -208,6 +219,9 @@ pub async fn admit(
 
 pub async fn prune(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::query("DELETE FROM channel_usage_windows WHERE ctid IN (SELECT ctid FROM channel_usage_windows WHERE window_end < now() - interval '45 days' LIMIT 1000)")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM channel_usage_buckets WHERE ctid IN (SELECT ctid FROM channel_usage_buckets WHERE bucket_start < now() - interval '45 days' LIMIT 1000)")
         .execute(pool)
         .await?;
     Ok(())
