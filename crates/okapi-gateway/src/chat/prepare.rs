@@ -38,28 +38,7 @@ pub(super) async fn resolve_with_directive(
     )>,
     AppError,
 > {
-    // 名字里带 `@` 一律按修饰符处理：`@` 是 okapi 自己的分隔符，价簿里叫
-    // `base@effort:high` 的行**是一条定价变体、不是一个上游模型**——若让它走"全名直命中"，
-    // 路由就会拿变体名去选渠道，而渠道声明的是基座名，结果是一个候选都选不到（503）。
-    // 不带 `@` 时仍是全名优先，好让真实存在的 `o3-high` 这类模型不被旧后缀误剥。
-    let has_modifier_sep = requested.contains('@');
-    if !has_modifier_sep && let Some(meta) = resolve_model_cached(state, requested).await?.as_ref()
-    {
-        return Ok(Some((meta.clone(), None, None)));
-    }
-    if let Some(m) = okapi_providers::modifiers::split_model_modifiers(requested)
-        && let Some(meta) = resolve_model_cached(state, m.base()).await?.as_ref()
-    {
-        // 规范名以**解析后的 canonical 基座**为前缀：别名与本名要落到同一条账
-        let variant = m.canonical_name();
-        let variant = variant
-            .split_once('@')
-            .map_or(variant.clone(), |(_, rest)| {
-                format!("{}@{rest}", meta.canonical)
-            });
-        return Ok(Some((meta.clone(), m.reasoning(), Some(variant))));
-    }
-    Ok(None)
+    okapi_engine::bridge::resolve_with_directive(state, requested).await
 }
 
 #[allow(clippy::too_many_arguments)]

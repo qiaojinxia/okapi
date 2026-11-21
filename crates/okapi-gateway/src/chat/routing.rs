@@ -3,13 +3,10 @@ use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
 use super::super::scheduler::Strategy;
 use super::super::state::AppState;
-use super::{
-    ForwardFailure, ProbeInfo, RequestBilling, cached_candidates, lost_tools,
-    resolve_with_directive,
-};
+use super::{ForwardFailure, ProbeInfo, RequestBilling, cached_candidates, lost_tools};
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
-use okapi_domain::{GroupCode, ModelCode, TokenUsage};
+use okapi_domain::TokenUsage;
 use okapi_kernel::error::AppError;
 use okapi_kernel::sched_redis::response_affinity;
 use okapi_providers::convert::tool_loss::ToolLossPolicy;
@@ -270,73 +267,5 @@ pub async fn playground_parameters(
     headers: &HeaderMap,
     model: &str,
 ) -> Result<okapi_providers::model_parameters::ParameterProfile, AppError> {
-    use okapi_providers::model_parameters::{self, ParameterProfile};
-    let key = okapi_kernel::auth::authenticate(state, headers).await?;
-    let Some((meta, _, _)) = resolve_with_directive(state, model).await? else {
-        return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
-    };
-    if !key.allows_model(&meta.canonical) {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            codes::MODEL_NOT_ALLOWED,
-        ));
-    }
-    let book = state.pricebook.load();
-    if !book.has_model(&ModelCode::from(meta.canonical.as_str()))
-        || !book.has_group(&GroupCode::from(key.group_code.as_str()))
-    {
-        return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
-    }
-    let mut candidates = okapi_store::channels::candidates_for_model(
-        &state.pg,
-        &meta.canonical,
-        &key.pool_chain(),
-        state.master_key.as_deref(),
-    )
-    .await?;
-    candidates.retain(|c| Ingress::OpenAi.accepts(c, &meta.canonical));
-    state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    let mut common: Option<ParameterProfile> = None;
-    for c in &candidates {
-        let upstream = c.upstream_model(&meta.canonical);
-        let dialect = super::super::dialect::upstream_dialect(&c.provider, upstream);
-        let mut p = model_parameters::profile(dialect, upstream, c.api_base.as_deref());
-        let controlled = |field: &str| {
-            c.strip_request_fields.iter().any(|f| f == field)
-                || c.inject_request_fields.contains_key(field)
-        };
-        if controlled("temperature")
-            || c.capabilities
-                .get("temperature")
-                .and_then(serde_json::Value::as_bool)
-                == Some(false)
-        {
-            p.temperature_max = None;
-        }
-        if controlled("top_p") {
-            p.top_p = false;
-        }
-        if controlled("reasoning_effort")
-            || controlled("reasoning")
-            || controlled("thinking")
-            || controlled("output_config")
-            || controlled("generationConfig")
-            || c.capabilities
-                .get("reasoning")
-                .and_then(serde_json::Value::as_bool)
-                == Some(false)
-        {
-            p.efforts.clear();
-            p.budget_min = None;
-            p.budget_max = None;
-        }
-        match &mut common {
-            Some(profile) => profile.intersect(&p),
-            None => common = Some(p),
-        }
-    }
-    common
-        .ok_or_else(|| AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL))
+    okapi_engine::bridge::playground_parameters(state, headers, model).await
 }

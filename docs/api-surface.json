@@ -3,7 +3,7 @@
   "evidence": "static route inventory; runtime/business behavior unverified",
   "sources": {
     "crates/okapi-console/src/lib.rs": "6b625041314c38074a22e629965830963e61d46ed894cc8e5327c87ba6e47428",
-    "crates/okapi-gateway/src/lib.rs": "7e9143ca5bb2f3213dd07371520708207722e50c2eb01d0a70604dfe2e7709b5"
+    "crates/okapi-gateway/src/lib.rs": "b9fa321a4d46ba6a3cf0da590c9a403c2bb12d343702c72a93d9dd62bdf9cf46"
   },
   "endpoints": [
     {

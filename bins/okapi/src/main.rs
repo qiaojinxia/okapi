@@ -182,14 +182,32 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_console(cfg: Config) -> anyhow::Result<()> {
-    let state = gateway::build_state(
-        &cfg.database_url,
-        &cfg.redis_url,
-        &cfg.node,
-        cfg.clickhouse_url.as_deref(),
-        cfg.nats_url.as_deref(),
-    )
-    .await?;
+    let state = if let Some(gateway_url) = cfg.gateway_internal_url.as_deref() {
+        let bridge =
+            std::sync::Arc::new(okapi_engine::bridge::HttpDataPlaneBridge::new(gateway_url)?);
+        tracing::info!(
+            gateway_url,
+            "okapi console 已启用独立 HTTP 数据面桥接（跳过本地 tokenizer 预热）"
+        );
+        okapi_engine::build_state(
+            &cfg.database_url,
+            &cfg.redis_url,
+            &cfg.node,
+            cfg.clickhouse_url.as_deref(),
+            cfg.nats_url.as_deref(),
+        )
+        .await?
+        .with_data_plane(bridge)
+    } else {
+        gateway::build_state(
+            &cfg.database_url,
+            &cfg.redis_url,
+            &cfg.node,
+            cfg.clickhouse_url.as_deref(),
+            cfg.nats_url.as_deref(),
+        )
+        .await?
+    };
     console::run_with_state(cfg, state, true, okapi_kernel::shutdown::signal()).await
 }
 

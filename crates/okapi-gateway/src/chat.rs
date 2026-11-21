@@ -75,7 +75,7 @@ use self::limits::{
 use self::prepare::reserved_token_count;
 #[cfg(test)]
 use self::prepare::with_admission_hints;
-use self::prepare::{handle_chat, prepare_chat, resolve_with_directive};
+use self::prepare::{handle_chat, prepare_chat};
 #[cfg(test)]
 use self::pump::advance_stream_sequence;
 use self::pump::{

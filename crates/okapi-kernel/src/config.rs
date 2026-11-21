@@ -17,6 +17,9 @@ pub struct Config {
     pub nats_url: Option<String>,
     /// 信封加密主密钥（32 字节 hex；TOTP 密钥等敏感字段）。缺省 = 2FA 注册不可用。
     pub master_key: Option<String>,
+    /// 独立 `console` 角色可选配置的内网 `gateway` 基址（如 `http://okapi-gateway:80`）。
+    /// 配置后 `console` 跳过本地数据面/tokenizer 装配，Playground 与渠道试用经流式 HTTP 桥接至 `gateway`。
+    pub gateway_internal_url: Option<String>,
 }
 
 impl Config {
@@ -56,6 +59,10 @@ impl Config {
             })?;
         }
         let console_bind = socket_addr("OKAPI_CONSOLE_BIND", "127.0.0.1:8081")?;
+        let gateway_internal_url = parse_optional_http_url(
+            "OKAPI_GATEWAY_INTERNAL_URL",
+            std::env::var("OKAPI_GATEWAY_INTERNAL_URL").ok(),
+        )?;
         Ok(Self {
             database_url,
             redis_url,
@@ -66,8 +73,22 @@ impl Config {
             clickhouse_url,
             nats_url,
             master_key,
+            gateway_internal_url,
         })
     }
+}
+
+fn parse_optional_http_url(name: &str, raw: Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(trimmed) = raw.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = reqwest::Url::parse(&trimmed)
+        .map_err(|error| anyhow::anyhow!("{name}={trimmed} 不是合法 URL：{error}"))?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
+        "{name}={trimmed} 必须是带主机名的 http/https URL"
+    );
+    Ok(Some(trimmed.trim_end_matches('/').to_owned()))
 }
 
 /// 监听地址：解析失败时报出是哪个变量、写的是什么，而不是一句不带上下文的 `invalid socket address`。

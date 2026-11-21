@@ -286,3 +286,60 @@ async fn gateway_exposes_prometheus_metrics_and_propagates_w3c_traceparent() {
     assert!(body.contains("okapi_pricebook_epoch "));
     assert!(body.contains("okapi_settlement_backlog{role=\"gateway\"}"));
 }
+
+#[tokio::test]
+async fn http_data_plane_bridge_relays_to_remote_gateway_with_traceparent() {
+    use okapi_engine::bridge::{DataPlaneBridge as _, HttpDataPlaneBridge};
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let gw_state = okapi_gateway::build_state(&database_url, &redis_url, "gw-remote", None, None)
+        .await
+        .unwrap();
+    let app = okapi_gateway::router(gw_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // 独立 console 状态（不经 gateway::build_state，挂 HttpDataPlaneBridge）
+    let console_state = engine::build_state(&database_url, &redis_url, "console-only", None, None)
+        .await
+        .unwrap();
+    let bridge = HttpDataPlaneBridge::new(&format!("http://{addr}")).unwrap();
+
+    let incoming_trace = "0af7651916cd43dd8448eb211c80319c";
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "traceparent",
+        axum::http::HeaderValue::from_str(&format!("00-{incoming_trace}-b7ad6b7169203331-01"))
+            .unwrap(),
+    );
+    let resp = bridge
+        .chat_completions(
+            console_state,
+            headers,
+            axum::body::Bytes::from_static(br#"{"model":"gpt-5","messages":[]}"#),
+        )
+        .await;
+    // 无 API key 时由远端 gateway 返回标准 401，并透传 traceparent 与 x-okapi-request-id
+    assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    let echoed = resp
+        .headers()
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .expect("bridge must forward gateway traceparent");
+    let (trace_id, _, _) =
+        okapi_kernel::trace_context::parse_traceparent(echoed).expect("valid traceparent");
+    assert_eq!(trace_id, incoming_trace);
+    assert!(
+        resp.headers().contains_key("x-okapi-request-id"),
+        "bridge must forward x-okapi-request-id"
+    );
+}

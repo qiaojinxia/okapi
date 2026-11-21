@@ -301,6 +301,10 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             request_policy::scope,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            okapi_engine::channel_test::accept_internal_pin,
+        ))
         .layer(axum::middleware::from_fn(diagnostics::scope))
         .layer(axum::middleware::from_fn(
             okapi_kernel::security_headers::apply,
