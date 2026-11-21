@@ -112,8 +112,8 @@ pub async fn lift(
             tracing::error!(error = %err, "margin lift 写入失败");
             AppError::internal()
         })?;
-    // 同进程立即生效；其它副本靠 10s TTL 收敛
-    state.routing.margin_cache.invalidate_all();
+    // 广播失效本进程与集群内所有数据面副本的 margin_cache
+    state.invalidate_routing_caches();
     audit(
         &state,
         &actor,

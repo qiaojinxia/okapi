@@ -232,6 +232,14 @@ pub async fn build_state_with_clients(
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_mins(1))
                 .build(),
+            dirty_keys_cache: moka::future::Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(5))
+                .build(),
+            dirty_egress_cache: moka::future::Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(5))
+                .build(),
         },
         flow: flow_control_for_pool(pg_pool_max),
         media: state::Media {
@@ -301,53 +309,130 @@ pub async fn refresh_pricebook_if_newer(state: &AppState) -> anyhow::Result<bool
     Ok(state.pricebook.swap_if_newer(book))
 }
 
-/// routing.invalidate 广播订阅：任一实例改了渠道/池/模型/设置，全集群立即弃用旧缓存。
+const NATS_RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+const NATS_RECONNECT_MAX: Duration = Duration::from_secs(30);
+const NATS_HEALTHY_RESET: Duration = Duration::from_mins(1);
+
+/// 订阅断流或重订失败后的退避时长：稳定运行超过 1 分钟则回落到 1s，否则翻倍封顶 30s。
+fn next_nats_backoff(current: Duration, ran_for: Duration) -> Duration {
+    if ran_for >= NATS_HEALTHY_RESET {
+        NATS_RECONNECT_INITIAL
+    } else {
+        current.saturating_mul(2).min(NATS_RECONNECT_MAX)
+    }
+}
+
+/// routing.invalidate 广播订阅：任一实例改了渠道/池/模型/设置/熔断，全集群立即弃用旧缓存。
+///
+/// 订阅失败或连接中断后按退避自动重订，并在重订成功时主动补刷本地路由缓存与 SSRF 策略，
+/// 消除「启动期或断流后永久失联」的单点退化。
 pub fn spawn_routing_invalidate_subscriber(state: AppState) {
     let Some(client) = state.nats.clone() else {
         return;
     };
-    // detach 说明：与进程同生命周期的订阅任务
+    // detach 说明：与进程同生命周期的自愈订阅任务
     tokio::spawn(async move {
         use futures::StreamExt as _;
-        let mut sub = match client.subscribe(state::ROUTING_INVALIDATE_SUBJECT).await {
-            Ok(sub) => sub,
-            Err(err) => {
-                tracing::warn!(error = %err, "routing.invalidate 订阅失败（依赖 TTL 兜底）");
-                return;
+        let mut backoff = NATS_RECONNECT_INITIAL;
+        let mut attempt: u64 = 0;
+        loop {
+            let started = std::time::Instant::now();
+            match client.subscribe(state::ROUTING_INVALIDATE_SUBJECT).await {
+                Ok(mut sub) => {
+                    if attempt > 0 {
+                        // 断流期间可能漏过广播：重订后立刻补刷一次本地状态
+                        state.invalidate_routing_caches_local();
+                        sync_ssrf_policy(&state).await;
+                        tracing::info!(attempt, "routing.invalidate 订阅已恢复并补刷本地缓存");
+                    }
+                    attempt = attempt.saturating_add(1);
+                    while sub.next().await.is_some() {
+                        // 只清本地：清完再广播会打环
+                        state.invalidate_routing_caches_local();
+                        sync_ssrf_policy(&state).await;
+                        tracing::debug!("路由缓存已按广播失效");
+                    }
+                    let ran_for = started.elapsed();
+                    backoff = next_nats_backoff(backoff, ran_for);
+                    tracing::warn!(
+                        retry_in_secs = backoff.as_secs(),
+                        "routing.invalidate 订阅流断开，准备重订"
+                    );
+                }
+                Err(err) => {
+                    attempt = attempt.saturating_add(1);
+                    tracing::warn!(
+                        error = %err,
+                        retry_in_secs = backoff.as_secs(),
+                        "routing.invalidate 订阅失败，退避重试（期间依赖 TTL 兜底）"
+                    );
+                    backoff = next_nats_backoff(backoff, Duration::ZERO);
+                }
             }
-        };
-        while sub.next().await.is_some() {
-            // 只清本地：清完再广播会打环
-            state.invalidate_routing_caches_local();
-            sync_ssrf_policy(&state).await;
-            tracing::debug!("路由缓存已按广播失效");
+            tokio::time::sleep(backoff).await;
         }
     });
 }
 
 /// pricing.epoch 广播订阅（主通道；30s 轮询为丢广播兜底，DESIGN §3.3）。
+/// 订阅失败或断流后自动重订，重订成功时立即补拉最新 PriceBook epoch。
 pub fn spawn_epoch_subscriber(state: AppState) {
     let Some(client) = state.nats.clone() else {
         return;
     };
-    // detach 说明：与进程同生命周期的订阅任务
+    // detach 说明：与进程同生命周期的自愈订阅任务
     tokio::spawn(async move {
         use futures::StreamExt as _;
-        let mut sub = match client.subscribe("pricing.epoch").await {
-            Ok(sub) => sub,
-            Err(err) => {
-                tracing::warn!(error = %err, "pricing.epoch 订阅失败（依赖轮询兜底）");
-                return;
-            }
-        };
-        while let Some(_msg) = sub.next().await {
-            match refresh_pricebook_if_newer(&state).await {
-                Ok(true) => {
-                    tracing::info!(epoch = state.pricebook.epoch(), "PriceBook 广播热更");
+        let mut backoff = NATS_RECONNECT_INITIAL;
+        let mut attempt: u64 = 0;
+        loop {
+            let started = std::time::Instant::now();
+            match client.subscribe("pricing.epoch").await {
+                Ok(mut sub) => {
+                    if attempt > 0 {
+                        match refresh_pricebook_if_newer(&state).await {
+                            Ok(true) => tracing::info!(
+                                epoch = state.pricebook.epoch(),
+                                attempt,
+                                "pricing.epoch 订阅已恢复并补拉最新 PriceBook"
+                            ),
+                            Ok(false) => tracing::info!(attempt, "pricing.epoch 订阅已恢复"),
+                            Err(err) => {
+                                tracing::warn!(error = %err, "pricing.epoch 恢复后补拉失败");
+                            }
+                        }
+                    }
+                    attempt = attempt.saturating_add(1);
+                    while let Some(_msg) = sub.next().await {
+                        match refresh_pricebook_if_newer(&state).await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    epoch = state.pricebook.epoch(),
+                                    "PriceBook 广播热更"
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(err) => tracing::warn!(error = %err, "广播热更失败"),
+                        }
+                    }
+                    let ran_for = started.elapsed();
+                    backoff = next_nats_backoff(backoff, ran_for);
+                    tracing::warn!(
+                        retry_in_secs = backoff.as_secs(),
+                        "pricing.epoch 订阅流断开，准备重订"
+                    );
                 }
-                Ok(false) => {}
-                Err(err) => tracing::warn!(error = %err, "广播热更失败"),
+                Err(err) => {
+                    attempt = attempt.saturating_add(1);
+                    tracing::warn!(
+                        error = %err,
+                        retry_in_secs = backoff.as_secs(),
+                        "pricing.epoch 订阅失败，退避重试（期间依赖轮询兜底）"
+                    );
+                    backoff = next_nats_backoff(backoff, Duration::ZERO);
+                }
             }
+            tokio::time::sleep(backoff).await;
         }
     });
 }
@@ -376,4 +461,25 @@ pub fn spawn_state_sync(state: &AppState) {
     spawn_epoch_subscriber(state.clone());
     spawn_routing_invalidate_subscriber(state.clone());
     spawn_ssrf_policy_sync(state.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nats_reconnect_backoff_grows_capped_and_resets_after_healthy_session() {
+        assert_eq!(
+            next_nats_backoff(Duration::from_secs(1), Duration::ZERO),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_nats_backoff(Duration::from_secs(16), Duration::from_secs(10)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            next_nats_backoff(Duration::from_secs(30), Duration::from_secs(60)),
+            Duration::from_secs(1)
+        );
+    }
 }

@@ -1,22 +1,81 @@
-//! 维护任务的调度：每个任务一个时钟，单机直连 CH 的写入器，以及启动时的一次性恢复。
+//! 维护任务的调度：每个任务一个时钟（多副本下通过 Redis 互斥锁 + 周期占位协调）、
+//! 单机直连 CH / 懒恢复 JetStream 写入器，以及启动时的一次性恢复。
 use super::{
     RECONCILE_BATCH, RECONCILE_FULL_INTERVAL, RECONCILE_OVERLAP, SWEEP_INTERVAL,
     drop_expired_partitions, ensure_next_month_partitions, expire_balances, legacy_speech,
-    margin_breaker, notify, reconcile_and_notify, recover_cooled_keys, subscriptions_tick,
-    sweep_expired_reservations, transport_tick,
+    margin_breaker, nats_relay, notify, reconcile_and_notify, recover_cooled_keys,
+    subscriptions_tick, sweep_expired_reservations, transport_tick,
 };
+use okapi_kernel::sched_redis::{MaintenanceLease, SchedulerRedis};
 use okapi_ledger::BalanceLedger;
 use sqlx::PgPool;
 use std::time::Duration;
+
+const MAINT_LOCK_TTL_SECS: i64 = 120;
+const MAINT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(40);
+pub(super) const JS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(super) struct MaintenanceContext {
     pub(super) pg: PgPool,
     pub(super) ledger: BalanceLedger,
     pub(super) redis: fred::clients::Client,
+    pub(super) sched: SchedulerRedis,
+    pub(super) node: String,
+    pub(super) nats: Option<async_nats::Client>,
     pub(super) notifier: notify::Notifier,
-    pub(super) js: Option<async_nats::jetstream::Context>,
+    pub(super) js: Option<JsSink>,
     pub(super) ch: Option<ChSink>,
     pub(super) reconcile: std::sync::Mutex<ReconcileClock>,
+}
+
+/// 启动时 NATS JetStream 可能尚未就绪；与 [`ChSink`] 同口径，首次失败后按周期自动补建拓扑，
+/// 避免永久困在单机直连模式。
+pub(super) struct JsSink {
+    client: async_nats::Client,
+    ctx: tokio::sync::RwLock<Option<async_nats::jetstream::Context>>,
+    next_try: std::sync::Mutex<std::time::Instant>,
+}
+
+impl JsSink {
+    pub(super) fn new(client: async_nats::Client) -> Self {
+        Self {
+            client,
+            ctx: tokio::sync::RwLock::new(None),
+            next_try: std::sync::Mutex::new(std::time::Instant::now()),
+        }
+    }
+
+    pub(super) async fn ready(&self) -> Option<async_nats::jetstream::Context> {
+        if let Some(ctx) = self.ctx.read().await.as_ref() {
+            return Some(ctx.clone());
+        }
+        {
+            let mut next = self
+                .next_try
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            if now < *next {
+                return None;
+            }
+            *next = now + JS_RETRY_INTERVAL;
+        }
+        match nats_relay::ensure_topology(&self.client).await {
+            Ok(ctx) => {
+                *self.ctx.write().await = Some(ctx.clone());
+                tracing::info!("NATS relay 就绪（outbox → JetStream → chsink）");
+                Some(ctx)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    retry_in_secs = JS_RETRY_INTERVAL.as_secs(),
+                    "JetStream 拓扑尚未就绪，暂走直连并稍后重试"
+                );
+                None
+            }
+        }
+    }
 }
 
 /// 启动时 ClickHouse 可能还没起来（整机重启时各容器同时拉起）。只在启动那一刻 ping 一次的话，
@@ -121,6 +180,24 @@ impl MaintenanceJob {
             Self::manual_queues => "manual_queues",
         }
     }
+    /// `chsink` 已由 `FOR UPDATE SKIP LOCKED` 与 JetStream 持久消费者原生支持多副本并发，无需单主互斥。
+    pub(super) const fn needs_lease(self) -> bool {
+        !matches!(self, Self::chsink_tick)
+    }
+}
+
+/// 周期占位 TTL：取间隔的 80%（夹在 2s..=3600s），避免刚跑完几百毫秒就被另一副本重复触发。
+pub(super) fn maintenance_round_ttl_secs(interval: Duration) -> i64 {
+    let secs = interval.as_secs().saturating_mul(4) / 5;
+    i64::try_from(secs.clamp(2, 3600)).unwrap_or(3600)
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub(super) async fn run_maintenance(
@@ -139,9 +216,58 @@ pub(super) async fn run_maintenance(
             _ = stop.changed() => return,
             _ = tick.tick() => {}
         }
-        tokio::select! {
-            _ = stop.changed() => return,
-            () = maintenance_once(&ctx, job) => {}
+        if !job.needs_lease() {
+            tokio::select! {
+                _ = stop.changed() => return,
+                () = maintenance_once(&ctx, job) => {}
+            }
+            continue;
+        }
+        let round_ttl = maintenance_round_ttl_secs(interval);
+        let token = match ctx
+            .sched
+            .maintenance_claim(job.name(), &ctx.node, MAINT_LOCK_TTL_SECS, round_ttl)
+            .await
+        {
+            MaintenanceLease::Acquired(token) => Some(token),
+            MaintenanceLease::RedisUnavailable => None,
+            MaintenanceLease::Skipped => {
+                tracing::trace!(
+                    job = job.name(),
+                    "maintenance skipped; held by another replica"
+                );
+                continue;
+            }
+        };
+        let heartbeat = token.as_ref().map(|token| {
+            let sched = ctx.sched.clone();
+            let job_name = job.name();
+            let token = token.clone();
+            AbortOnDrop(tokio::spawn(async move {
+                let mut renew = tokio::time::interval(MAINT_HEARTBEAT_INTERVAL);
+                renew.tick().await;
+                loop {
+                    renew.tick().await;
+                    if !sched
+                        .maintenance_extend(job_name, &token, MAINT_LOCK_TTL_SECS)
+                        .await
+                    {
+                        tracing::warn!(job = job_name, "maintenance lease heartbeat lost");
+                        return;
+                    }
+                }
+            }))
+        });
+        let stopped = tokio::select! {
+            _ = stop.changed() => true,
+            () = maintenance_once(&ctx, job) => false,
+        };
+        drop(heartbeat);
+        if let Some(token) = token {
+            ctx.sched.maintenance_release(job.name(), &token).await;
+        }
+        if stopped {
+            return;
         }
     }
 }
@@ -152,6 +278,9 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
         pg,
         ledger,
         redis,
+        sched: _,
+        node: _,
+        nats,
         notifier,
         js,
         ch,
@@ -163,6 +292,10 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
     };
     match job {
         MaintenanceJob::chsink_tick => {
+            let js = match js {
+                Some(sink) => sink.ready().await,
+                None => None,
+            };
             transport_tick(pg, js.as_ref(), ch).await;
         }
         MaintenanceJob::unit_calibration => {
@@ -257,11 +390,20 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
             }
         }
         MaintenanceJob::margin => {
-            if let Err(err) =
-                margin_breaker::evaluate_and_notify(pg, ch, redis, chrono::Utc::now(), notifier)
-                    .await
+            match margin_breaker::evaluate_and_notify(pg, ch, redis, chrono::Utc::now(), notifier)
+                .await
             {
-                tracing::error!(error = %err, "负毛利熔断评估失败");
+                Ok(report) if !report.tripped.is_empty() || report.pruned > 0 => {
+                    if let Some(client) = nats
+                        && let Err(err) = client
+                            .publish(okapi_engine::state::ROUTING_INVALIDATE_SUBJECT, "1".into())
+                            .await
+                    {
+                        tracing::debug!(error = %err, "margin 变更广播失败（依赖 10s TTL 兜底）");
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "负毛利熔断评估失败"),
             }
         }
         MaintenanceJob::balance_expiry => {
@@ -314,5 +456,21 @@ pub(super) async fn run_recovery(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_round_ttl_and_lease_classification() {
+        assert!(!MaintenanceJob::chsink_tick.needs_lease());
+        assert!(MaintenanceJob::reconcile.needs_lease());
+        assert!(MaintenanceJob::partition.needs_lease());
+        assert_eq!(maintenance_round_ttl_secs(Duration::from_secs(1)), 2);
+        assert_eq!(maintenance_round_ttl_secs(Duration::from_secs(30)), 24);
+        assert_eq!(maintenance_round_ttl_secs(Duration::from_mins(5)), 240);
+        assert_eq!(maintenance_round_ttl_secs(Duration::from_hours(6)), 3600);
     }
 }

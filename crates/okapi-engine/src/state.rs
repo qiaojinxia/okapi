@@ -98,7 +98,7 @@ pub struct RoutingCaches {
     pub request_policy: Cache<u8, Arc<okapi_kernel::policies::RequestPolicy>>,
 }
 
-/// 渠道 key 与出口代理的健康标记：只记本进程见过的失败，成功时才回 PG 清零。
+/// 渠道 key 与出口代理的健康标记：本地标记加 5s 集群脏集缓存，成功时才回 PG 清零。
 #[derive(Clone)]
 pub struct HealthMarks {
     /// 本进程登记过瞬态失败的渠道 key（24h）：该 key 下一次成功才回 PG 清零连续失败计数
@@ -108,6 +108,11 @@ pub struct HealthMarks {
     pub egress_failures: Cache<i64, ()>,
     /// 一分钟内后台核实过的出口代理（§11.41）：分不清是代理还是目标的连接失败，同一代理只核实一次。
     pub egress_verifying: Cache<i64, ()>,
+    /// 跨副本共享的失败渠道 key 集合缓存（5s，源自 Redis `health:dirty:ck`）：
+    /// 副本 A 登记失败后，副本 B 成功请求也可在零额外热路径 IO 下感知并清零 PG 计数。
+    pub dirty_keys_cache: Cache<u8, Arc<std::collections::HashSet<i64>>>,
+    /// 跨副本共享的失败出口代理集合缓存（5s，源自 Redis `health:dirty:egress`）。
+    pub dirty_egress_cache: Cache<u8, Arc<std::collections::HashSet<i64>>>,
 }
 
 /// 准入与结算的流控：按用户排队、结算写入闸与积压泄压。
@@ -515,6 +520,7 @@ impl AppState {
         self.routing.cand_cache.invalidate_all();
         self.routing.channel_cost_cache.invalidate_all();
         self.routing.channel_control_cache.invalidate_all();
+        self.routing.margin_cache.invalidate_all();
         self.routing.request_policy.invalidate_all();
         self.settings_cache.invalidate_all();
     }
@@ -525,6 +531,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn isolated_pg_shares_runtime_caches_and_isolates_pool_flow() {
         let gw_pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_gw")
             .expect("lazy pool parses");
@@ -587,6 +594,8 @@ mod tests {
                 key_failures: Cache::builder().max_capacity(16).build(),
                 egress_failures: Cache::builder().max_capacity(16).build(),
                 egress_verifying: Cache::builder().max_capacity(16).build(),
+                dirty_keys_cache: Cache::builder().max_capacity(1).build(),
+                dirty_egress_cache: Cache::builder().max_capacity(1).build(),
             },
             flow: crate::flow_control_for_pool(16),
             media: Media {
@@ -612,9 +621,15 @@ mod tests {
             .model_cache
             .insert("gpt-5".into(), Arc::new(None))
             .await;
+        gw.routing
+            .margin_cache
+            .insert(0, Arc::new(["default|1".to_owned()].into()))
+            .await;
         assert!(bg.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(bg.routing.margin_cache.get(&0).await.is_some());
         bg.invalidate_routing_caches_local();
         assert!(gw.routing.model_cache.get("gpt-5").await.is_none());
+        assert!(gw.routing.margin_cache.get(&0).await.is_none());
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();

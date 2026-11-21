@@ -27,6 +27,8 @@ pub async fn failure(state: &AppState, cand: &ChannelCandidate, code: &str, kind
             .key_failures
             .insert(cand.channel_key_id, ())
             .await;
+        state.sched.health_mark_key_dirty(cand.channel_key_id).await;
+        state.health.dirty_keys_cache.invalidate(&0).await;
     }
     if let KeyFailure::Unreachable { proxy_hop } = kind
         && let Some(proxy) = cand.egress_proxy_id
@@ -67,6 +69,8 @@ pub async fn proxy_unreachable(
 
 async fn record_proxy_failure(state: &AppState, proxy: i64, reason: &str, confirmed: bool) {
     state.health.egress_failures.insert(proxy, ()).await;
+    state.sched.health_mark_egress_dirty(proxy).await;
+    state.health.dirty_egress_cache.invalidate(&0).await;
     let tripped = match okapi_store::egress::mark_failure(&state.pg, proxy, reason, confirmed).await
     {
         Ok(tripped) => tripped,
@@ -117,21 +121,58 @@ async fn verify_proxy(state: &AppState, proxy: i64, proxy_url: String) {
     });
 }
 
-/// 上游给出了可用响应：这把 key 是好的，清掉它的连续失败计数；走的出口代理同理。
-pub async fn success(state: &AppState, cand: &ChannelCandidate) {
-    if let Some(proxy) = cand.egress_proxy_id
-        && state.health.egress_failures.contains_key(&proxy)
-    {
-        state.health.egress_failures.invalidate(&proxy).await;
-        let _ = okapi_store::egress::clear_failures(&state.pg, proxy).await;
-    }
-    if !state.health.key_failures.contains_key(&cand.channel_key_id) {
-        return;
-    }
-    state
+async fn cluster_key_dirty(state: &AppState, channel_key_id: i64) -> bool {
+    let set = state
         .health
-        .key_failures
-        .invalidate(&cand.channel_key_id)
+        .dirty_keys_cache
+        .get_with(0, async {
+            std::sync::Arc::new(state.sched.health_dirty_keys().await.unwrap_or_default())
+        })
         .await;
-    let _ = channels::clear_key_failures(&state.pg, cand.channel_key_id).await;
+    set.contains(&channel_key_id)
+}
+
+async fn cluster_egress_dirty(state: &AppState, proxy_id: i64) -> bool {
+    let set = state
+        .health
+        .dirty_egress_cache
+        .get_with(0, async {
+            std::sync::Arc::new(state.sched.health_dirty_egress().await.unwrap_or_default())
+        })
+        .await;
+    set.contains(&proxy_id)
+}
+
+/// 上游给出了可用响应：这把 key 是好的，清掉它的连续失败计数；走的出口代理同理。
+/// 本地标记与 5s 缓存的集群脏集任一命中即回 PG 清零，健康 key 零额外热路径 IO。
+pub async fn success(state: &AppState, cand: &ChannelCandidate) {
+    // 装箱保持调用方（images / chat / audio 等大状态机）的 future 尺寸精简
+    Box::pin(async {
+        if let Some(proxy) = cand.egress_proxy_id
+            && (state.health.egress_failures.contains_key(&proxy)
+                || cluster_egress_dirty(state, proxy).await)
+        {
+            state.health.egress_failures.invalidate(&proxy).await;
+            state.sched.health_clear_egress_dirty(proxy).await;
+            state.health.dirty_egress_cache.invalidate(&0).await;
+            let _ = okapi_store::egress::clear_failures(&state.pg, proxy).await;
+        }
+        if !state.health.key_failures.contains_key(&cand.channel_key_id)
+            && !cluster_key_dirty(state, cand.channel_key_id).await
+        {
+            return;
+        }
+        state
+            .health
+            .key_failures
+            .invalidate(&cand.channel_key_id)
+            .await;
+        state
+            .sched
+            .health_clear_key_dirty(cand.channel_key_id)
+            .await;
+        state.health.dirty_keys_cache.invalidate(&0).await;
+        let _ = channels::clear_key_failures(&state.pg, cand.channel_key_id).await;
+    })
+    .await;
 }

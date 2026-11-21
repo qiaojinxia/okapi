@@ -8,6 +8,7 @@ pub mod gateway_pricing_epoch;
 pub mod statistics_timezone;
 pub mod worker_ch;
 pub mod worker_delivery;
+pub mod worker_ha;
 pub mod worker_m2;
 pub mod worker_nats;
 pub mod worker_notify;

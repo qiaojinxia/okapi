@@ -33,7 +33,7 @@ pub use self::housekeeping::{
     recover_cooled_keys, subscriptions_tick,
 };
 use self::maintenance::{
-    ChSink, MaintenanceContext, MaintenanceJob, run_maintenance, run_recovery,
+    ChSink, JsSink, MaintenanceContext, MaintenanceJob, run_maintenance, run_recovery,
 };
 pub use self::reconcile::reconcile_and_notify;
 pub use self::reservations::{SweptReservation, sweep_expired_reservations};
@@ -61,23 +61,6 @@ const RECONCILE_FULL_INTERVAL: Duration = Duration::from_hours(24);
 const RECONCILE_OVERLAP: Duration = Duration::from_mins(10);
 /// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
 const SUBSCRIPTION_BATCH: i64 = 500;
-
-/// 基于共享 NATS 客户端确保 JetStream 拓扑就绪；未配或创建失败回退单机直连形态（None）。
-async fn ensure_jetstream(
-    nats: Option<&async_nats::Client>,
-) -> Option<async_nats::jetstream::Context> {
-    let client = nats?;
-    match nats_relay::ensure_topology(client).await {
-        Ok(ctx) => {
-            tracing::info!("NATS relay 就绪（outbox → JetStream → chsink）");
-            Some(ctx)
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "JetStream 拓扑创建失败，回退直连形态");
-            None
-        }
-    }
-}
 
 /// 事件传输一拍：NATS 形态走 relay + JS 消费者，单机形态直连 outbox → CH。
 async fn transport_tick(
@@ -166,7 +149,13 @@ where
         None
     };
 
-    let js = ensure_jetstream(image_state.nats.as_ref()).await;
+    let js = if let Some(client) = image_state.nats.clone() {
+        let sink = JsSink::new(client);
+        let _ = sink.ready().await;
+        Some(sink)
+    } else {
+        None
+    };
     if spawn_sync {
         // Keep PriceBook, routing caches and SSRF/runtime settings fresh in standalone worker mode.
         okapi_engine::spawn_state_sync(&image_state);
@@ -244,7 +233,7 @@ where
             redis: redis.clone(),
             // 探针拿配置好的客户端，不论启动时连没连上：连不上要报"异常"而不是"未配置"
             ch: ch.as_ref().map(|sink| sink.client.clone()),
-            nats: js.as_ref().map(async_nats::jetstream::Context::client),
+            nats: image_state.nats.clone(),
         };
         let node = cfg.node.clone();
         let stop = image_stopped.clone();
@@ -259,6 +248,9 @@ where
         pg,
         ledger,
         redis,
+        sched: image_state.sched.clone(),
+        node: cfg.node.clone(),
+        nats: image_state.nats.clone(),
         notifier,
         js,
         ch,

@@ -67,6 +67,8 @@ fn test_state() -> crate::state::AppState {
             key_failures: moka::future::Cache::builder().max_capacity(4).build(),
             egress_failures: moka::future::Cache::builder().max_capacity(4).build(),
             egress_verifying: moka::future::Cache::builder().max_capacity(4).build(),
+            dirty_keys_cache: moka::future::Cache::builder().max_capacity(1).build(),
+            dirty_egress_cache: moka::future::Cache::builder().max_capacity(1).build(),
         },
         flow: crate::flow_control_for_pool(16),
         media: crate::state::Media {
