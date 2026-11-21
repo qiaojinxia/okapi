@@ -19,21 +19,21 @@ async fn reported_refund_timings_do_not_dilute_call_averages_after_retention() {
     .unwrap();
 
     for _ in 0..2 {
-        for (table, expected_ms) in [
-            ("mv_latency_reporting_hour", "9000"),
-            ("mv_ttft_reporting_hour", "900"),
+        for (samples_col, sum_col, expected_ms) in [
+            ("latency_samples", "latency_sum", "9000"),
+            ("ttft_samples", "ttft_sum", "900"),
         ] {
             let result = ch
                 .query_json_each_row(&format!(
-                    "SELECT countMerge(requests) AS calls,countIfMerge(samples) AS samples,\
-                     sumIfMerge(total_ms) AS ms FROM {table} WHERE user_id=7"
+                    "SELECT countMerge(requests) AS calls,countIfMerge({samples_col}) AS samples,\
+                     sumIfMerge({sum_col}) AS ms FROM mv_analysis_5min WHERE user_id=7"
                 ))
                 .await
                 .unwrap();
             assert_eq!(
                 result[0],
                 json!({"calls":"1","samples":"1","ms":expected_ms}),
-                "{table}: refund must not contribute its copied measurement"
+                "{sum_col}: refund must not contribute its copied measurement"
             );
         }
         let financial = ch

@@ -1,6 +1,8 @@
-//! 新维度聚合 + 旧立方体未覆盖部分。TTFT 仅在新聚合覆盖不足时恢复原始样本。
+//! 统一 14 维分析数据源：单表直读 `mv_analysis_5min`（零 7 路 JOIN），仅在窗口内存在
+//! 历史语音字符校准记录时追加 1 路 `legacy_speech_units_v1` 左连接。
 const KEYS: &str = "hour, user_id, api_key_id, group_code, model, channel_id";
 const DIMS: &str = "requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type";
+
 pub(super) const METRICS: [(&str, &str); 77] = [
     ("legacy_characters", ""),
     ("legacy_character_n", ""),
@@ -24,11 +26,11 @@ pub(super) const METRICS: [(&str, &str); 77] = [
     ("discount", "sumMerge"),
     ("upstream_cost", "sumMerge"),
     ("errors", "sumMerge"),
-    ("latency_sum", "sumMerge"),
+    ("latency_sum", "sumIfMerge"),
     ("latency_samples", "countIfMerge"),
     ("latency_observed", "countMerge"),
-    ("latency_output", "sumMerge"),
-    ("ttft_sum", "sumMerge"),
+    ("latency_output", "sumIfMerge"),
+    ("ttft_sum", "sumIfMerge"),
     ("ttft_samples", "countIfMerge"),
     ("ttft_observed", "countMerge"),
     ("source_observed", ""),
@@ -81,14 +83,7 @@ pub(super) const METRICS: [(&str, &str); 77] = [
     ("observed_reasoning_tokens_n", ""),
 ];
 
-/// 把括号子查询改成 `view(...)` 表函数，供外层 / join 引用。
-///
-/// ClickHouse 24.8 的分析器每解析一个引用了子查询列的表达式，都要对该列的来源 `QueryNode`
-/// 重新计算树哈希（`ColumnNode` 的哈希带着整棵来源子树），代价 = 表达式个数 × 子查询树大小。
-/// 这条源有近百个列表达式引用 `d / l / c` 与十几个测量子源，规划耗时（与数据量无关）可达
-/// 数秒，其中 ~90% 在 `getTreeHash`。`view(...)` 在外层分析里只是一张带 schema 的表，哈希
-/// 很小；子查询本身仍被完整分析，语义与结果与直接内联完全一致（对照用例逐值核对）。
-/// 不是括号子查询的片段原样返回。
+/// 把括号子查询改成 `view(...)` 表函数，供外层 / join 引用，避免 ClickHouse 24.8 分析器重复哈希子树。
 pub(super) fn as_view(subquery: &str) -> String {
     if subquery.starts_with('(') {
         format!("view{subquery}")
@@ -106,11 +101,46 @@ pub(super) fn join_on(left: &str, right: &str, keys: &str) -> String {
         .join(" AND ")
 }
 
+/// 将指标名映射到单宽表 `mv_analysis_5min` 的聚合表达式（表别名 `m`，避免与 SELECT 别名同名冲突）。
+fn wide_metric_expr(name: &str) -> String {
+    match name {
+        "legacy_characters" | "legacy_character_n" => "toInt64(0)".to_owned(),
+        "requests"
+        | "output_rate_observed"
+        | "unit_observed"
+        | "latency_observed"
+        | "ttft_observed"
+        | "source_observed"
+        | "cache_observed"
+        | "ttl_observed"
+        | "detail_observed" => "toInt64(countMerge(m.requests))".to_owned(),
+        "financial_records" => "toInt64(countMerge(m.financial_records))".to_owned(),
+        "prompt_tokens" | "source_prompt_total" => "toInt64(sumMerge(m.prompt_tokens))".to_owned(),
+        "cached_tokens" | "source_cached_total" => "toInt64(sumMerge(m.cached_tokens))".to_owned(),
+        "completion_tokens" | "source_completion_total" => {
+            "toInt64(sumMerge(m.completion_tokens))".to_owned()
+        }
+        "reasoning_tokens" | "amount" | "discount" | "upstream_cost" | "errors"
+        | "cache_writes" => format!("toInt64(sumMerge(m.{name}))"),
+        "source_read_n" => "toInt64(countIfMerge(m.cache_read_n))".to_owned(),
+        "output_rate_samples"
+        | "output_rate_known"
+        | "output_rate_tokens"
+        | "unit_character_n"
+        | "unit_token_n"
+        | "latency_samples"
+        | "ttft_samples"
+        | "cache_write_n"
+        | "cache_read_n" => format!("toInt64(countIfMerge(m.{name}))"),
+        _ if name.ends_with("_n") => format!("toInt64(countIfMerge(m.{name}))"),
+        _ => format!("toInt64(sumIfMerge(m.{name}))"),
+    }
+}
+
 /// `window` 和 `scope` 是已校验的 SQL，字符串过滤均由调用方绑定。
 ///
-/// 只读明细聚合 `mv_analysis_hour`。它与旧立方体 `mv_cube_hour` 都由 `request_log_raw` 无条件写入、
-/// 都不过期，旧立方体比明细多出来的部分只可能是明细上线前的历史；开发阶段不兼容旧库，所以不再
-/// 拼「旧立方体剩余」那一支——它要把 `d` 再汇总一遍并 join 一整套测量子源，规划耗时是现在的 4 倍。
+/// 常态（无历史语音字符校准记录）下为单表直查 `mv_analysis_5min`、零 `LEFT JOIN`；
+/// 仅在存在 `legacy_speech_units_v1` 记录时追加 1 路校准连接。
 pub fn source_with_coverage(
     window: &str,
     scope: &str,
@@ -118,158 +148,67 @@ pub fn source_with_coverage(
 ) -> String {
     let predicate = format!("{window}{scope}");
     let detail_keys = format!("{KEYS}, {DIMS}");
-    let parent_cache = super::cache_usage::source(KEYS, &predicate);
-    let detail_from = joined_measurements(
-        "mv_analysis_hour",
-        &detail_keys,
-        &predicate,
-        coverage.historical_units,
-        Some(&parent_cache),
-    );
-    let detail_merged = merged_metrics(coverage.historical_units);
-    let detailed = METRICS
+    let merged = METRICS
         .iter()
-        .map(|(name, _)| format!("v_{name} AS {name}"))
+        .map(|(name, _)| format!("{} AS {name}", wide_metric_expr(name)))
         .collect::<Vec<_>>()
         .join(", ");
-    let detail_projection = projection(&detail_keys);
-    let detail_group = qualified(&detail_keys);
-    // d 以 `view(...)` 引用，不用 CTE 名字：CTE 与内联子查询一样会让每个引用它的列表达式重复哈希
-    // 整棵子树（见 `as_view`）。
-    let d = as_view(&format!(
-        "(SELECT {detail_projection}, {detail_merged}, \
-            toInt64(countIfMerge(m.cost_known)) AS cost_samples, sumMerge(m.known_amount) AS covered_amount, sumMerge(m.known_cost) AS covered_cost, \
-            maxMerge(m.last_event) AS event_at, maxMerge(m.last_ingested) AS ingested_at \
-            FROM {detail_from} GROUP BY {detail_group})"
-    ));
-    format!(
-        "(SELECT {KEYS}, {DIMS}, {detailed}, v_cache_writes AS write_tokens, v_cache_write_n AS write_samples, v_cache_read_n AS read_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM {d})"
-    )
-}
-
-fn projection(keys: &str) -> String {
-    keys.split(", ")
+    let base = format!(
+        "(WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day \
+          SELECT {detail_keys}, {merged}, \
+                 toInt64(sumMerge(m.cache_writes)) AS write_tokens, \
+                 toInt64(countIfMerge(m.cache_write_n)) AS write_samples, \
+                 toInt64(countIfMerge(m.cache_read_n)) AS read_samples, \
+                 toInt64(countIfMerge(m.cost_known)) AS cost_samples, \
+                 sumMerge(m.known_amount) AS covered_amount, \
+                 sumMerge(m.known_cost) AS covered_cost, \
+                 maxMerge(m.last_event) AS event_at, \
+                 maxMerge(m.last_ingested) AS ingested_at \
+          FROM mv_analysis_5min AS m WHERE {predicate} GROUP BY {detail_keys})"
+    );
+    if !coverage.historical_units {
+        return base;
+    }
+    let correction = super::input_units::correction_source(&detail_keys, &predicate);
+    let keys_sel = detail_keys
+        .split(", ")
         .map(|key| format!("m.{key} AS {key}"))
         .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn qualified(keys: &str) -> String {
-    keys.split(", ")
-        .map(|key| format!("m.{key}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn joined_measurements(
-    table: &str,
-    keys: &str,
-    predicate: &str,
-    historical: bool,
-    parent_cache: Option<&str>,
-) -> String {
-    let sources = [
-        (
-            "td",
-            super::token_details::prepared(keys, table, predicate, historical),
-        ),
-        ("us", super::usage_sources::source(keys, predicate)),
-        (
-            "lf",
-            super::performance_source::source(
-                super::performance_source::Kind::Latency,
-                keys,
-                predicate,
-            ),
-        ),
-        (
-            "rf",
-            super::output_rate::prepared_with_calibration(keys, table, predicate, historical),
-        ),
-        (
-            "tf",
-            super::performance_source::source(
-                super::performance_source::Kind::Ttft,
-                keys,
-                predicate,
-            ),
-        ),
-        ("cs", super::cache_usage::source(keys, predicate)),
-    ];
-    // Each source has at most one row per grain. Use the primary key directly,
-    // instead of recursively merging the same keys through a chain of USING.
-    let mut from = format!("(SELECT * FROM {table} WHERE {predicate}) m");
-    for (alias, source) in &sources {
-        join_measurement(&mut from, source, alias, keys);
-    }
-    if let Some(source) = parent_cache {
-        join_measurement(&mut from, source, "pc", KEYS);
-    }
-    from
-}
-
-fn join_measurement(from: &mut String, source: &str, alias: &str, keys: &str) {
-    use std::fmt::Write as _;
-    let on = join_on("m", alias, keys);
-    let _ = write!(from, " LEFT JOIN {} {alias} ON {on}", as_view(source));
-}
-
-fn merged_metrics(historical: bool) -> String {
-    METRICS
+        .join(", ");
+    let chars = "toInt64(ifNull(c.legacy_characters, 0))";
+    let count = "toInt64(ifNull(c.legacy_character_n, 0))";
+    let calibrated = METRICS
         .iter()
-        .map(|(name, func)| {
-            if !historical && matches!(*name,"legacy_characters"|"legacy_character_n") {
-                format!("toInt64(0) AS v_{name}")
-            } else if *name == "prompt_tokens" && historical {
-                let prompt="accurateCast(sumMerge(m.prompt_tokens),'Int64')";
-                let characters="max(ifNull(td.legacy_characters,0))";
-                format!("{prompt}-{characters}+toInt64(throwIf({characters}>{prompt})) AS v_prompt_tokens")
-            } else if *name == "source_prompt_total" && historical {
-                // A partial provenance subtotal may not contain the old record.
-                // Only a complete chosen population admits an exact subtraction.
-                format!("toInt64(max(ifNull(us.{name},0)))-if(max(ifNull(us.source_observed,0))=countMerge(m.requests),toInt64(max(ifNull(td.legacy_characters,0))),toInt64(0)) AS v_{name}")
-            } else if let Some(source) = super::observation_sources::owner(name) {
-                if source.kind == super::observation_sources::Kind::Cache {
-                    cache_metric(name)
-                } else {
-                    let alias = source.alias;
-                    format!("toInt64(max(ifNull({alias}.{name}, 0))) AS v_{name}")
-                }
-            } else {
-                format!("toInt64({func}(m.{name})) AS v_{name}")
-            }
+        .map(|(name, _)| match *name {
+            "legacy_characters" => format!("{chars} AS legacy_characters"),
+            "legacy_character_n" => format!("{count} AS legacy_character_n"),
+            "prompt_tokens" => format!(
+                "accurateCast(m.prompt_tokens,'Int64')-{chars}+toInt64(throwIf({chars}>accurateCast(m.prompt_tokens,'Int64'))) AS prompt_tokens"
+            ),
+            "source_prompt_total" => format!("m.source_prompt_total-{chars} AS source_prompt_total"),
+            "unit_observed" => format!(
+                "greatest(m.unit_observed,m.unit_character_n+m.unit_token_n+{count})+toInt64(throwIf({count}+m.unit_character_n+m.unit_token_n>m.requests)) AS unit_observed"
+            ),
+            "unit_characters" => format!("m.unit_characters+{chars} AS unit_characters"),
+            "unit_character_n" => format!("m.unit_character_n+{count} AS unit_character_n"),
+            "output_rate_known" => format!("m.output_rate_known+{count} AS output_rate_known"),
+            "output_rate_observed" => format!(
+                "greatest(m.output_rate_observed,m.output_rate_known+{count})+toInt64(throwIf(m.output_rate_known+{count}>m.requests)) AS output_rate_observed"
+            ),
+            _ => format!("m.{name} AS {name}"),
         })
         .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn cache_metric(name: &str) -> String {
-    let own = format!("max(ifNull(cs.{name}, 0))");
-    let complete = |axis: &str| {
-        format!(
-            "max(ifNull(pc.cache_expected, 0)) >= countMerge(m.requests) AND max(ifNull(pc.cache_expected, 0)) > 0 AND max(ifNull(pc.cache_{axis}_n, 0)) = max(ifNull(pc.cache_expected, 0))"
-        )
-    };
-    let expression = match name {
-        "cache_write_n" => format!(
-            "if({}, toInt64(countMerge(m.requests)), toInt64({own}))",
-            complete("write")
-        ),
-        "cache_read_n" => format!(
-            "if({}, toInt64(countMerge(m.requests)), toInt64({own}))",
-            complete("read")
-        ),
-        "cache_writes" => format!(
-            "if({} OR max(ifNull(cs.cache_write_n, 0)) = countMerge(m.requests), toInt64(sumMerge(m.writes)), toInt64({own}))",
-            complete("write")
-        ),
-        _ => format!(
-            "if(({}) AND ({}), toInt64(countMerge(m.requests)), toInt64({own}))",
-            complete("write"),
-            complete("read")
-        ),
-    };
-    format!("toInt64({expression}) AS v_{name}")
+        .join(", ");
+    format!(
+        "(SELECT {keys_sel}, {calibrated}, \
+                 m.write_tokens AS write_tokens, m.write_samples AS write_samples, m.read_samples AS read_samples, \
+                 m.cost_samples AS cost_samples, m.covered_amount AS covered_amount, m.covered_cost AS covered_cost, \
+                 m.event_at AS event_at, m.ingested_at AS ingested_at \
+          FROM {} m LEFT JOIN {} c ON {})",
+        as_view(&base),
+        as_view(&correction),
+        join_on("m", "c", &detail_keys),
+    )
 }
 
 #[cfg(test)]
@@ -295,36 +234,45 @@ mod tests {
     #[test]
     fn as_view_only_wraps_parenthesised_subqueries() {
         assert_eq!(as_view("(SELECT 1)"), "view(SELECT 1)");
-        assert_eq!(as_view("mv_cube_hour"), "mv_cube_hour");
+        assert_eq!(as_view("mv_analysis_5min"), "mv_analysis_5min");
     }
 
     #[test]
-    fn structural_sources_are_table_functions_not_cte_or_inline_subqueries() {
-        for coverage in [
+    fn normal_analytics_source_uses_single_wide_mv_without_joins() {
+        let sql = source_with_coverage(
+            "hour >= toDateTime('2026-09-01')",
+            " AND user_id = 7",
             Coverage::default(),
+        );
+        assert!(sql.starts_with("(WITH "), "{}", &sql[..40]);
+        assert!(balanced(&sql));
+        assert!(
+            sql.len() < 8_192,
+            "single-MV SQL should stay small: {}",
+            sql.len()
+        );
+        assert_eq!(
+            sql.matches(" JOIN ").count(),
+            0,
+            "no LEFT JOIN without legacy units"
+        );
+        assert!(sql.contains("FROM mv_analysis_5min AS m WHERE "));
+        assert!(!sql.contains("mv_cube_hour"));
+        assert!(!sql.contains("mv_analysis_hour"));
+    }
+
+    #[test]
+    fn historical_units_add_only_one_view_isolated_calibration_join() {
+        let sql = source_with_coverage(
+            "hour >= toDateTime('2026-09-01')",
+            " AND user_id = 7",
             Coverage {
                 historical_units: true,
             },
-        ] {
-            let sql = source_with_coverage(
-                "hour >= toDateTime('2026-09-01')",
-                " AND user_id = 7",
-                coverage,
-            );
-            assert!(sql.starts_with("(SELECT "), "{}", &sql[..40]);
-            assert!(balanced(&sql));
-            // 近百个列表达式引用 d 与测量子源：任何一个退回 CTE 或括号子查询都会让规划耗时数倍。
-            assert!(!sql.contains("WITH d AS"), "不得使用 CTE");
-            // 每个连接（含测量子源及其内部连接）都必须以 view(...) 引用，不得退回内联括号子查询。
-            assert_eq!(
-                sql.matches(" LEFT JOIN view(").count(),
-                sql.matches(" LEFT JOIN ").count(),
-                "测量子源必须以 view(...) 引用"
-            );
-            assert!(sql.matches(" ON m.hour=").count() >= 6);
-            // 只读明细聚合，d 只出现一次：旧立方体剩余那一支会把 d 再分析一遍。
-            assert_eq!(sql.matches("FROM view(SELECT ").count(), 1);
-            assert!(!sql.contains("mv_cube_hour") && !sql.contains("UNION ALL SELECT l."));
-        }
+        );
+        assert!(balanced(&sql));
+        assert_eq!(sql.matches(" LEFT JOIN view(").count(), 1);
+        assert_eq!(sql.matches(" LEFT JOIN ").count(), 1);
+        assert!(sql.contains("legacy_speech_units_v1 FINAL"));
     }
 }

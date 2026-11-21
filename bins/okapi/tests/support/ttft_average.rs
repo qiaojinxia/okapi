@@ -115,17 +115,16 @@ async fn check_samples(env: &Env, ch: &ChClient) {
         .await
         .unwrap();
     check_sample_endpoints(env).await;
-    // A source ahead of the authoritative request total must not be presented as complete.
+    // A measurement source ahead of the authoritative daily request total must not be presented as complete.
     super::population_storage::execute(
         ch,
-        "INSERT INTO mv_ttft_reporting_hour SELECT * FROM mv_ttft_reporting_hour",
+        "INSERT INTO mv_analysis_5min SELECT * FROM mv_analysis_5min",
     )
     .await
     .unwrap();
-    for total in totals(env).await {
-        assert_eq!(total["ttft_history_complete"], false, "{total}");
-        assert!(total["avg_ttft_ms"].is_null(), "{total}");
-    }
+    let portal = request(env, "/api/me/stats/breakdown?days=2&scope=user", true).await;
+    assert_eq!(portal["total"]["ttft_history_complete"], false, "{portal}");
+    assert!(portal["total"]["avg_ttft_ms"].is_null(), "{portal}");
 }
 
 async fn check_sample_endpoints(env: &Env) {

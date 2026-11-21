@@ -85,8 +85,8 @@ pub async fn sample_pairs(ch: &ChClient, window_hours: i64) -> anyhow::Result<Ve
                 countIfMerge(cost_known) AS known, \
                 sumMerge(known_amount) AS amount, \
                 sumMerge(known_cost) AS cost \
-         FROM mv_analysis_hour \
-         WHERE hour >= toStartOfHour(now() - INTERVAL {hours} HOUR) AND channel_id > 0 \
+         FROM mv_analysis_5min \
+         WHERE ts5 >= toStartOfHour(now() - INTERVAL {hours} HOUR) AND channel_id > 0 \
          GROUP BY group_code, channel_id \
          HAVING known > 0"
     );

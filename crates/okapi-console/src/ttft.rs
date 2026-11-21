@@ -45,13 +45,11 @@ impl Scope {
         }
     }
 
-    fn table(self, raw: bool, kind: Kind) -> &'static str {
-        match (self, raw, kind) {
-            (_, true, _) => "request_log_calls",
-            (Self::Model, false, Kind::Ttft) => "mv_model_ttft_hour",
-            (_, false, Kind::Ttft) => "mv_channel_ttft_5min",
-            (Self::Model, false, Kind::Latency) => "mv_model_latency_hour",
-            (_, false, Kind::Latency) => "mv_channel_latency_5min",
+    fn table(self, raw: bool) -> &'static str {
+        match (self, raw) {
+            (_, true) => "request_log_calls",
+            (Self::Model, false) => "mv_model_hour",
+            (_, false) => "mv_channel_5min",
         }
     }
 
@@ -101,7 +99,7 @@ async fn query(
         )
     } else {
         format!(
-            "countMerge(requests) AS observed_requests, countIfMerge(samples) AS valid_samples, \
+            "countMerge(requests) AS observed_requests, countIfMerge({prefix}_samples) AS valid_samples, \
          quantilesIfMerge(0.5, 0.95, 0.99)({prefix}_q) AS q"
         )
     };
@@ -110,7 +108,7 @@ async fn query(
             "{aggregates}, sumIf(toUInt64(latency_ms), {valid}) AS total_ms, sumIf(toUInt64(completion_tokens), {valid}) AS output_tokens"
         ),
         (Kind::Latency, false) => format!(
-            "{aggregates}, sumIfMerge(total_ms) AS total_ms, sumIfMerge(output_tokens) AS output_tokens"
+            "{aggregates}, sumIfMerge(latency_total_ms) AS total_ms, sumIfMerge(latency_output_tokens) AS output_tokens"
         ),
         (Kind::Ttft, _) => aggregates,
     };
@@ -137,7 +135,7 @@ async fn query(
         "SELECT toString({key}) AS metric_key, {aggregates}, {percentiles} \
          FROM {} WHERE {} >= fromUnixTimestamp({since}) \
          AND {key} IN ({bindings}){channel_filter} GROUP BY {key}",
-        scope.table(raw, kind),
+        scope.table(raw),
         scope.time(raw),
     );
     Ok(ch

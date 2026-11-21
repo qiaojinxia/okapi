@@ -77,40 +77,21 @@ pub(super) fn sum_sql() -> String {
         .join(", ")
 }
 
-fn merged_sql() -> String {
+pub(super) fn merged_sql() -> String {
     FIELDS
         .map(|field| {
-            let expression = if field == "source_observed" {
-                "countMerge(requests)".to_owned()
-            } else if field.ends_with("_n") {
-                format!("countIfMerge({field})")
-            } else if field.ends_with("_total") {
-                format!("sumMerge({field})")
-            } else {
-                format!("sumIfMerge({field})")
+            let expression = match field {
+                "source_observed" => "countMerge(requests)".to_owned(),
+                "source_prompt_total" => "sumMerge(prompt_tokens)".to_owned(),
+                "source_completion_total" => "sumMerge(completion_tokens)".to_owned(),
+                "source_cached_total" => "sumMerge(cached_tokens)".to_owned(),
+                "source_read_n" => "countIfMerge(cache_read_n)".to_owned(),
+                _ if field.ends_with("_n") => format!("countIfMerge({field})"),
+                _ => format!("sumIfMerge({field})"),
             };
             format!("{expression} AS {field}")
         })
         .join(", ")
-}
-
-/// Token 来源（上游 / 估算 / 本地覆盖）读预聚合 `mv_usage_sources_5min`。
-/// 所有参数都是校验过的内部 SQL。
-pub(super) fn source(keys: &str, predicate: &str) -> String {
-    let keys = if keys.is_empty() {
-        "source_scope"
-    } else {
-        keys
-    };
-    let aggregate = format!(
-        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {} FROM mv_usage_sources_5min WHERE {predicate}",
-        merged_sql()
-    );
-    // 预聚合按构造完整：该粒度应有的请求数就是观测到的数（`with_provenance` 据此判断能否做字符校正）
-    format!(
-        "(SELECT *, toInt64(source_observed) AS source_expected FROM {})",
-        super::measurement_coverage::aggregate_source(keys, &aggregate)
-    )
 }
 
 fn ratio(part: i64, total: i64) -> Value {

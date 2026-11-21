@@ -185,7 +185,7 @@ pub async fn margin(
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
 
     let coverage = ch.query_json_each_row(&format!(
-        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} GROUP BY day"
+        "SELECT toDate(ts5) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_5min WHERE {range} GROUP BY day"
     )).await?;
     let mut known_totals = [0_i64; 3];
     let mut total_amount = 0_i64;

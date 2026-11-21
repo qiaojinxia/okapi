@@ -108,16 +108,16 @@ mod tests {
     #[test]
     fn calendar_scope_is_a_conservative_superset_of_intersecting_buckets() {
         let sql = apply(
-            "SELECT * FROM mv_calendar_minute UNION ALL SELECT * FROM mv_cube_hour UNION ALL SELECT * FROM mv_user_day",
+            "SELECT * FROM mv_calendar_minute UNION ALL SELECT * FROM mv_analysis_5min UNION ALL SELECT * FROM mv_user_day",
             "user_id={user:Int64} AND day={day:Date}",
             "Asia/Kolkata",
         );
         assert!(sql.contains("toStartOfDay(minute,'UTC')"));
-        assert!(sql.contains("toStartOfDay(hour,'UTC')"));
+        assert!(sql.contains("toStartOfDay(ts5,'UTC')"));
         assert_eq!(sql.matches("INTERVAL 86399 SECOND").count(), 3);
         assert!(sql.contains("toDateTime(day,'UTC')"));
         assert_eq!(sql.matches("user_id={user:Int64}").count(), 6);
-        let unsupported = "SELECT * FROM mv_cube_hour";
+        let unsupported = "SELECT * FROM mv_analysis_5min";
         assert_eq!(
             apply(unsupported, "requests>0", "Asia/Kolkata"),
             unsupported

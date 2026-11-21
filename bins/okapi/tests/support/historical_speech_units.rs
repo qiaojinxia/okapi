@@ -181,15 +181,6 @@ async fn historical_speech_partial_upgrade_retains_proof_without_inventing_unkno
 
 async fn check_partial_upgrade(env: &Env, ch: &ChClient) {
     let key = key_id(env).await;
-    for table in [
-        "mv_analysis_hour",
-        "mv_input_units_5min",
-        "mv_output_rate_5min",
-    ] {
-        ch.execute(&format!("DROP TABLE {table} SYNC"))
-            .await
-            .unwrap();
-    }
     let speech = legacy_speech(env, key);
     let mut unknown = row(env, Value::Null, false);
     unknown["api_key_id"] = json!(key);

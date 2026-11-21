@@ -216,7 +216,7 @@ async fn seed_and_wait(env: &Env, ch: &okapi_store::ChClient, rows: usize) {
         while chsink::process_once(&env.pg, ch).await.unwrap() > 0 {}
         let seen = ch
             .query_with_params(
-                "SELECT countIfMerge(cost_known) AS known FROM mv_analysis_hour \
+                "SELECT countIfMerge(cost_known) AS known FROM mv_analysis_5min \
                  WHERE group_code = {g:String} AND channel_id = {c:UInt32}",
                 &[
                     ("g", env.group.as_str()),

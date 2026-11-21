@@ -142,7 +142,7 @@ pub async fn overview(
     let today_filter = format!("day = toDate('{}')", calendar.today);
     let yesterday_filter = format!("day = toDate('{yesterday_date}')");
     let coverage_sql = format!(
-        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} OR {today_filter} OR {yesterday_filter} GROUP BY day"
+        "SELECT toDate(ts5) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_5min WHERE {range} OR {today_filter} OR {yesterday_filter} GROUP BY day"
     );
     let (today, yesterday, window, coverage) = tokio::try_join!(
         overview_sources(&state, &today_filter, cached),

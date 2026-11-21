@@ -40,12 +40,24 @@ pub(super) fn source(window: &str, scope: &str) -> String {
     let predicate = format!("{window}{scope}");
     let projection = KEYS
         .split(", ")
-        .map(|key| format!("m.{key} AS {key}"))
+        .map(|key| {
+            if key == "hour" {
+                "hour".to_owned()
+            } else {
+                format!("m.{key} AS {key}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let group = KEYS
         .split(", ")
-        .map(|key| format!("m.{key}"))
+        .map(|key| {
+            if key == "hour" {
+                "hour".to_owned()
+            } else {
+                format!("m.{key}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let detailed = COLUMNS
@@ -53,9 +65,8 @@ pub(super) fn source(window: &str, scope: &str) -> String {
         .map(|(name, func)| format!("toInt64({func}(m.{name})) AS {name}"))
         .collect::<Vec<_>>()
         .join(", ");
-    // 与完整源同样只读明细聚合（旧立方体剩余那一支已随完整源一起去掉，见 analysis_source）。
     format!(
-        "(SELECT {projection}, {detailed} FROM (SELECT * FROM mv_analysis_hour WHERE {predicate}) m GROUP BY {group})"
+        "(WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day SELECT {projection}, {detailed} FROM mv_analysis_5min AS m WHERE {predicate} GROUP BY {group})"
     )
 }
 
@@ -118,9 +129,9 @@ mod tests {
         let sql = source("hour >= toDateTime('2026-09-01')", " AND user_id = 7");
         assert!(sql.len() < 2_000, "精简源应保持在 1–2 KB：{}", sql.len());
         assert!(!sql.contains(" JOIN "));
-        assert!(
-            sql.contains("mv_analysis_hour WHERE hour >= toDateTime('2026-09-01') AND user_id = 7")
-        );
+        assert!(sql.contains(
+            "mv_analysis_5min AS m WHERE hour >= toDateTime('2026-09-01') AND user_id = 7"
+        ));
         for forbidden in [
             "mv_cube_hour",
             "mv_token_details",

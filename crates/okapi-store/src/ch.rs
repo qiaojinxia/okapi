@@ -20,10 +20,12 @@ pub const STATISTICS_LOG_TYPES: [i64; 3] = [2, 5, 6];
 
 const AGGREGATION_GUARD: &str = "max_size_to_preallocate_for_aggregation=8192&max_block_size=8192&max_insert_block_size=8192&min_insert_block_size_rows_for_materialized_views=8192&min_insert_block_size_bytes_for_materialized_views=4194304&input_format_parallel_parsing=0&max_threads=2";
 
-/// `join_algorithm`：统计查询把几十个小汇总源 LEFT JOIN 起来，哈希连接每个至少占十来 MiB，
-/// 一条看板查询就到 ~375MiB（线上只有几千行时也是），几个面板并发就撞 4GB 机器的内存上限；
-/// partial_merge 同一条只用 ~48MiB、耗时不变，结果逐行一致。它不支持的连接回落到 hash。
-const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192&join_algorithm=partial_merge%2Chash&max_threads=2";
+/// `join_algorithm`：partial_merge 限制并发分析查询的连接内存，不支持的连接回落到 hash；
+/// `enable_http_compression=1` 配合 `Accept-Encoding: gzip` 启用查询响应压缩。
+const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192&join_algorithm=partial_merge%2Chash&max_threads=2&enable_http_compression=1";
+
+/// 批写 JSONEachRow 超过此阈值即启用 `Content-Encoding: gzip` 压缩上行。
+const GZIP_REQUEST_THRESHOLD: usize = 512;
 
 #[derive(Clone)]
 pub struct ChClient {
@@ -142,13 +144,41 @@ impl ChClient {
     }
 
     async fn post(&self, url: String, body: String) -> Result<String, StoreError> {
-        let resp = self
-            .with_auth(self.http.post(url))
-            .body(body)
-            .send()
-            .await?;
+        self.post_raw(url, body.into_bytes(), false, false).await
+    }
+
+    async fn post_raw(
+        &self,
+        url: String,
+        body: Vec<u8>,
+        gzip_request: bool,
+        accept_gzip: bool,
+    ) -> Result<String, StoreError> {
+        let mut req = self.with_auth(self.http.post(url));
+        if accept_gzip {
+            req = req.header(reqwest::header::ACCEPT_ENCODING, "gzip");
+        }
+        let payload = if gzip_request && body.len() >= GZIP_REQUEST_THRESHOLD {
+            let compressed = gzip_compress(&body)?;
+            req = req.header(reqwest::header::CONTENT_ENCODING, "gzip");
+            compressed
+        } else {
+            body
+        };
+        let resp = req.body(payload).send().await?;
         let status = resp.status().as_u16();
-        let text = resp.text().await?;
+        let is_gzip = resp
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
+        let bytes = resp.bytes().await?;
+        let text = if is_gzip {
+            gzip_decompress(&bytes)?
+        } else {
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| StoreError::InvalidData("clickhouse_response_not_utf8"))?
+        };
         if !(200..300).contains(&status) {
             if let Some(code) = history_error(&text) {
                 return Err(StoreError::InvalidData(code));
@@ -229,16 +259,15 @@ impl ChClient {
         for sql in base_ddl {
             self.execute(&sql).await?;
         }
-        let (population_mvs, population_views) = population::schema_waves()?;
-        materialized_views.extend(population_mvs);
+        let read_views = population::read_views()?;
         self.execute_concurrent(materialized_views).await?;
-        self.execute_concurrent(population_views).await?;
+        self.execute_concurrent(read_views).await?;
         server_tools::schema::ensure(self).await?;
         Ok(())
     }
 
-    /// 批量写入（JSONEachRow）。`dedup_token` 相同的批次重投会被 CH 去重，
-    /// 且经 deduplicate_blocks_in_dependent_materialized_views 传导到全部 MV。
+    /// 批量写入（JSONEachRow，>=512B 自动 gzip 压缩上行）。`dedup_token` 相同的批次重投会被
+    /// CH 去重，且经 deduplicate_blocks_in_dependent_materialized_views 传导到全部 MV。
     pub async fn insert_json_each_row(
         &self,
         table: &str,
@@ -262,7 +291,7 @@ impl ChClient {
             body.push_str(&row.to_string());
             body.push('\n');
         }
-        self.post(url, body).await?;
+        self.post_raw(url, body.into_bytes(), true, false).await?;
         Ok(())
     }
 
@@ -288,48 +317,22 @@ impl ChClient {
     ) -> Result<Vec<serde_json::Value>, StoreError> {
         let zone = crate::timezone::machine_timezone()?;
         let sql = calendar_sql(sql, zone);
-        let referenced = population::referenced(&sql)?;
-        // Keep complete modern sources small. Expanding dozens of history views
-        // solely to discover empty fallbacks can exhaust memory before scanning.
-        // No cached proof: every read checks record coverage at each full grain.
-        let complete = if referenced.is_empty() {
-            Vec::new()
-        } else {
-            let url = self.query_url(zone, params);
-            let body = format!(
-                "{} FORMAT JSONEachRow",
-                population::coverage(&sql, &referenced)
-            );
-            let weight: u32 = if referenced.len() >= 4 { 2 } else { 1 };
-            let rows = {
-                let _permit = self
-                    .query_gate
-                    .acquire_many(weight)
-                    .await
-                    .map_err(|_| StoreError::InvalidData("clickhouse_query_gate_closed"))?;
-                self.post(url, body).await?
-            };
-            parse_rows(&rows)?
-                .into_iter()
-                .filter(|row| row["missing"] == "0" || row["missing"] == 0)
-                .filter_map(|row| row["name"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        };
-        let names = complete.iter().map(String::as_str).collect::<Vec<_>>();
-        let sql = population::sql(&sql, &names)?;
+        let sql = population::sql(&sql)?;
         let url = self.query_url(zone, params);
-        let weight: u32 = if sql.len() >= 16 * 1024 || referenced.len() >= 4 {
-            2
-        } else {
-            1
-        };
+        let weight: u32 = if sql.len() >= 16 * 1024 { 2 } else { 1 };
         let text = {
             let _permit = self
                 .query_gate
                 .acquire_many(weight)
                 .await
                 .map_err(|_| StoreError::InvalidData("clickhouse_query_gate_closed"))?;
-            self.post(url, format!("{sql} FORMAT JSONEachRow")).await?
+            self.post_raw(
+                url,
+                format!("{sql} FORMAT JSONEachRow").into_bytes(),
+                false,
+                true,
+            )
+            .await?
         };
         parse_rows(&text)
     }
@@ -359,12 +362,18 @@ fn parse_rows(text: &str) -> Result<Vec<serde_json::Value>, StoreError> {
 /// A query echo can contain guard literals without having triggered the guard.
 /// Only the throwIf exception code and its primary message prove missing history.
 fn history_error(text: &str) -> Option<&'static str> {
-    let envelope = serde_json::from_str::<serde_json::Value>(text).ok();
-    let text = envelope
-        .as_ref()
-        .and_then(|row| row.get("exception"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(text);
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        if let Ok(row) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(exception) = row.get("exception").and_then(serde_json::Value::as_str)
+            && let Some(code) = history_exception_code(exception)
+        {
+            return Some(code);
+        }
+    }
+    history_exception_code(text)
+}
+
+fn history_exception_code(text: &str) -> Option<&'static str> {
     let message = text.trim_start().strip_prefix("Code: 395.")?.trim_start();
     let message = message
         .strip_prefix("DB::Exception:")
@@ -417,9 +426,39 @@ fn urlencode(input: &str) -> String {
     out
 }
 
+fn gzip_compress(input: &[u8]) -> Result<Vec<u8>, StoreError> {
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder
+        .write_all(input)
+        .map_err(|_| StoreError::InvalidData("clickhouse_gzip_encode_failed"))?;
+    encoder
+        .finish()
+        .map_err(|_| StoreError::InvalidData("clickhouse_gzip_encode_failed"))
+}
+
+fn gzip_decompress(input: &[u8]) -> Result<String, StoreError> {
+    use std::io::Read as _;
+    let mut decoder = flate2::read::GzDecoder::new(input);
+    let mut text = String::new();
+    decoder
+        .read_to_string(&mut text)
+        .map_err(|_| StoreError::InvalidData("clickhouse_gzip_invalid"))?;
+    Ok(text)
+}
+
 #[cfg(test)]
 mod url_tests {
-    use super::split_credentials;
+    use super::{gzip_compress, gzip_decompress, split_credentials};
+
+    #[test]
+    fn gzip_round_trips_and_rejects_truncated_payloads() {
+        let sample = "{\"a\":1}\n".repeat(128);
+        let compressed = gzip_compress(sample.as_bytes()).unwrap();
+        assert!(compressed.len() < sample.len() / 2);
+        assert_eq!(gzip_decompress(&compressed).unwrap(), sample);
+        assert!(gzip_decompress(&compressed[..compressed.len() / 2]).is_err());
+    }
 
     #[test]
     fn credentials_are_split_by_the_url_standard_and_decoded() {

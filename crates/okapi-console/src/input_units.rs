@@ -30,10 +30,6 @@ pub(super) fn pg_sql() -> String {
     )
 }
 
-fn time_sql(table: &str) -> &'static str {
-    super::observation_sources::Grain::for_table(table).time_sql()
-}
-
 /// Internal SQL only; callers retain parameter binding for all string filters.
 pub(super) fn correction_source(keys: &str, predicate: &str) -> String {
     let keys = if keys.is_empty() {
@@ -50,53 +46,6 @@ pub(super) fn correction_source(keys: &str, predicate: &str) -> String {
 pub(super) fn corrected_sql(total: &str, quantity: &str) -> String {
     format!(
         "accurateCast({total},'Int64')-toInt64({quantity})+toInt64(throwIf({quantity}<0 OR {quantity}>accurateCast({total},'Int64')))"
-    )
-}
-
-pub(super) fn prepared_with_calibration(
-    keys: &str,
-    table: &str,
-    predicate: &str,
-    historical: bool,
-) -> String {
-    let base = uncalibrated(keys, predicate);
-    if !historical {
-        return format!(
-            "(SELECT u.*,toInt64(0) AS legacy_characters,toInt64(0) AS legacy_character_n FROM {} u)",
-            super::analysis_source::as_view(&base),
-        );
-    }
-    let keys = if keys.is_empty() {
-        "source_scope"
-    } else {
-        keys
-    };
-    let legacy = correction_source(keys, predicate);
-    let time = time_sql(table);
-    let expected = format!(
-        "(WITH {time},toUInt8(1) AS source_scope SELECT {keys},countMerge(requests) AS expected FROM {table} WHERE {predicate} GROUP BY {keys})"
-    );
-    let selected = keys
-        .split(", ")
-        .map(|key| format!("u.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // Evidence can cover an old row whose original unit aggregate was never
-    // installed. Known units are disjoint; observations must never exceed bills.
-    // The two MVs are read at different instants while the outbox keeps inserting, so
-    // the bill count may trail by in-flight rows; the units' own MV count cannot.
-    let count = "ifNull(c.legacy_character_n,0)";
-    let quantity = "ifNull(c.legacy_characters,0)";
-    let guard = format!(
-        "toInt64(throwIf({count}+u.unit_character_n+u.unit_token_n>greatest(e.expected,u.unit_observed)))"
-    );
-    format!(
-        "(SELECT {selected},greatest(u.unit_observed,u.unit_character_n+u.unit_token_n+{count})+{guard} AS unit_observed,u.unit_characters+{quantity} AS unit_characters,u.unit_character_n+{count} AS unit_character_n,u.unit_token_n AS unit_token_n,{quantity} AS legacy_characters,{count} AS legacy_character_n FROM {} u LEFT JOIN {} c ON {} LEFT JOIN {} e ON {})",
-        super::analysis_source::as_view(&base),
-        super::analysis_source::as_view(&legacy),
-        super::analysis_source::join_on("u", "c", keys),
-        super::analysis_source::as_view(&expected),
-        super::analysis_source::join_on("u", "e", keys),
     )
 }
 
@@ -120,18 +69,7 @@ pub(super) fn correct_totals(row: &mut Value, evidence: &Value) -> Result<(), Ap
     Ok(())
 }
 
-fn uncalibrated(keys: &str, predicate: &str) -> String {
-    let keys = if keys.is_empty() {
-        "source_scope"
-    } else {
-        keys
-    };
-    let merged = "countMerge(requests) AS unit_observed, sumIfMerge(unit_characters) AS unit_characters, countIfMerge(unit_character_n) AS unit_character_n, countIfMerge(unit_token_n) AS unit_token_n";
-    let aggregate = format!(
-        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {merged} FROM mv_input_units_5min WHERE {predicate}"
-    );
-    super::measurement_coverage::aggregate_source(keys, &aggregate)
-}
+pub(super) const MERGED: &str = "countMerge(requests) AS unit_observed, sumIfMerge(unit_characters) AS unit_characters, countIfMerge(unit_character_n) AS unit_character_n, countIfMerge(unit_token_n) AS unit_token_n";
 
 pub(super) fn metrics(row: &Value, records: i64) -> Map<String, Value> {
     let characters = ch_i64(row, "unit_character_n");

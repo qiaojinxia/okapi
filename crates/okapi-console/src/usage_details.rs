@@ -124,22 +124,37 @@ fn cache_write_metrics(writes: i64, requests: i64, known: i64) -> [(&'static str
     ]
 }
 
-async fn performance_rows(
+async fn metrics_rows(
     ch: &ChClient,
     owner: &str,
     range: &str,
 ) -> Result<(ModelDayRows, ModelDayRows), AppError> {
     let predicate = format!("{owner} AND {range}");
-    let latency = super::latency::source("day, model", &predicate);
-    let rate = super::output_rate::prepared("day, model", "mv_cube_hour", &predicate);
-    let latency = ch
-        .query_json_each_row(&format!("SELECT * FROM {latency}"))
-        .await?;
-    let rate = ch
-        .query_json_each_row(&format!("SELECT * FROM {rate}"))
-        .await?;
+    let combined_sql = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day \
+         SELECT day, model, \
+                toInt64(countMerge(requests)) AS latency_observed, \
+                toInt64(sumIfMerge(latency_sum)) AS latency_sum, \
+                toInt64(countIfMerge(latency_samples)) AS latency_samples, \
+                toInt64(sumIfMerge(latency_output)) AS latency_output, \
+                toInt64(countMerge(requests)) AS ttft_observed, \
+                toInt64(sumIfMerge(ttft_sum)) AS ttft_sum, \
+                toInt64(countIfMerge(ttft_samples)) AS ttft_samples, \
+                {}, \
+                toInt64(countMerge(requests)) AS cache_expected \
+         FROM mv_analysis_5min WHERE {predicate} GROUP BY day, model",
+        super::cache_usage::MERGED,
+    );
+    let rate_sql = format!(
+        "SELECT * FROM {}",
+        super::output_rate::prepared("day, model", "mv_analysis_5min", &predicate)
+    );
+    let (combined, rate) = tokio::try_join!(
+        ch.query_json_each_row(&combined_sql),
+        ch.query_json_each_row(&rate_sql),
+    )?;
     Ok((
-        latency
+        combined
             .into_iter()
             .map(|row| (row_key(&row), row))
             .collect(),
@@ -154,37 +169,29 @@ pub async fn enrich(
     range: &str,
     data: &mut [Value],
 ) -> Result<Value, AppError> {
-    let sources = source_rows(ch, owner, range).await?;
+    let (sources, (perf, rates)) = tokio::try_join!(
+        source_rows(ch, owner, range),
+        metrics_rows(ch, owner, range),
+    )?;
     let mut source_totals = json!({});
-    let (perf, rates) = performance_rows(ch, owner, range).await?;
-    let ttft_sql = super::ttft_average::source("day, model", &format!("{owner} AND {range}"));
-    let ttft = ch
-        .query_json_each_row(&format!("SELECT * FROM {ttft_sql}"))
-        .await?;
-    let ttft: HashMap<_, _> = ttft.iter().map(|r| (row_key(r), r)).collect();
-    let cache =
-        super::cache_usage::query(ch, "day, model", &format!("{owner} AND {range}")).await?;
-    let cache: HashMap<_, _> = cache.iter().map(|r| (row_key(r), r)).collect();
     let mut counts = [0_i64; 14]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached, ttft observed, latency observed
     for row in data {
         let key = row_key(row);
         let empty = json!({});
         let provenance = sources.get(&key).unwrap_or(&empty);
         super::input_units::correct_totals(row, provenance)?;
-        let cache = cache.get(&key);
         let perf = perf.get(&key);
         let requests = ch_i64(row, "requests");
-        let known = cache.map_or(0, |r| ch_i64(r, "cache_write_n"));
-        let read_known = cache.map_or(0, |r| ch_i64(r, "cache_read_n"));
+        let known = perf.map_or(0, |r| ch_i64(r, "cache_write_n"));
+        let read_known = perf.map_or(0, |r| ch_i64(r, "cache_read_n"));
         let prompt = ch_i64(row, "prompt_tokens");
         let cached = ch_i64(row, "cached_tokens");
-        let writes = cache.map_or(0, |r| ch_i64(r, "cache_writes"));
+        let writes = perf.map_or(0, |r| ch_i64(r, "cache_writes"));
         let samples = perf.map_or(0, |r| ch_i64(r, "latency_samples"));
         let latency = perf.map_or(0, |r| ch_i64(r, "latency_sum"));
-        let measured = ttft.get(&key);
-        let ttft = measured.map_or(0, |r| ch_i64(r, "ttft_sum"));
-        let ttft_n = measured.map_or(0, |r| ch_i64(r, "ttft_samples"));
-        let observed = measured.map_or(0, |r| ch_i64(r, "ttft_observed"));
+        let ttft = perf.map_or(0, |r| ch_i64(r, "ttft_sum"));
+        let ttft_n = perf.map_or(0, |r| ch_i64(r, "ttft_samples"));
+        let observed = perf.map_or(0, |r| ch_i64(r, "ttft_observed"));
         let output = perf.map_or(0, |r| ch_i64(r, "latency_output"));
         for (name, value) in cache_write_metrics(writes, requests, known) {
             row[name] = value;

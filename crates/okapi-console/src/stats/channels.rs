@@ -119,7 +119,7 @@ pub async fn channel_usage(
                     sumMerge(completion_tokens) AS completion_tokens, \
                     sumMerge(amount) AS amount_micro, \
                     sumMerge(upstream_cost) AS upstream_cost_micro \
-             FROM mv_cube_hour WHERE hour >= toStartOfHour(fromUnixTimestamp({since})) \
+             FROM mv_analysis_5min WHERE ts5 >= toStartOfHour(fromUnixTimestamp({since})) \
              GROUP BY channel_id ORDER BY channel_id LIMIT 10000"
         ))
         .await

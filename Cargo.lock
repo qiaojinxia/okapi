@@ -2473,6 +2473,7 @@ dependencies = [
  "base32",
  "bcrypt",
  "chrono",
+ "flate2",
  "fred",
  "hex",
  "hmac",

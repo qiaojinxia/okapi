@@ -12,7 +12,7 @@ pub(super) const FIELDS: [&str; 6] = [
 ];
 const TOKEN: &str = "input_unit = 'tokens' AND isNull(input_characters)";
 const DURATION: &str = "ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1";
-const MERGED: &str = "countMerge(requests) AS output_rate_observed, sumIfMerge(total_ms) AS output_rate_sum, countIfMerge(samples) AS output_rate_samples, sumIfMerge(output_tokens) AS output_rate_output, countIfMerge(known_units) AS output_rate_known, countIfMerge(token_requests) AS output_rate_tokens";
+pub(super) const MERGED: &str = "countMerge(requests) AS output_rate_observed, sumIfMerge(output_rate_sum) AS output_rate_sum, countIfMerge(output_rate_samples) AS output_rate_samples, sumIfMerge(output_rate_output) AS output_rate_output, countIfMerge(output_rate_known) AS output_rate_known, countIfMerge(output_rate_tokens) AS output_rate_tokens";
 
 pub(super) fn raw_sql() -> String {
     let valid = format!("({TOKEN}) AND {DURATION}");
@@ -88,7 +88,7 @@ fn time_sql(table: &str) -> &'static str {
 
 fn uncalibrated(keys: &str, predicate: &str) -> String {
     let aggregate = format!(
-        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day SELECT {keys}, {MERGED} FROM mv_output_rate_5min WHERE {predicate}"
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day SELECT {keys}, {MERGED} FROM mv_analysis_5min WHERE {predicate}"
     );
     super::measurement_coverage::aggregate_source(keys, &aggregate)
 }

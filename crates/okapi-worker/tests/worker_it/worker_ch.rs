@@ -206,12 +206,12 @@ async fn assert_old_speech_materialized(ch: &ChClient, user_id: i64, normalized:
     assert_eq!(number(&totals[0], "requests"), 1);
     assert_eq!(number(&totals[0], "amount"), 22);
     let units = ch.query_json_each_row(&format!(
-        "SELECT sumIfMerge(unit_characters) AS characters,countIfMerge(unit_character_n) AS known FROM mv_input_units_5min WHERE user_id={user_id}"
+        "SELECT sumIfMerge(unit_characters) AS characters,countIfMerge(unit_character_n) AS known FROM mv_analysis_5min WHERE user_id={user_id}"
     )).await.unwrap();
     assert_eq!(number(&units[0], "characters"), 11);
     assert_eq!(number(&units[0], "known"), 1);
     let rate = ch.query_json_each_row(&format!(
-        "SELECT countIfMerge(known_units) AS known,countIfMerge(token_requests) AS tokens,countIfMerge(samples) AS samples FROM mv_output_rate_5min WHERE user_id={user_id}"
+        "SELECT countIfMerge(output_rate_known) AS known,countIfMerge(output_rate_tokens) AS tokens,countIfMerge(output_rate_samples) AS samples FROM mv_analysis_5min WHERE user_id={user_id}"
     )).await.unwrap();
     assert_eq!(number(&rate[0], "known"), 1);
     assert_eq!(number(&rate[0], "tokens"), 0);

@@ -5,15 +5,6 @@ use okapi_store::ChClient;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
-pub(super) const TTL_FIELDS: [&str; 5] = [
-    "ttl_observed",
-    "observed_cache_write_5m_tokens",
-    "observed_cache_write_5m_tokens_n",
-    "observed_cache_write_1h_tokens",
-    "observed_cache_write_1h_tokens_n",
-];
-const DETAIL_FIELD_COUNT: usize = 19;
-
 pub(super) const FIELDS: [&str; 24] = [
     "detail_observed",
     "observed_audio_prompt_tokens",
@@ -50,7 +41,7 @@ pub(super) fn sum_sql() -> String {
         .join(", ")
 }
 
-fn merged_sql(fields: &[&str]) -> String {
+pub(super) fn merged_sql(fields: &[&str]) -> String {
     fields
         .iter()
         .map(|field| {
@@ -72,109 +63,106 @@ pub(super) fn source(keys: &str, table: &str, predicate: &str) -> String {
 }
 
 /// Keys, table and predicate are validated/internal SQL; user strings stay bound.
+/// Single-table read from unified `mv_analysis_5min` (no 3-way MV join).
 pub(super) fn prepared(keys: &str, table: &str, predicate: &str, historical: bool) -> String {
-    let details = observation_source(
-        keys,
-        predicate,
-        &Observation {
-            table: "mv_token_details_5min",
-            fields: &FIELDS[..DETAIL_FIELD_COUNT],
-        },
-    );
-    let ttl = observation_source(
-        keys,
-        predicate,
-        &Observation {
-            table: "mv_cache_ttl_5min",
-            fields: &TTL_FIELDS,
-        },
-    );
-    let units = super::input_units::prepared_with_calibration(keys, table, predicate, historical);
     let keys = if keys.is_empty() {
         "source_scope"
     } else {
         keys
     };
-    let selected = super::input_units::FIELDS
-        .map(|field| format!("iu.{field} AS {field}"))
-        .join(", ");
-    let ttl_selected = TTL_FIELDS
-        .iter()
-        .map(|field| format!("ct.{field} AS {field}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let details_and_units = format!("{}, {}", merged_sql(&FIELDS), super::input_units::MERGED);
+    let aggregate = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope \
+         SELECT {keys}, {details_and_units} FROM mv_analysis_5min WHERE {predicate}"
+    );
+    let base = super::measurement_coverage::aggregate_source(keys, &aggregate);
+    if !historical {
+        return format!(
+            "(SELECT u.*, toInt64(0) AS legacy_characters, toInt64(0) AS legacy_character_n FROM {} u)",
+            super::analysis_source::as_view(&base),
+        );
+    }
+    calibrate_units(keys, table, predicate, &base, &FIELDS, &[])
+}
+
+fn calibrate_units(
+    keys: &str,
+    table: &str,
+    predicate: &str,
+    base: &str,
+    passthrough: &[&str],
+    source_fields: &[&str],
+) -> String {
+    let legacy = super::input_units::correction_source(keys, predicate);
+    let time = super::observation_sources::Grain::for_table(table).time_sql();
+    let expected = format!(
+        "(WITH {time}, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS expected FROM {table} WHERE {predicate} GROUP BY {keys})"
+    );
     let keys_selected = keys
         .split(", ")
-        .map(|key| format!("td.{key} AS {key}"))
+        .map(|key| format!("u.{key} AS {key}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let details_selected = FIELDS[..DETAIL_FIELD_COUNT]
-        .iter()
-        .map(|field| format!("td.{field} AS {field}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let count = "ifNull(c.legacy_character_n, 0)";
+    let quantity = "ifNull(c.legacy_characters, 0)";
+    let mut cols: Vec<String> = Vec::new();
+    for field in source_fields {
+        if *field == "source_prompt_total" {
+            cols.push(format!("toInt64(u.{field}) - {quantity} AS {field}"));
+        } else {
+            cols.push(format!("u.{field} AS {field}"));
+        }
+    }
+    for field in passthrough {
+        cols.push(format!("u.{field} AS {field}"));
+    }
+    let guard = format!(
+        "toInt64(throwIf({count} + u.unit_character_n + u.unit_token_n > greatest(e.expected, u.unit_observed)))"
+    );
+    cols.push(format!(
+        "greatest(u.unit_observed, u.unit_character_n + u.unit_token_n + {count}) + {guard} AS unit_observed"
+    ));
+    cols.push(format!("u.unit_characters + {quantity} AS unit_characters"));
+    cols.push(format!("u.unit_character_n + {count} AS unit_character_n"));
+    cols.push("u.unit_token_n AS unit_token_n".to_owned());
+    cols.push(format!("{quantity} AS legacy_characters"));
+    cols.push(format!("{count} AS legacy_character_n"));
     format!(
-        "(SELECT {keys_selected}, {details_selected}, {selected}, {ttl_selected} FROM {} td LEFT JOIN {} iu ON {} LEFT JOIN {} ct ON {})",
-        super::analysis_source::as_view(&details),
-        super::analysis_source::as_view(&units),
-        super::analysis_source::join_on("td", "iu", keys),
-        super::analysis_source::as_view(&ttl),
-        super::analysis_source::join_on("td", "ct", keys),
+        "(SELECT {keys_selected}, {} FROM {} u LEFT JOIN {} c ON {} LEFT JOIN {} e ON {})",
+        cols.join(", "),
+        super::analysis_source::as_view(base),
+        super::analysis_source::as_view(&legacy),
+        super::analysis_source::join_on("u", "c", keys),
+        super::analysis_source::as_view(&expected),
+        super::analysis_source::join_on("u", "e", keys),
     )
 }
 
-struct Observation<'a> {
-    table: &'static str,
-    fields: &'a [&'a str],
-}
-
-fn observation_source(keys: &str, predicate: &str, observation: &Observation<'_>) -> String {
-    let observed_table = observation.table;
-    let keys = if keys.is_empty() {
-        "source_scope"
-    } else {
-        keys
-    };
-    let aggregate = format!(
-        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {} FROM {observed_table} WHERE {predicate}",
-        merged_sql(observation.fields)
-    );
-    super::measurement_coverage::aggregate_source(keys, &aggregate)
-}
-
-/// Combine two independent aggregate families without another HTTP round trip.
+/// Combine provenance, token details, TTL and input units in one single-MV scan.
 pub(super) fn with_provenance(keys: &str, table: &str, predicate: &str) -> String {
-    let provenance = super::usage_sources::source(keys, predicate);
-    let details = source(keys, table, predicate);
     let keys = if keys.is_empty() {
         "source_scope"
     } else {
         keys
     };
-    let selected = FIELDS
-        .into_iter()
-        .chain(super::input_units::FIELDS)
-        .map(|field| format!("td.{field} AS {field}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source_fields = super::usage_sources::FIELDS
-        .map(|field| {
-            if field == "source_prompt_total" {
-                format!("toInt64(us.{field})-if(us.source_observed=us.source_expected,ifNull(td.legacy_characters,0),toInt64(0)) AS {field}")
-            } else {
-                format!("us.{field} AS {field}")
-            }
-        }).join(", ");
-    let keys_selected = keys
-        .split(", ")
-        .map(|key| format!("us.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "(SELECT {keys_selected}, {source_fields}, {selected} FROM {} us LEFT JOIN {} td ON {})",
-        super::analysis_source::as_view(&provenance),
-        super::analysis_source::as_view(&details),
-        super::analysis_source::join_on("us", "td", keys),
+    let all_merged = format!(
+        "{}, {}, {}",
+        super::usage_sources::merged_sql(),
+        merged_sql(&FIELDS),
+        super::input_units::MERGED,
+    );
+    let aggregate = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope \
+         SELECT {keys}, {all_merged} FROM mv_analysis_5min WHERE {predicate}"
+    );
+    let base = super::measurement_coverage::aggregate_source(keys, &aggregate);
+    calibrate_units(
+        keys,
+        table,
+        predicate,
+        &base,
+        &FIELDS,
+        &super::usage_sources::FIELDS,
     )
 }
 

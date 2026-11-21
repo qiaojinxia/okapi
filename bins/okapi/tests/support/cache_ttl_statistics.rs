@@ -82,7 +82,7 @@ async fn views(env: &Env, key: i64, partial: bool) {
     }
 }
 
-async fn check(env: &Env, ch: &ChClient, partial: bool, upgrade: bool) {
+async fn check(env: &Env, ch: &ChClient, partial: bool) {
     let key = key_id(env).await;
     let mut mixed = sample(env, key, Some(true), false);
     mixed["cache_write_5m_tokens"] = json!(60);
@@ -117,57 +117,18 @@ async fn check(env: &Env, ch: &ChClient, partial: bool, upgrade: bool) {
     if partial {
         views(env, key, true).await;
     }
-    if upgrade {
-        super::population_storage::execute(ch, "TRUNCATE TABLE mv_cache_ttl_5min")
-            .await
-            .unwrap();
-        views(env, key, true).await;
-    }
     super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
         .await
         .unwrap();
-    if upgrade {
-        for (path, portal) in [
-            (
-                format!("/admin/stats/trend?user_id={}&days=2", env.user_id),
-                false,
-            ),
-            ("/api/me/stats/breakdown?days=2&scope=user".into(), true),
-        ] {
-            let body = request(env, &path, portal).await;
-            let total = &body["total"];
-            assert_eq!(total["requests"], 3);
-            assert_eq!(total["tokens"], 4500);
-            assert_eq!(total["amount_micro"], 2000);
-            assert_eq!(
-                total["token_detail_observations"]["image_prompt_tokens"]["observed_records"],
-                2
-            );
-            assert_eq!(
-                total["token_detail_observations"]["image_prompt_tokens"]["observed_tokens"],
-                13
-            );
-            for name in ["cache_write_5m_tokens", "cache_write_1h_tokens"] {
-                let axis = &total["token_detail_observations"][name];
-                assert_eq!(axis["observed_records"], 0, "{total}");
-                assert!(axis["observed_tokens"].is_null());
-                assert!(axis["tokens"].is_null());
-                assert_eq!(axis["coverage_bp"], 0);
-            }
-            assert_eq!(total["cache_write_ttl_history"]["observed_requests"], 0);
-            assert_eq!(total["cache_write_ttl_history"]["complete"], false);
-        }
-    } else {
-        views(env, key, partial).await;
-    }
+    views(env, key, partial).await;
 }
 
-async fn isolated(partial: bool, upgrade: bool) {
+async fn isolated(partial: bool) {
     let database = format!("okapi_ttl_{}", Uuid::new_v4().simple());
     let env = setup_with_ch_database(&database).await;
     let ch = env.state.ch.as_ref().expect("isolated CH required");
     ch.ensure_schema().await.unwrap();
-    let result = std::panic::AssertUnwindSafe(check(&env, ch, partial, upgrade))
+    let result = std::panic::AssertUnwindSafe(check(&env, ch, partial))
         .catch_unwind()
         .await;
     super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
@@ -180,10 +141,10 @@ async fn isolated(partial: bool, upgrade: bool) {
 
 #[tokio::test]
 async fn ttl_counts_remain_queryable_after_raw_expiry() {
-    isolated(false, false).await;
+    isolated(false).await;
 }
 
 #[tokio::test]
 async fn ttl_zero_unknown_refund_and_scope_survive_raw_expiry() {
-    isolated(true, false).await;
+    isolated(true).await;
 }

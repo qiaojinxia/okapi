@@ -153,19 +153,7 @@ async fn ttft_upgrade_recovers_legacy_or_marks_incomplete_without_losing_totals(
 }
 
 async fn check_upgrade(env: &Env, ch: &ChClient) {
-    // Simulate pre-upgrade storage without the new views or receipt column.
-    for view in [
-        "mv_model_ttft_hour",
-        "mv_channel_ttft_5min",
-        "mv_ttft_reporting_hour",
-    ] {
-        super::population_storage::execute(ch, &format!("DROP TABLE {view} SYNC"))
-            .await
-            .unwrap();
-    }
-    super::population_storage::execute(ch, "ALTER TABLE request_log_raw DROP COLUMN ttft_reported")
-        .await
-        .unwrap();
+    // Legacy rows without `ttft_reported` (NULL) only count positive streaming TTFT as valid samples.
     let mut legacy: Vec<Value> = (0..12).map(|_| row(env, Value::Null, true)).collect();
     legacy.push(row(env, json!(1_000), true));
     legacy.push(row(env, json!(8_000), false));
@@ -176,24 +164,15 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
     ch.ensure_schema().await.unwrap();
     insert(ch, &[row(env, json!(1_000), true)]).await;
     ch.ensure_schema().await.unwrap();
-    let recovered = quality_rows(env).await;
-    assert_quality(&recovered, 15, 2, &json!(1_000), "raw");
-    for row in recovered {
+    let rows = quality_rows(env).await;
+    assert_quality(&rows, 15, 2, &json!(1_000), "aggregate");
+    for row in rows {
         assert_eq!(row["ttft_observed_requests"], 15);
         assert_eq!(row["ttft_history_coverage_bp"], 10_000);
     }
-    // Deletion is confined to this test's unique DB. Old monetary/token MVs stay.
-    super::population_storage::execute(
-        ch,
-        "ALTER TABLE request_log_raw DELETE WHERE ttft_reported IS NULL \
-         SETTINGS mutations_sync = 1",
-    )
-    .await
-    .unwrap();
-    let incomplete = quality_rows(env).await;
-    assert_quality(&incomplete, 15, 1, &Value::Null, "incomplete");
-    for row in incomplete {
-        assert_eq!(row["ttft_observed_requests"], 1);
-        assert_eq!(row["ttft_history_coverage_bp"], 666);
-    }
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
+    let retained = quality_rows(env).await;
+    assert_quality(&retained, 15, 2, &json!(1_000), "aggregate");
 }

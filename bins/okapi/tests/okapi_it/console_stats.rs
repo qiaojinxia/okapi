@@ -326,8 +326,14 @@ async fn personal_activity_covers_calendar_year_and_isolates_owners() {
         empty["data"].as_array().unwrap().is_empty(),
         "empty[\"data\"].as_array().unwrap() should be empty"
     );
-    // Classification loss after raw expires must not invent old call counts.
-    ch.execute(&format!("ALTER TABLE population_v1_mv_key_model_day DELETE WHERE user_id={} SETTINGS mutations_sync=2", env.user_id)).await.unwrap();
+    // Unclassified events in the queried scope must fail closed instead of inventing call counts.
+    ch.execute(&format!(
+        "INSERT INTO request_log_raw (ts,request_id,log_type,user_id,api_key_id,model,amount_micro) \
+         VALUES ('2024-02-29 12:30:00',generateUUIDv4(),0,{},{key_id},'{}',100)",
+        env.user_id, env.model
+    ))
+    .await
+    .unwrap();
     let (status, missing) = get(&env, path, &env.user_token).await;
     assert_eq!(status, 500, "{missing}");
     assert_eq!(

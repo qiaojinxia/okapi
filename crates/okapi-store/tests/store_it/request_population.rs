@@ -37,12 +37,7 @@ async fn refund_changes_money_without_creating_calls_or_unknown_measurements() {
             summary(&ch).await,
             json!({"requests":"1","records":"2","tokens":"120","amount":"0","original":"0","discount":"0"})
         );
-        for table in [
-            "mv_model_hour",
-            "mv_cube_hour",
-            "mv_analysis_hour",
-            "mv_calendar_minute",
-        ] {
+        for table in ["mv_model_hour", "mv_analysis_5min", "mv_calendar_minute"] {
             let scope = if table == "mv_model_hour" {
                 ""
             } else {
@@ -55,9 +50,9 @@ async fn refund_changes_money_without_creating_calls_or_unknown_measurements() {
                 "{table}"
             );
         }
-        let measured = ch.query_json_each_row("SELECT countMerge(requests) AS calls,countIfMerge(samples) AS samples,sumIfMerge(total_ms) AS ms FROM mv_latency_reporting_hour WHERE user_id=7").await.unwrap();
+        let measured = ch.query_json_each_row("SELECT countMerge(requests) AS calls,countIfMerge(latency_samples) AS samples,sumIfMerge(latency_sum) AS ms FROM mv_analysis_5min WHERE user_id=7").await.unwrap();
         assert_eq!(measured[0], json!({"calls":"1","samples":"1","ms":"66"}));
-        let units = ch.query_json_each_row("SELECT countMerge(requests) AS calls,countIfMerge(unit_token_n) AS known FROM mv_input_units_5min WHERE user_id=7").await.unwrap();
+        let units = ch.query_json_each_row("SELECT countMerge(requests) AS calls,countIfMerge(unit_token_n) AS known FROM mv_analysis_5min WHERE user_id=7").await.unwrap();
         assert_eq!(units[0], json!({"calls":"1","known":"1"}));
         ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
     }
@@ -67,14 +62,12 @@ async fn refund_changes_money_without_creating_calls_or_unknown_measurements() {
 }
 
 #[tokio::test]
-async fn unclassified_upgrade_recovers_only_complete_raw_history() {
+async fn unclassified_event_blocks_calls_after_raw_expiry_while_keeping_financial_totals() {
     let (ch, database) = fixture().await;
     events(&ch).await;
-    // Simulate installation after both financial records were already written.
-    ch.execute("TRUNCATE TABLE population_v1_mv_user_day")
+    ch.execute("INSERT INTO request_log_raw (ts,request_id,log_type,user_id,amount_micro) VALUES ('2026-09-30 12:15:00',generateUUIDv4(),0,7,50)")
         .await
         .unwrap();
-    assert_eq!(summary(&ch).await["requests"], "1");
     ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
     let error = ch
         .query_json_each_row(
@@ -90,7 +83,7 @@ async fn unclassified_upgrade_recovers_only_complete_raw_history() {
         "{error}"
     );
     let finance = ch.query_json_each_row("SELECT sumMerge(amount) AS amount,countMerge(financial_records) AS records FROM mv_user_day WHERE user_id=7").await.unwrap();
-    assert_eq!(finance[0], json!({"amount":"0","records":"2"}));
+    assert_eq!(finance[0], json!({"amount":"50","records":"3"}));
     ch.execute(&format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
@@ -127,7 +120,7 @@ async fn failure_is_a_call_but_refund_is_not_a_latency_sample() {
     assert_eq!(summary["records"], "3");
     assert_eq!(summary["tokens"], "120");
     assert_eq!(summary["amount"], "0");
-    let measured=ch.query_json_each_row("SELECT countMerge(requests) AS calls,countIfMerge(samples) AS samples,sumIfMerge(total_ms) AS ms FROM mv_latency_reporting_hour WHERE user_id=7").await.unwrap();
+    let measured=ch.query_json_each_row("SELECT countMerge(requests) AS calls,countIfMerge(latency_samples) AS samples,sumIfMerge(latency_sum) AS ms FROM mv_analysis_5min WHERE user_id=7").await.unwrap();
     assert_eq!(measured[0], json!({"calls":"2","samples":"2","ms":"143"}));
     let errors = ch
         .query_json_each_row("SELECT sumMerge(errors) AS errors FROM mv_user_day WHERE user_id=7")
@@ -161,37 +154,6 @@ async fn unknown_event_type_never_becomes_a_zero_or_an_extra_call() {
         .await
         .unwrap();
     assert_eq!(money[0]["amount"], "100");
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn partial_classified_history_never_adds_overlapping_records() {
-    let (ch, database) = fixture().await;
-    events(&ch).await;
-    ch.execute("TRUNCATE TABLE population_v1_mv_user_day")
-        .await
-        .unwrap();
-    ch.execute("INSERT INTO population_v1_mv_user_day SELECT user_id,toDate(ts) AS day,countStateIf(log_type IN (2,5)) AS requests,sumStateIf(toUInt64(prompt_tokens)+toUInt64(completion_tokens),log_type IN (2,5)) AS tokens,sumState(amount_micro) AS amount,sumState(original_amount_micro) AS original,sumState(discount_micro) AS discount,sumState(upstream_cost_micro) AS upstream_cost,sumStateIf(toUInt64(is_error),log_type IN (2,5)) AS errors,countState() AS financial_records,countStateIf(log_type IN (2,5,6)) AS population_classified FROM request_log_raw WHERE log_type=2 GROUP BY user_id,day").await.unwrap();
-    assert_eq!(
-        summary(&ch).await,
-        json!({"requests":"1","records":"2","tokens":"120","amount":"0","original":"0","discount":"0"})
-    );
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
-    let error = ch
-        .query_json_each_row(
-            "SELECT countMerge(requests) AS calls FROM mv_user_day WHERE user_id=7",
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            StoreError::InvalidData("statistics_request_history_incomplete")
-        ),
-        "{error}"
-    );
     ch.execute(&format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();

@@ -69,12 +69,12 @@ async fn check_samples(env: &Env, ch: &ChClient) {
     }
     super::population_storage::execute(
         ch,
-        "INSERT INTO mv_cache_totals_5min SELECT * FROM mv_cache_totals_5min",
+        "INSERT INTO mv_analysis_5min SELECT * FROM mv_analysis_5min",
     )
     .await
     .unwrap();
-    // 计数超过请求数的来源不能被当成完整：缓存写入总量保持未知
-    let corrupted = request(env, &path, false).await;
+    // 计数超过权威请求数（mv_calendar_minute）的来源不能被当成完整：门户缓存写入总量保持未知
+    let corrupted = request(env, "/api/me/stats/breakdown?days=2&scope=user", true).await;
     assert_eq!(corrupted["total"]["requests"], 3, "{corrupted}");
     assert!(
         corrupted["total"]["cache_write_tokens"].is_null(),
