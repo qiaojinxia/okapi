@@ -12,6 +12,7 @@ import { ErrorState, LoadingState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import type { GroupListRow } from '@/features/groups/types'
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
@@ -36,8 +37,8 @@ export function GroupsSection({
   const codes = draft ?? current
   const catalog = useQuery({
     queryKey: qk.adminGroupOptions,
-    // Configuration lists return all groups when limit is omitted, not just page one.
-    queryFn: () => apiFetch<{ data: GroupListRow[] }>('/admin/groups'),
+    // 不传 limit 后端只回第一页（20 条）：逐页拿全，否则第 21 个以后的分组会被当成「不存在」、保存被禁用
+    queryFn: async () => ({ data: await loadAll<GroupListRow>('/admin/groups', (g) => g.group_code) }),
     retry: false,
   })
   const byCode = new Map((catalog.data?.data ?? []).map((group) => [group.group_code, group]))

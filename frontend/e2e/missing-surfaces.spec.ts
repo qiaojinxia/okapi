@@ -1448,9 +1448,12 @@ test('总览待办：服务状态一句话、全清不占位、死信/未定价/
       },
     }),
   )
-  await page.route('**/admin/models', (route) =>
-    route.fulfill({ json: { data: [{ model_name: 'gpt-5', pricing_mode: null }], total: 1, unpriced: 1 } }),
-  )
+  // 待办卡只要「未定价」的第一个名字与数量：让后端筛，只取 1 条（不传 limit 只回第一页，第 21 个以后的看不到）
+  await page.route('**/admin/models?*', (route) => {
+    const url = new URL(route.request().url())
+    expect([url.searchParams.get('unpriced'), url.searchParams.get('limit')]).toEqual(['true', '1'])
+    return route.fulfill({ json: { data: [{ model_name: 'gpt-5', pricing_mode: null }], total: 1, unpriced: 1 } })
+  })
   await page.route('**/admin/pools', (route) =>
     route.fulfill({ json: { data: [{ pool_code: 'empty-pool', channel_count: 0 }], total: 1 } }),
   )
@@ -1506,7 +1509,7 @@ test('总览待办：服务状态一句话、全清不占位、死信/未定价/
   diagnose.dlq_depth = 0
   diagnose.cooling_keys = 0
   diagnose.outbox_pending = 0
-  await page.route('**/admin/models', (route) => route.fulfill({ json: { data: [], total: 0, unpriced: 0 } }))
+  await page.route('**/admin/models?*', (route) => route.fulfill({ json: { data: [], total: 0, unpriced: 0 } }))
   await page.route('**/admin/pools', (route) => route.fulfill({ json: { data: [{ pool_code: 'default', channel_count: 2 }], total: 1 } }))
   await page.route('**/admin/reconciliation', (route) => route.fulfill({ json: { drift_count: 0, drifts: [] } }))
   await page.route('**/admin/stats/channels?*', (route) => route.fulfill({ json: { data: [] } }))

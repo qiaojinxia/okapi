@@ -664,7 +664,7 @@ test('Dashboard 待办条共用检查数据，可从首屏直接进入处理页�
   await expect(actions).toBeInViewport({ ratio: 1 })
   await expect(actions.getByRole('link')).toHaveCount(4)
   await expect(actions.getByRole('link', { name: /Redis/ })).toContainText('服务连接异常')
-  for (const endpoint of ['/admin/diagnose', '/admin/reconciliation', '/admin/models', '/admin/pools', '/admin/stats/channels?days=30']) {
+  for (const endpoint of ['/admin/diagnose', '/admin/reconciliation', '/admin/models?unpriced=true&limit=1', '/admin/pools', '/admin/stats/channels?days=30']) {
     expect(requests.filter((url) => url === endpoint)).toHaveLength(1)
   }
   // 页头的服务状态与待办条共用同一次诊断：一行文字，逐项状态在悬停说明里，键盘可读可关
@@ -1304,7 +1304,7 @@ for (const width of [320, 390, 1280, 1440]) {
   test(`Dashboard：${width}px 布局与长金额不溢出`, async ({ page }) => {
     await page.setViewportSize({ width, height: width === 1280 ? 800 : 1000 })
     await prepare(page, width === 390 ? 'en' : 'zh-CN')
-    await page.route('**/admin/models', (route) => route.fulfill({ json: { data: [{ model_name: 'demo-model', pricing_mode: null }] } }))
+    await page.route('**/admin/models?*', (route) => route.fulfill({ json: { data: [{ model_name: 'demo-model', pricing_mode: null }] } }))
     await page.route('**/admin/stats/channels?*', (route) => route.fulfill({ json: { data: [{ channel_id: 1, name: 'OpenAI Primary', error_rate_bp: 760 }] } }))
     await page.goto(width === 1280 ? '/admin' : '/admin?scope=window')
     await expect(page.locator('.recharts-surface').last()).toBeVisible()

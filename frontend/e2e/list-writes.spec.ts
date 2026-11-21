@@ -133,6 +133,33 @@ const CHANNEL_OFF = {
   models: ['gpt-4o-mini'],
 }
 
+// 后端列表不传 limit 只回第一页（20 条，PageQuery::DEFAULT_LIMIT），桩照这个规矩分页：
+// 「测试全部」以前不传 limit 当整表用，第 21 个以后的启用渠道从来没被测过。
+test('测试全部启用渠道：超过一页（20 条）也逐页拿全，每个启用渠道都测到', async ({ page }) => {
+  await prepare(page)
+  const enabled = Array.from({ length: 23 }, (_, i) => ({ ...CHANNEL_ON, id: 100 + i, name: `ch-${100 + i}` }))
+  const listQueries: string[] = []
+  await page.route('**/admin/channels?*', (route) => {
+    const url = new URL(route.request().url())
+    listQueries.push(url.search)
+    const rows = url.searchParams.get('status') === '1' ? enabled : [...enabled, CHANNEL_OFF]
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    const limit = Number(url.searchParams.get('limit') ?? 20)
+    return route.fulfill({ json: { data: rows.slice(offset, offset + limit), total: rows.length, enabled: enabled.length } })
+  })
+  const tested = new Set<string>()
+  await page.route('**/admin/channels/*/test', async (route) => {
+    tested.add(new URL(route.request().url()).pathname)
+    await route.fulfill({ json: { ok: true, latency_ms: 5 } })
+  })
+
+  await page.goto('/admin/channels')
+  await page.getByRole('button', { name: '测试全部启用渠道', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: /测试完成：23 可达 \/ 0 失败（共 23）/ })).toBeVisible()
+  expect([...tested].sort()).toEqual(enabled.map((c) => `/admin/channels/${c.id}/test`).sort())
+  expect(listQueries).toContain('?status=1&limit=200&offset=20')
+})
+
 test('渠道列表：复制名为 -copy、行测活带第一个模型、测全部只打启用且空体、批量启停删、单删手输名称', async ({
   page,
 }) => {

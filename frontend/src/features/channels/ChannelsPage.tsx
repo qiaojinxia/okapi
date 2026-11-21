@@ -57,6 +57,7 @@ import { toast } from '@/components/ui/toast'
 import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { describeError } from '@/lib/i18n'
 import { maskAccount, maskChannelName } from '@/lib/mask'
 import { formatUpstreamBalance } from '@/lib/money'
@@ -237,9 +238,9 @@ export function ChannelsPage() {
   // 太少几十条渠道要等很久；逐条失败不中断，最后汇总成功/失败数
   const testAll = useMutation({
     mutationFn: async () => {
-      // 测的是全站所有启用渠道，不受当前页 / 筛选影响：不传 limit 拿整表
-      const { data } = await apiFetch<ChannelPage>('/admin/channels?status=1')
-      const ids = data.map((c) => c.id)
+      // 测的是全站所有启用渠道，不受当前页 / 筛选影响：逐页拿整表（不传 limit 后端只回第一页 20 条）
+      const rows = await loadAll<ChannelPage['data'][number]>('/admin/channels?status=1', (c) => c.id)
+      const ids = rows.map((c) => c.id)
       let ok = 0
       let failed = 0
       const queue = [...ids]

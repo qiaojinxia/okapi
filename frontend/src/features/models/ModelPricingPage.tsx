@@ -22,6 +22,7 @@ import type { ChannelRow } from '@/features/channels/types'
 import { useDraft } from '@/hooks/use-draft'
 import { pagedPath, usePagedQuery, withFilters } from '@/hooks/use-paged-query'
 import { ApiError, apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { describeError } from '@/lib/i18n'
 import { invalidatePublishedPricing } from '@/lib/invalidate'
 import { formatRatio, formatUnitPrice } from '@/lib/money'
@@ -78,7 +79,8 @@ export function ModelPricingPage() {
   // 与"未定价"是同一类"配了一半"的漏项，此前只有路由诊断器能查出来
   const channels = useQuery({
     queryKey: qk.adminChannels,
-    queryFn: () => apiFetch<{ data: ChannelRow[] }>('/admin/channels'),
+    // 逐页拿整表：只拿第一页时，第 21 个以后的渠道服务的模型会被数成「0 个渠道」
+    queryFn: async () => ({ data: await loadAll<ChannelRow>('/admin/channels', (c) => c.id) }),
   })
   const channelCount = new Map<string, number>()
   for (const c of channels.data?.data ?? []) {

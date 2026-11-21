@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { ReconResp } from '@/features/ops/ReconciliationCard'
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import type { QualitySearch } from '@/features/quality/search'
@@ -103,12 +104,15 @@ function useAttention(days: number) {
   })
   const models = useQuery({
     queryKey: qk.adminModels,
-    queryFn: () => apiFetch<{ data: ModelRow[] }>('/admin/models'),
+    // 只要「未定价」的第一个名字和数量：交给后端筛（`unpriced` 与下面的 `pricing_mode === null` 同一判据）。
+    // 不传 limit 只回第一页 20 个，第 21 个以后的未定价模型原先看不到名字
+    queryFn: () => apiFetch<{ data: ModelRow[]; unpriced?: number }>('/admin/models?unpriced=true&limit=1'),
     retry: false,
   })
   const pools = useQuery({
     queryKey: qk.adminPools,
-    queryFn: () => apiFetch<{ data: PoolRow[] }>('/admin/pools'),
+    // 逐页拿全：只看第一页时第 21 个以后的空池子不会被提醒
+    queryFn: async () => ({ data: await loadAll<PoolRow>('/admin/pools', (p) => p.pool_code) }),
     retry: false,
   })
   const drift = useQuery({
@@ -176,7 +180,7 @@ function useAttention(days: number) {
   // 未定价模型：建了模型却没配价，请求会被直接拒——属于"配了一半"的典型漏项
   const unpriced = (models.isError ? [] : models.data?.data ?? []).filter((m) => m.pricing_mode === null)
   const stock = inventory.isError ? undefined : inventory.data
-  const unpricedCount = stock ? Math.max(0, stock.models.total - stock.models.priced) : unpriced.length
+  const unpricedCount = stock ? Math.max(0, stock.models.total - stock.models.priced) : (models.isError ? undefined : models.data?.unpriced) ?? unpriced.length
   if (unpricedCount > 0) {
     items.push({
       key: 'unpriced',

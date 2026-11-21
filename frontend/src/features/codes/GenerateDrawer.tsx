@@ -9,6 +9,7 @@ import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { describeError } from '@/lib/i18n'
 import { parseInt32, parseNonNegativeInt } from '@/lib/int32'
 import { formatMoney } from '@/lib/money'
@@ -30,7 +31,7 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
 
   const plans = useQuery({
     queryKey: qk.adminPlans,
-    queryFn: () => apiFetch<{ data: { plan_code: string }[] }>('/admin/plans'),
+    queryFn: async () => ({ data: await loadAll<{ plan_code: string }>('/admin/plans', (p) => p.plan_code) }),
   })
 
   const amountMicro = Math.round((Number(form.amount_usd) || 0) * 1_000_000)

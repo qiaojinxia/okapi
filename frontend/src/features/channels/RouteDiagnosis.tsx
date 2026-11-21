@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
@@ -108,7 +109,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
 
   const groups = useQuery({
     queryKey: qk.adminGroups,
-    queryFn: () => apiFetch<{ data: { group_code: string }[] }>('/admin/groups'),
+    queryFn: async () => ({ data: await loadAll<{ group_code: string }>('/admin/groups', (g) => g.group_code) }),
   })
   const pools = useQuery(poolOptions())
 

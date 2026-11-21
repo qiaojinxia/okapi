@@ -9,6 +9,7 @@ import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import { isMachineCode } from '@/lib/codes'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -76,7 +77,7 @@ export function PlanDrawer({
   // 分组从后端拉，避免手输不存在的 group_code（后端会 400，但太晚）
   const groups = useQuery({
     queryKey: qk.adminGroups,
-    queryFn: () => apiFetch<{ data: { group_code: string }[] }>('/admin/groups'),
+    queryFn: async () => ({ data: await loadAll<{ group_code: string }>('/admin/groups', (g) => g.group_code) }),
   })
 
   const grantMicro = toMicro(form.grant_usd)
