@@ -1,13 +1,14 @@
 use super::{KPI_TTL_SECS, SchedulerRedis};
-use fred::{error::Error, interfaces::LuaInterface};
-use okapi_store::image_batches::statistics::Delivery;
+use fred::error::Error;
+use okapi_store::{CachedScript, image_batches::statistics::Delivery};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 // Every metric and its receipt share a Redis Cluster slot. Retrying after a lost
 // response cannot double-add earlier metrics; INCRBY receives the integer string
 // unchanged (Lua doubles cannot represent all valid aggregate micro-USD values).
-const ADD: &str = r"
+static ADD_SCRIPT: CachedScript = CachedScript::new(
+    r"
     if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
     local until_at = tonumber(ARGV[2])
     local now = tonumber(redis.call('TIME')[1])
@@ -17,7 +18,8 @@ const ADD: &str = r"
     if ttl < until_at - now then redis.call('EXPIREAT', KEYS[1], until_at) end
     redis.call('SET', KEYS[2], '1', 'EXAT', until_at)
     return 1
-";
+",
+);
 
 fn receipt_key(key: &str, id: Uuid) -> String {
     let tag = key
@@ -45,10 +47,9 @@ impl SchedulerRedis {
             return Ok(());
         }
         let marker = receipt_key(&key, row.batch_id);
-        let _: i64 = self
-            .client
+        let _: i64 = ADD_SCRIPT
             .eval(
-                ADD,
+                &self.client,
                 vec![key, marker],
                 vec![delta.to_string(), expires.to_string()],
             )

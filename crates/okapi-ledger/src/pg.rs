@@ -275,13 +275,32 @@ fn bounded_upstream_id(id: &str) -> &str {
     id.char_indices().nth(128).map_or(id, |(cut, _)| &id[..cut])
 }
 
+/// Result of the single-CTE settlement write inside a transaction.
+pub(crate) struct SettlementWrite {
+    pub inserted: bool,
+    pub has_other_pending: bool,
+}
+
 /// Allows a durable task result and its ledger entry to share one commit.
 /// The caller must commit/rollback; false means the request was already recorded.
-#[allow(clippy::too_many_lines)]
 pub async fn record_settlement_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: SettlementInput<'_>,
 ) -> Result<bool, LedgerError> {
+    Ok(record_settlement_with_sync_in_tx(tx, input, false)
+        .await?
+        .inserted)
+}
+
+/// Same single-CTE write as [`record_settlement_in_tx`], optionally folding the
+/// `billing_sync` intent row and pending-queue probe into the same round trip so
+/// `sync::record` holds row locks for one fewer RTT and can skip redundant probes.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn record_settlement_with_sync_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: SettlementInput<'_>,
+    insert_billing_sync: bool,
+) -> Result<SettlementWrite, LedgerError> {
     let (input_unit, input_characters) = input_units(input.usage, input.pricing_snapshot.as_ref())?;
     // 两参形式与单参 bigint 形式的锁互不相撞（sqlx 迁移锁用的是单参）；
     // 不同 request_id 撞上同一个 hashtext 只是短暂串行，不影响正确性
@@ -362,8 +381,9 @@ pub async fn record_settlement_in_tx(
         input.dimensions.diagnostics.as_ref(),
     );
 
-    let (already_recorded, user_rows, key_rows): (bool, i64, i64) = sqlx::query_as(
-        r"
+    let (already_recorded, user_rows, key_rows, has_other_pending): (bool, i64, i64, bool) =
+        sqlx::query_as(
+            r"
         WITH existing AS (
             SELECT EXISTS(
                 SELECT 1 FROM billing_financial_records WHERE request_id = $1
@@ -430,58 +450,76 @@ pub async fn record_settlement_in_tx(
               FROM existing
              WHERE NOT existing.present
             RETURNING 1
+        ),
+        ins_sync AS (
+            INSERT INTO billing_sync (request_id, user_id, api_key_id, amount_micro, pool, source_window)
+            SELECT $1, $4, $5, $15, $32, $34
+              FROM existing
+             WHERE NOT existing.present
+               AND $40::boolean
+            RETURNING 1
         )
         SELECT existing.present,
                (SELECT count(*) FROM upd_user) AS user_rows,
-               (SELECT count(*) FROM upd_key) AS key_rows
+               (SELECT count(*) FROM upd_key) AS key_rows,
+               CASE WHEN $40::boolean AND NOT existing.present THEN
+                   EXISTS(SELECT 1 FROM billing_sync WHERE user_id = $4 AND request_id <> $1)
+                   OR EXISTS(SELECT 1 FROM balance_holds WHERE user_id = $4 AND state = 'closing')
+                   OR EXISTS(SELECT 1 FROM fund_transfers WHERE user_id = $4 AND cleaned_at IS NULL)
+                   OR EXISTS(SELECT 1 FROM subscription_sync WHERE user_id = $4)
+               ELSE true END AS has_other_pending
           FROM existing
         ",
-    )
-    .bind(input.request_id)
-    .bind(input.upstream_request_id.map(bounded_upstream_id))
-    .bind(input.log_type)
-    .bind(input.user_id)
-    .bind(input.api_key_id)
-    .bind(input.group_code)
-    .bind(input.model_name)
-    .bind(input.channel_id)
-    .bind(input.channel_key_id)
-    .bind(input.state.as_i16())
-    .bind(token_i32(input.usage.prompt_tokens)?)
-    .bind(token_i32(input.usage.cached_tokens)?)
-    .bind(token_i32(input.usage.completion_tokens)?)
-    .bind(token_i32(input.usage.reasoning_tokens)?)
-    .bind(input.amount.as_micros())
-    .bind(input.original.as_micros())
-    .bind(input.discount.as_micros())
-    .bind(input.pricing_epoch)
-    .bind(&input.pricing_snapshot)
-    .bind(input.latency_ms)
-    .bind(input.ttft_ms)
-    .bind(input.is_stream)
-    .bind(input.retry_count)
-    .bind(input.failover_count)
-    .bind(input.upstream_status)
-    .bind(input.error_code)
-    .bind(input.node)
-    .bind(input.sticky_layer)
-    .bind(input.client_type)
-    .bind(input.upstream_cost.map(Money::as_micros))
-    .bind(input.client_ip)
-    .bind(input.pool.as_i16())
-    .bind(usage_details)
-    .bind(&input.source_window)
-    .bind(input.event_type)
-    .bind(input.delta_micro)
-    .bind(input.balance_after.map(Money::as_micros))
-    .bind(event_payload)
-    .bind(outbox_payload)
-    .fetch_one(&mut **tx)
-    .await?;
+        )
+        .bind(input.request_id)
+        .bind(input.upstream_request_id.map(bounded_upstream_id))
+        .bind(input.log_type)
+        .bind(input.user_id)
+        .bind(input.api_key_id)
+        .bind(input.group_code)
+        .bind(input.model_name)
+        .bind(input.channel_id)
+        .bind(input.channel_key_id)
+        .bind(input.state.as_i16())
+        .bind(token_i32(input.usage.prompt_tokens)?)
+        .bind(token_i32(input.usage.cached_tokens)?)
+        .bind(token_i32(input.usage.completion_tokens)?)
+        .bind(token_i32(input.usage.reasoning_tokens)?)
+        .bind(input.amount.as_micros())
+        .bind(input.original.as_micros())
+        .bind(input.discount.as_micros())
+        .bind(input.pricing_epoch)
+        .bind(&input.pricing_snapshot)
+        .bind(input.latency_ms)
+        .bind(input.ttft_ms)
+        .bind(input.is_stream)
+        .bind(input.retry_count)
+        .bind(input.failover_count)
+        .bind(input.upstream_status)
+        .bind(input.error_code)
+        .bind(input.node)
+        .bind(input.sticky_layer)
+        .bind(input.client_type)
+        .bind(input.upstream_cost.map(Money::as_micros))
+        .bind(input.client_ip)
+        .bind(input.pool.as_i16())
+        .bind(usage_details)
+        .bind(&input.source_window)
+        .bind(input.event_type)
+        .bind(input.delta_micro)
+        .bind(input.balance_after.map(Money::as_micros))
+        .bind(event_payload)
+        .bind(outbox_payload)
+        .bind(insert_billing_sync)
+        .fetch_one(&mut **tx)
+        .await?;
 
     if already_recorded {
         tracing::warn!(request_id = %input.request_id, "结算重放：request_id 已落账，跳过");
-        return Ok(false);
+        return Ok(SettlementWrite {
+            inserted: false,
+            has_other_pending: true,
+        });
     }
     // 钱包余额快照列（展示用；真理源 = 事件流，M2 reconciler 校准）。订阅池不落 PG 快照。
     // 两条快照 UPDATE 都必须命中一行：应用不硬删用户与 key，命中 0 行只能是库被绕过应用改过。
@@ -495,7 +533,10 @@ pub async fn record_settlement_in_tx(
         return Err(LedgerError::InvalidSettlement);
     }
 
-    Ok(true)
+    Ok(SettlementWrite {
+        inserted: true,
+        has_other_pending,
+    })
 }
 
 mod refunds;

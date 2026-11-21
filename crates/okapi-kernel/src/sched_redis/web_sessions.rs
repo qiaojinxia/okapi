@@ -1,8 +1,50 @@
 //! 门户 / 管理后台的 web 会话（cookie sid → 用户，7 天滑动）。
 use super::SchedulerRedis;
-use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface, SetsInterface};
+use fred::interfaces::{HashesInterface, KeysInterface, SetsInterface};
+use okapi_store::CachedScript;
 
 const WEB_SESSION_TTL_SECS: i64 = 7 * 24 * 3600;
+
+static CREATE_SCRIPT: CachedScript = CachedScript::new(
+    r"
+          local idx_type=redis.call('TYPE',KEYS[2]).ok
+          local meta_type=redis.call('TYPE',KEYS[3]).ok
+          if idx_type~='none' and idx_type~='set' then return redis.error_reply('invalid session index') end
+          if meta_type~='none' and meta_type~='hash' then return redis.error_reply('invalid session metadata') end
+          redis.call('SADD',KEYS[2],ARGV[1])
+          redis.call('EXPIRE',KEYS[2],ARGV[3])
+          redis.call('HSET',KEYS[3],'ip',ARGV[4],'ua',ARGV[5],'created_at',ARGV[6],'created_ms',ARGV[7])
+          redis.call('EXPIRE',KEYS[3],ARGV[3])
+          redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3])
+          return 1
+        ",
+);
+static CHECK_SCRIPT: CachedScript = CachedScript::new(
+    r"
+          if redis.call('GET',KEYS[1]) ~= ARGV[2] then return 0 end
+          if redis.call('SISMEMBER',KEYS[2],ARGV[1]) ~= 1 then return 0 end
+          redis.call('EXPIRE',KEYS[1],ARGV[3])
+          redis.call('EXPIRE',KEYS[2],ARGV[3])
+          redis.call('EXPIRE',KEYS[3],ARGV[3])
+          return 1
+        ",
+);
+static DEL_SCRIPT: CachedScript = CachedScript::new(
+    r"
+          redis.call('SREM',KEYS[2],ARGV[1])
+          return redis.call('DEL',KEYS[1],KEYS[3])
+        ",
+);
+static REVOKE_SCRIPT: CachedScript = CachedScript::new(
+    r"
+          local members=redis.call('SMEMBERS',KEYS[1])
+          for _,sid in ipairs(members) do
+            redis.call('DEL',ARGV[1]..'web:'..sid,ARGV[1]..'meta:'..sid)
+          end
+          redis.call('DEL',KEYS[1])
+          return #members
+        ",
+);
 
 /// 门户会话列表行（不含 cookie 原文以外的敏感字段；sid 本身是能力令牌，仅回给属主）。
 #[derive(Debug, Clone)]
@@ -63,22 +105,9 @@ impl SchedulerRedis {
         // Index first, valid session last. Lua is atomic but does not roll back
         // command errors: this ordering also handles ACL rejection safely.
         let now = chrono::Utc::now();
-        let script = r"
-          local idx_type=redis.call('TYPE',KEYS[2]).ok
-          local meta_type=redis.call('TYPE',KEYS[3]).ok
-          if idx_type~='none' and idx_type~='set' then return redis.error_reply('invalid session index') end
-          if meta_type~='none' and meta_type~='hash' then return redis.error_reply('invalid session metadata') end
-          redis.call('SADD',KEYS[2],ARGV[1])
-          redis.call('EXPIRE',KEYS[2],ARGV[3])
-          redis.call('HSET',KEYS[3],'ip',ARGV[4],'ua',ARGV[5],'created_at',ARGV[6],'created_ms',ARGV[7])
-          redis.call('EXPIRE',KEYS[3],ARGV[3])
-          redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3])
-          return 1
-        ";
-        let result: Result<i64, _> = self
-            .client
+        let result: Result<i64, _> = CREATE_SCRIPT
             .eval(
-                script,
+                &self.client,
                 vec![web, idx, meta],
                 vec![
                     sid.to_owned(),
@@ -111,18 +140,9 @@ impl SchedulerRedis {
         };
         // Verify mapping + membership and slide all three TTLs atomically with
         // revocation, so a replaced or revoked session cannot be authorized.
-        let script = r"
-          if redis.call('GET',KEYS[1]) ~= ARGV[2] then return 0 end
-          if redis.call('SISMEMBER',KEYS[2],ARGV[1]) ~= 1 then return 0 end
-          redis.call('EXPIRE',KEYS[1],ARGV[3])
-          redis.call('EXPIRE',KEYS[2],ARGV[3])
-          redis.call('EXPIRE',KEYS[3],ARGV[3])
-          return 1
-        ";
-        let valid: i64 = self
-            .client
+        let valid: i64 = CHECK_SCRIPT
             .eval(
-                script,
+                &self.client,
                 vec![web, idx, meta],
                 vec![
                     sid.to_owned(),
@@ -138,13 +158,8 @@ impl SchedulerRedis {
         let Some((web, idx, meta)) = Self::web_session_keys(sid) else {
             return;
         };
-        let script = r"
-          redis.call('SREM',KEYS[2],ARGV[1])
-          return redis.call('DEL',KEYS[1],KEYS[3])
-        ";
-        let _: Result<i64, _> = self
-            .client
-            .eval(script, vec![web, idx, meta], vec![sid.to_owned()])
+        let _: Result<i64, _> = DEL_SCRIPT
+            .eval(&self.client, vec![web, idx, meta], vec![sid.to_owned()])
             .await;
     }
 
@@ -242,18 +257,9 @@ impl SchedulerRedis {
     /// 清空该用户全部 web 会话（密码重置 / 封禁 / 删除）。脚本里拼出的会话键与 KEYS[1]
     /// 同一个 `{user_id}` tag，Cluster 下仍在同槽。
     pub async fn web_session_revoke_user(&self, user_id: i64) {
-        let script = r"
-          local members=redis.call('SMEMBERS',KEYS[1])
-          for _,sid in ipairs(members) do
-            redis.call('DEL',ARGV[1]..'web:'..sid,ARGV[1]..'meta:'..sid)
-          end
-          redis.call('DEL',KEYS[1])
-          return #members
-        ";
-        let result: Result<i64, _> = self
-            .client
+        let result: Result<i64, _> = REVOKE_SCRIPT
             .eval(
-                script,
+                &self.client,
                 vec![format!("sess:{{{user_id}}}:idx")],
                 vec![format!("sess:{{{user_id}}}:")],
             )

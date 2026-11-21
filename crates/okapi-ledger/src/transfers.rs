@@ -1,7 +1,7 @@
 //! Durable credits/refunds. PG owns acceptance; Redis owns available balance.
 //! A receipt in the same hash makes an ambiguous Redis acknowledgement replayable.
 use crate::{BalanceLedger, LedgerError, Pool, holds::UserGuard};
-use fred::interfaces::{HashesInterface, LuaInterface};
+use fred::interfaces::HashesInterface;
 use okapi_domain::Money;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -120,6 +120,9 @@ pub(crate) async fn high_water(guard: &mut UserGuard, user_id: i64) -> Result<i6
     .await?)
 }
 
+static FUND_TRANSFER_SCRIPT: okapi_store::CachedScript =
+    okapi_store::CachedScript::new(include_str!("lua/fund_transfer.lua"));
+
 pub(crate) async fn synchronize(
     guard: &mut UserGuard,
     ledger: &BalanceLedger,
@@ -130,8 +133,8 @@ pub(crate) async fn synchronize(
         if row.applied_at.is_none() {
             let result: String = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                ledger.client().eval(
-                    include_str!("lua/fund_transfer.lua"),
+                FUND_TRANSFER_SCRIPT.eval(
+                    ledger.client(),
                     vec![format!("bal:{{{user_id}}}")],
                     vec![
                         row.id.to_string(),

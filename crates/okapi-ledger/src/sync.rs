@@ -14,20 +14,64 @@ pub async fn record(
 ) -> Result<bool, LedgerError> {
     let mut guard = UserGuard::acquire(pg, input.user_id).await?;
     let mut tx = guard.connection()?.begin().await?;
-    let inserted = record_in_tx(&mut tx, input.clone()).await?;
+    let write = record_in_tx_detailed(&mut tx, input.clone()).await?;
     tx.commit().await?;
-    if let Err(error) = guard.synchronize(ledger).await {
+    let sync_result = if write.inserted && !write.has_other_pending {
+        // Fast path: this settlement is the sole pending recovery entry for this user,
+        // so close its Redis receipt directly and delete its billing_sync row without
+        // re-probing all four recovery queues or re-reading billing_sync.
+        finish_single_sync(&mut guard, ledger, &input).await
+    } else {
+        guard.synchronize(ledger).await
+    };
+    if let Err(error) = sync_result {
         tracing::error!(request_id=%input.request_id, %error, "durable bill awaiting Redis recovery");
     }
-    Ok(inserted)
+    Ok(write.inserted)
+}
+
+async fn finish_single_sync(
+    guard: &mut UserGuard,
+    ledger: &BalanceLedger,
+    input: &SettlementInput<'_>,
+) -> Result<(), LedgerError> {
+    match ledger
+        .commit_in_source(
+            input.user_id,
+            input.api_key_id,
+            input.request_id,
+            input.amount,
+            input.pool,
+            input.source_window.as_deref(),
+        )
+        .await?
+    {
+        CommitOutcome::Committed { pool, .. } if pool == input.pool => {
+            sqlx::query("DELETE FROM billing_sync WHERE user_id = $1 AND request_id = $2")
+                .bind(input.user_id)
+                .bind(input.request_id)
+                .execute(guard.connection()?)
+                .await?;
+            Ok(())
+        }
+        CommitOutcome::Committed { .. } => Err(LedgerError::ReservationConflict),
+        CommitOutcome::NoReservation => guard.synchronize(ledger).await,
+    }
 }
 
 /// Caller holds the user guard. A durable task result can share this transaction
 /// with the exact ordinary charge, expiry revision and Redis recovery intent.
 pub async fn record_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    mut input: SettlementInput<'_>,
+    input: SettlementInput<'_>,
 ) -> Result<bool, LedgerError> {
+    Ok(record_in_tx_detailed(tx, input).await?.inserted)
+}
+
+async fn record_in_tx_detailed(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    mut input: SettlementInput<'_>,
+) -> Result<crate::pg::SettlementWrite, LedgerError> {
     if input.state != BillingState::Committed
         || input.log_type != 2
         || input.event_type != "commit"
@@ -45,8 +89,8 @@ pub async fn record_in_tx(
         input.source_window.as_deref(),
     )
     .await?;
-    let inserted = crate::pg::record_settlement_in_tx(tx, input.clone()).await?;
-    if inserted {
+    let write = crate::pg::record_settlement_with_sync_in_tx(tx, input.clone(), true).await?;
+    if write.inserted {
         if expired && !input.amount.is_zero() {
             crate::windows::revise_expiry(
                 tx,
@@ -58,10 +102,6 @@ pub async fn record_in_tx(
             )
             .await?;
         }
-        sqlx::query!(
-            "INSERT INTO billing_sync (request_id,user_id,api_key_id,amount_micro,pool,source_window) VALUES ($1,$2,$3,$4,$5,$6)",
-            input.request_id, input.user_id, input.api_key_id, input.amount.as_micros(), input.pool.as_i16(), input.source_window
-        ).execute(&mut **tx).await?;
     } else {
         let existing = sqlx::query!(
             r#"SELECT user_id AS "user_id!",api_key_id,amount_micro AS "amount_micro!",pool AS "pool!",status AS "status!",source_window FROM billing_financial_records WHERE request_id=$1 ORDER BY created_at DESC LIMIT 1"#,
@@ -77,7 +117,7 @@ pub async fn record_in_tx(
             return Err(LedgerError::ReservationConflict);
         }
     }
-    Ok(inserted)
+    Ok(write)
 }
 
 /// Finish pending Redis changes before reading totals for repair or changing a

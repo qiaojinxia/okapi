@@ -1,57 +1,58 @@
-//! Redis 热账本：四个 Lua 契约的强类型封装。
+//! Redis 热账本：Lua 契约的强类型封装（预哈希 `EVALSHA` + `NOSCRIPT` 自动回退 `EVAL`）。
 //!
-//! M1 用 EVAL 全量下发脚本（正确优先）；EVALSHA/Script 缓存在 M2 引入。
-//! 限速为固定分钟窗计数（GCRA 滑窗 M2），键形状见 docs/database.md §2.1。
+//! 限速为固定分钟窗计数，键形状见 docs/database.md §2.1。
 
 use crate::error::LedgerError;
 use chrono::{DateTime, Utc};
 use fred::clients::Client;
-use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface};
+use fred::interfaces::{HashesInterface, KeysInterface};
 use fred::types::Value;
 use okapi_domain::Money;
+use okapi_store::CachedScript;
 use uuid::Uuid;
 
-const RESERVE_LUA: &str = concat!(
+static RESERVE_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/hold_concurrency.lua"),
     "\n",
     include_str!("lua/reserve.lua")
-);
-const COMMIT_LUA: &str = concat!(
+));
+static COMMIT_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/close_reservation.lua"),
     "\n",
     include_str!("lua/commit.lua")
-);
-const REFUND_LUA: &str = concat!(
+));
+static REFUND_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/close_reservation.lua"),
     "\n",
     include_str!("lua/refund.lua")
-);
-const REPAIR_LUA: &str = concat!(
+));
+static REPAIR_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/repair.lua")
-);
-const CREDIT_POOL_LUA: &str = concat!(
+));
+static CREDIT_POOL_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/credit_pool.lua")
-);
-const DRAIN_LUA: &str = concat!(
+));
+static DRAIN_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/drain.lua")
-);
-const SUB_SET_LUA: &str = concat!(
+));
+static SUB_SET_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
     include_str!("lua/sub_set.lua")
-);
+));
+static TIME_SCRIPT: CachedScript = CachedScript::new("return redis.call('TIME')");
 
 /// 预扣悬置时限：超时未结算的预扣由对账任务懒清理（M2 reconciler）。
 const RESERVATION_TTL_MS: i64 = 600_000;
@@ -253,7 +254,7 @@ impl BalanceLedger {
             now.timestamp().to_string(),
         ];
 
-        let reply: Value = self.client.eval(RESERVE_LUA, keys, args).await?;
+        let reply: Value = RESERVE_SCRIPT.eval(&self.client, keys, args).await?;
         let items = as_array(&reply)?;
         match (first_i64(items), second_str(items)) {
             (Some(1), _) => Ok(ReserveOutcome::Reserved {
@@ -346,7 +347,7 @@ impl BalanceLedger {
         if let Some(source) = source_window {
             args.push(source.to_owned());
         }
-        let reply: Value = self.client.eval(COMMIT_LUA, keys, args).await?;
+        let reply: Value = COMMIT_SCRIPT.eval(&self.client, keys, args).await?;
         let items = as_array(&reply)?;
         match (first_i64(items), second_str(items)) {
             (Some(1), _) => Ok(CommitOutcome::Committed {
@@ -388,7 +389,7 @@ impl BalanceLedger {
     ) -> Result<RefundOutcome, LedgerError> {
         let keys = vec![Self::bal_key(user_id), Self::conc_key(user_id, api_key_id)];
         let args = vec![request_id.to_string(), api_key_id.to_string()];
-        let reply: Value = self.client.eval(REFUND_LUA, keys, args).await?;
+        let reply: Value = REFUND_SCRIPT.eval(&self.client, keys, args).await?;
         let items = as_array(&reply)?;
         match (first_i64(items), second_str(items)) {
             (Some(1), _) => Ok(RefundOutcome {
@@ -416,10 +417,9 @@ impl BalanceLedger {
         pool: Pool,
     ) -> Result<Money, LedgerError> {
         // 与其余资金脚本同一不变式：|余额| ≤ 2^53−1，越界整笔拒绝，不留下 reserve 读不了的余额
-        let after: String = self
-            .client
+        let after: String = CREDIT_POOL_SCRIPT
             .eval(
-                CREDIT_POOL_LUA,
+                &self.client,
                 vec![Self::bal_key(user_id)],
                 vec![pool.field().to_owned(), amount.as_micros().to_string()],
             )
@@ -451,10 +451,9 @@ impl BalanceLedger {
         sub_until: i64,
         epoch: &str,
     ) -> Result<SubSetOutcome, LedgerError> {
-        let reply: Value = self
-            .client
+        let reply: Value = SUB_SET_SCRIPT
             .eval(
-                SUB_SET_LUA,
+                &self.client,
                 vec![Self::bal_key(user_id)],
                 vec![
                     quota.as_micros().to_string(),
@@ -506,10 +505,9 @@ impl BalanceLedger {
     /// 各自按结算/退款路径终结）。avail ≤ 0 时不动返回 0。
     pub async fn drain(&self, user_id: i64) -> Result<Money, LedgerError> {
         // 返回十进制字符串：大额经 Lua double 回传会被取整
-        let drained: String = self
-            .client
+        let drained: String = DRAIN_SCRIPT
             .eval(
-                DRAIN_LUA,
+                &self.client,
                 vec![Self::bal_key(user_id)],
                 Vec::<String>::new(),
             )
@@ -523,13 +521,8 @@ impl BalanceLedger {
     /// Redis 服务器时钟。预扣截止时间按它写入，sweep 也按它判过期：
     /// 各副本本机时钟漂移不影响在途保护窗。
     pub async fn server_now(&self) -> Result<chrono::DateTime<chrono::Utc>, LedgerError> {
-        let (secs, micros): (String, String) = self
-            .client
-            .eval(
-                "return redis.call('TIME')",
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )
+        let (secs, micros): (String, String) = TIME_SCRIPT
+            .eval(&self.client, Vec::<String>::new(), Vec::<String>::new())
             .await?;
         let secs: i64 = secs
             .parse()
@@ -567,10 +560,9 @@ impl BalanceLedger {
         target: Money,
         pool: Pool,
     ) -> Result<RepairOutcome, LedgerError> {
-        let reply: Value = self
-            .client
+        let reply: Value = REPAIR_SCRIPT
             .eval(
-                REPAIR_LUA,
+                &self.client,
                 vec![Self::bal_key(user_id)],
                 vec![target.as_micros().to_string(), pool.field().to_owned()],
             )

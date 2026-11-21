@@ -649,3 +649,34 @@ async fn batch_reservation_read_matches_per_user_reads_and_isolates_a_corrupt_us
     let single = second.ledger.list_reservations(second.uid).await.unwrap();
     assert_eq!(single.len(), read[1].as_ref().unwrap().len());
 }
+
+/// `CachedScript` 默认走 `EVALSHA`；服务端 `SCRIPT FLUSH` 清空缓存后遇到 `NOSCRIPT`
+/// 必须透明回退一次 `EVAL` 并重新加载缓存，不得把冷启动/主从切换暴露为账本错误。
+#[tokio::test]
+async fn evalsha_recovers_after_script_flush() {
+    use fred::interfaces::LuaInterface;
+    let bed = Bed::new().await;
+    bed.redis.script_flush(false).await.unwrap();
+    bed.ledger
+        .credit(bed.uid, Money::from_micros(50_000))
+        .await
+        .unwrap();
+    let req1 = Uuid::new_v4();
+    assert_eq!(reserved_balance(&bed.reserve(req1, 10_000).await), 40_000);
+    // Flush again between reserve and commit to exercise NOSCRIPT on COMMIT_SCRIPT too.
+    bed.redis.script_flush(false).await.unwrap();
+    assert!(matches!(
+        bed.commit(req1, 7_500).await,
+        CommitOutcome::Committed { .. }
+    ));
+    assert_eq!(bed.avail().await, 42_500);
+
+    // Warm path immediately after reload succeeds via EVALSHA.
+    let req2 = Uuid::new_v4();
+    assert_eq!(reserved_balance(&bed.reserve(req2, 5_000).await), 37_500);
+    bed.redis.script_flush(false).await.unwrap();
+    let refunded = bed.ledger.refund(bed.uid, KID, req2).await.unwrap();
+    assert!(refunded.closed);
+    assert_eq!(refunded.released.as_micros(), 5_000);
+    assert_eq!(bed.avail().await, 42_500);
+}

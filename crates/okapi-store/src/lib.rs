@@ -45,4 +45,4 @@ pub use error::StoreError;
 pub use pg::{
     background_pg_pool_size, connect_pg, connect_pg_with_max, default_pg_pool_size, run_migrations,
 };
-pub use redis::connect_redis;
+pub use redis::{CachedScript, connect_redis};

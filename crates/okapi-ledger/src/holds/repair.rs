@@ -4,7 +4,20 @@ use super::{
 };
 use crate::{BalanceLedger, LedgerError, RepairOutcome};
 use okapi_domain::Money;
+use okapi_store::CachedScript;
 use serde_json::{Value, json};
+
+static BALANCE_STATE_SCRIPT: CachedScript = CachedScript::new(concat!(
+    include_str!("../lua/balance_state.lua"),
+    "\nreturn ledger_balance_state(KEYS[1])"
+));
+static HOLD_REPAIR_SCRIPT: CachedScript = CachedScript::new(concat!(
+    include_str!("../lua/balance_state.lua"),
+    "\n",
+    include_str!("../lua/reservation_state.lua"),
+    "\n",
+    include_str!("../lua/hold_repair.lua")
+));
 
 pub struct Repaired {
     pub wallet: RepairOutcome,
@@ -22,10 +35,7 @@ impl UserGuard {
     ) -> Result<Repaired, LedgerError> {
         let expected = hot::eval(
             ledger,
-            concat!(
-                include_str!("../lua/balance_state.lua"),
-                "\nreturn ledger_balance_state(KEYS[1])"
-            ),
+            &BALANCE_STATE_SCRIPT,
             vec![format!("bal:{{{}}}", self.user_id)],
             Vec::new(),
         )
@@ -60,13 +70,7 @@ impl UserGuard {
         let fund_sequence = crate::transfers::high_water(self, self.user_id).await?;
         let raw = hot::eval(
             ledger,
-            concat!(
-                include_str!("../lua/balance_state.lua"),
-                "\n",
-                include_str!("../lua/reservation_state.lua"),
-                "\n",
-                include_str!("../lua/hold_repair.lua")
-            ),
+            &HOLD_REPAIR_SCRIPT,
             keys,
             vec![
                 wallet.as_micros().to_string(),

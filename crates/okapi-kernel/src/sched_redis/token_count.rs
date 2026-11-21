@@ -2,9 +2,9 @@
 use super::SchedulerRedis;
 use crate::error::AppError;
 use axum::http::StatusCode;
-use fred::interfaces::{LuaInterface, SortedSetsInterface};
+use fred::interfaces::SortedSetsInterface;
 use okapi_api::codes;
-use okapi_store::AuthedKey;
+use okapi_store::{AuthedKey, CachedScript};
 use uuid::Uuid;
 
 /// key 没设 RPM / 并发上限时计数用的缺省值。
@@ -18,7 +18,8 @@ pub struct CountPermit {
 
 impl CountPermit {
     pub async fn acquire(sched: &SchedulerRedis, key: &AuthedKey) -> Result<Self, AppError> {
-        const LUA: &str = r"
+        static SCRIPT: CachedScript = CachedScript::new(
+            r"
             redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
             if tonumber(redis.call('GET', KEYS[2]) or '0') >= tonumber(ARGV[3]) then return 1 end
             if tonumber(ARGV[4]) > 0 and tonumber(redis.call('GET', KEYS[3]) or '0') >= tonumber(ARGV[4]) then return 2 end
@@ -28,7 +29,8 @@ impl CountPermit {
             redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + 90000, ARGV[2])
             redis.call('EXPIRE', KEYS[1], 120)
             return 0
-        ";
+        ",
+        );
         let now = chrono::Utc::now().timestamp_millis();
         let prefix = format!("count:{{{}}}", key.key_id);
         let lease = format!("{prefix}:leases");
@@ -41,10 +43,9 @@ impl CountPermit {
             .max_concurrency
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_CONCURRENCY);
-        let outcome: i64 = sched
-            .client
+        let outcome: i64 = SCRIPT
             .eval(
-                LUA,
+                &sched.client,
                 vec![
                     lease.clone(),
                     format!("{prefix}:rpm:{}", now / 60_000),

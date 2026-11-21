@@ -102,6 +102,61 @@ pub async fn read_for_with_burn(
         .then_some((observation.snapshot, observation.burn_micro))
 }
 
+/// 一次管道读齐所有带额度钩子候选 key 的观测与烧速基线（单键 GET，Cluster 下无 CROSSSLOT）。
+pub async fn read_batch_with_burn<'a, I>(
+    state: &AppState,
+    candidates: I,
+) -> std::collections::HashMap<i64, (okapi_providers::account::quota::Snapshot, Option<i64>)>
+where
+    I: IntoIterator<Item = &'a okapi_store::ChannelCandidate>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let targets: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let hook = okapi_providers::registry::lookup(&candidate.provider)?
+                .account
+                .filter(|hook| hook.capabilities().quota)?;
+            seen.insert(candidate.channel_key_id)
+                .then_some((candidate, hook))
+        })
+        .collect();
+    if targets.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let pipe = state.sched.client().pipeline();
+    for (candidate, _) in &targets {
+        if pipe
+            .get::<(), _>(format!("quota:ck:{}", candidate.channel_key_id))
+            .await
+            .is_err()
+        {
+            return std::collections::HashMap::new();
+        }
+    }
+    let payloads: Vec<Option<String>> = match pipe.all().await {
+        Ok(values) => values,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let now = chrono::Utc::now().timestamp();
+    targets
+        .into_iter()
+        .zip(payloads)
+        .filter_map(|((candidate, hook), payload)| {
+            let mut observation: Observation = serde_json::from_str(payload.as_deref()?).ok()?;
+            if now.saturating_sub(observation.snapshot.observed_at) > OBSERVATION_MAX_AGE_SECS {
+                return None;
+            }
+            hook.scope_quota(&mut observation.snapshot);
+            let credential = stored_credential(&candidate.provider, &candidate.credential).ok()?;
+            (identity(&candidate.provider, &credential) == observation.identity).then_some((
+                candidate.channel_key_id,
+                (observation.snapshot, observation.burn_micro),
+            ))
+        })
+        .collect()
+}
+
 pub async fn read(state: &AppState, key: i64) -> Option<okapi_providers::account::quota::Snapshot> {
     let mut observation = observation(state, key).await?;
     // A reauthorization to another account must never inherit the old quota state.

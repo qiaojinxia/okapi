@@ -104,6 +104,51 @@ async fn read(
     ").bind(channel).bind(period).bind(zone).bind(interval).fetch_one(&mut **tx).await?)
 }
 
+async fn read_requests_only(
+    tx: &mut Transaction<'_, Postgres>,
+    channel: i64,
+    period: &str,
+) -> Result<(DateTime<Utc>, DateTime<Utc>, i64), StoreError> {
+    let interval = match period {
+        "hour" => "1 hour",
+        "day" => "1 day",
+        "week" => "1 week",
+        "month" => "1 month",
+        _ => return Err(StoreError::InvalidData("usage_period")),
+    };
+    let zone = timezone::machine_timezone()?;
+    // PostgreSQL short-circuits COALESCE: once channel_usage_windows has a row for
+    // this window, the billing_records fallback count is never executed.
+    Ok(sqlx::query_as(
+        r"
+        WITH bounds AS (SELECT date_trunc($2,now() AT TIME ZONE $3) AS start,
+                               date_trunc($2,now(),$3) AS window_start),
+        period_window AS (SELECT window_start,
+                  CASE WHEN $2='hour' THEN window_start + interval '1 hour'
+                       ELSE (start + $4::text::interval) AT TIME ZONE $3 END AS window_end FROM bounds)
+        SELECT period_window.window_start,
+               period_window.window_end,
+               COALESCE(
+                   w.requests,
+                   (SELECT count(*)::bigint
+                      FROM billing_records
+                     WHERE channel_id=$1 AND log_type IN (2,5)
+                       AND created_at >= period_window.window_start
+                       AND created_at < period_window.window_end)
+               )::bigint AS requests
+          FROM period_window
+          LEFT JOIN channel_usage_windows w
+            ON w.channel_id=$1 AND w.period=$2 AND w.window_start=period_window.window_start
+        ",
+    )
+    .bind(channel)
+    .bind(period)
+    .bind(zone)
+    .bind(interval)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
 pub async fn snapshot(pool: &PgPool, channel: i64, period: &str) -> Result<Snapshot, StoreError> {
     let mut tx = pool.begin().await?;
     let value = read(&mut tx, channel, period).await?;
@@ -126,14 +171,25 @@ pub async fn admit(
         .bind(channel.to_string())
         .execute(&mut *tx)
         .await?;
-    let usage = read(&mut tx, channel, period).await?;
-    if requests.is_some_and(|cap| usage.requests >= cap)
-        || tokens.is_some_and(|cap| usage.tokens >= cap)
-        || cost.is_some_and(|cap| usage.unknown_cost_requests > 0 || usage.cost_micro >= cap)
-    {
-        tx.commit().await?;
-        return Ok(false);
-    }
+    let (window_start, window_end, current_requests) = if tokens.is_none() && cost.is_none() {
+        let (window_start, window_end, current_requests) =
+            read_requests_only(&mut tx, channel, period).await?;
+        if requests.is_some_and(|cap| current_requests >= cap) {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        (window_start, window_end, current_requests)
+    } else {
+        let usage = read(&mut tx, channel, period).await?;
+        if requests.is_some_and(|cap| usage.requests >= cap)
+            || tokens.is_some_and(|cap| usage.tokens >= cap)
+            || cost.is_some_and(|cap| usage.unknown_cost_requests > 0 || usage.cost_micro >= cap)
+        {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        (usage.window_start, usage.window_end, usage.requests)
+    };
     sqlx::query(
         r"INSERT INTO channel_usage_windows(channel_id,period,window_start,window_end,requests)
                   VALUES($1,$2,$3,$4,$5) ON CONFLICT(channel_id,period,window_start)
@@ -141,9 +197,9 @@ pub async fn admit(
     )
     .bind(channel)
     .bind(period)
-    .bind(usage.window_start)
-    .bind(usage.window_end)
-    .bind(usage.requests.saturating_add(1))
+    .bind(window_start)
+    .bind(window_end)
+    .bind(current_requests.saturating_add(1))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

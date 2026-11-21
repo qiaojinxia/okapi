@@ -1,7 +1,8 @@
 //! 跨副本的后台租约：OAuth 凭证刷新锁、出口探测轮次。
 use super::SchedulerRedis;
-use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::interfaces::KeysInterface;
 use fred::types::{Expiration, SetOptions};
+use okapi_store::CachedScript;
 
 impl SchedulerRedis {
     /// 刷新租约的时长（秒）。临界区里每一步都有上限（见 `credentials::oauth`），总长压得进它。
@@ -29,10 +30,12 @@ impl SchedulerRedis {
     /// 续租：锁仍归 `owner` 才把剩余时间拉回满额；返回是否续上。刷新成功后立刻续一次，
     /// 让"旧 refresh token 已作废 → 新凭据落盘"这一段有整段租约可用。
     pub async fn cred_lock_extend(&self, channel_key_id: i64, owner: &str) -> bool {
-        let renewed: Result<i64, _> = self
-            .client
+        static SCRIPT: CachedScript = CachedScript::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+        );
+        let renewed: Result<i64, _> = SCRIPT
             .eval(
-                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+                &self.client,
                 vec![format!("lock:cred:{channel_key_id}")],
                 vec![owner.to_owned(), Self::CRED_LOCK_TTL_SECS.to_string()],
             )
@@ -41,11 +44,16 @@ impl SchedulerRedis {
     }
 
     pub async fn cred_lock_release(&self, channel_key_id: i64, owner: &str) {
-        let _: Result<i64, _> = self.client.eval(
+        static SCRIPT: CachedScript = CachedScript::new(
             "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
-            vec![format!("lock:cred:{channel_key_id}")],
-            vec![owner],
-        ).await;
+        );
+        let _: Result<i64, _> = SCRIPT
+            .eval(
+                &self.client,
+                vec![format!("lock:cred:{channel_key_id}")],
+                vec![owner],
+            )
+            .await;
     }
 
     /// 出口代理后台探测的本轮租约（§11.41）：SET NX EX，拿到的副本执行这一轮。

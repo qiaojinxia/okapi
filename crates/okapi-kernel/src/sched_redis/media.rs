@@ -1,7 +1,8 @@
 //! 媒体端点的绑定与租约：视频任务 → 渠道 key、Realtime 每 key 连接租约。
 use super::SchedulerRedis;
-use fred::interfaces::{KeysInterface, LuaInterface, SortedSetsInterface};
+use fred::interfaces::{KeysInterface, SortedSetsInterface};
 use fred::types::Expiration;
+use okapi_store::CachedScript;
 
 impl SchedulerRedis {
     /// videos 任务 → 渠道 key 映射写入（48h；键含 user_id 天然租户隔离）。
@@ -36,7 +37,8 @@ impl SchedulerRedis {
     /// 到期时间按 Redis 服务器时钟算（同 `channel_permit`）：各副本本机时钟有偏差时，
     /// 快的那台会把别的副本刚续上的存活租约当成过期清掉，放进超额连接。
     pub async fn ws_lease_acquire(&self, key_id: i64, conn_id: &str, limit: i64) -> bool {
-        const LUA: &str = r"
+        static SCRIPT: CachedScript = CachedScript::new(
+            r"
             local t = redis.call('TIME')
             local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
             redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
@@ -44,11 +46,11 @@ impl SchedulerRedis {
             redis.call('ZADD', KEYS[1], now + 60000, ARGV[2])
             redis.call('PEXPIRE', KEYS[1], 6 * 3600 * 1000)
             return 1
-        ";
-        let result: Result<i64, _> = self
-            .client
+        ",
+        );
+        let result: Result<i64, _> = SCRIPT
             .eval(
-                LUA,
+                &self.client,
                 vec![Self::ws_lease_key(key_id)],
                 vec![limit.to_string(), conn_id.to_owned()],
             )
@@ -60,17 +62,19 @@ impl SchedulerRedis {
     /// 续租；返回 false = 租约已不在（过期被别的连接清掉、或已释放），会话应当结束。
     /// Redis 不可达时照旧放行：与 `ws_lease_acquire` 同为 fail-open，Redis 抖一下不该掐断所有会话。
     pub async fn ws_lease_renew(&self, key_id: i64, conn_id: &str) -> bool {
-        const LUA: &str = r"
+        static SCRIPT: CachedScript = CachedScript::new(
+            r"
             local t = redis.call('TIME')
             local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
             local old = redis.call('ZSCORE', KEYS[1], ARGV[1])
             if not old or tonumber(old) <= now then return 0 end
             redis.call('ZADD', KEYS[1], now + 60000, ARGV[1])
             return 1
-        ";
-        self.client
-            .eval::<i64, _, _, _>(
-                LUA,
+        ",
+        );
+        SCRIPT
+            .eval::<i64, _, _>(
+                &self.client,
                 vec![Self::ws_lease_key(key_id)],
                 vec![conn_id.to_owned()],
             )

@@ -11,7 +11,8 @@
 
 use axum::http::HeaderMap;
 use fred::clients::Client;
-use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::interfaces::KeysInterface;
+use okapi_store::CachedScript;
 use sha2::{Digest, Sha256};
 
 mod abuse_counters;
@@ -92,16 +93,18 @@ impl SchedulerRedis {
         delta: i64,
         ttl_secs: i64,
     ) -> Result<i64, fred::error::Error> {
-        const LUA: &str = r"
+        static SCRIPT: CachedScript = CachedScript::new(
+            r"
             local n = redis.call('INCRBY', KEYS[1], ARGV[1])
             if n == tonumber(ARGV[1]) or redis.call('TTL', KEYS[1]) == -1 then
                 redis.call('EXPIRE', KEYS[1], ARGV[2])
             end
             return n
-        ";
-        self.client
+        ",
+        );
+        SCRIPT
             .eval(
-                LUA,
+                &self.client,
                 vec![key.to_owned()],
                 vec![delta.to_string(), ttl_secs.to_string()],
             )
@@ -112,13 +115,19 @@ impl SchedulerRedis {
     /// 起算、到期归零重数；「连续失败几次」要的是只要还在连着失败就不归零，隔了 `ttl_secs` 没再失败
     /// 才作废。INCR 与 EXPIRE 同一脚本原子完成，理由同 [`Self::incr_with_ttl`]。
     pub async fn incr_sliding(&self, key: &str, ttl_secs: i64) -> Result<i64, fred::error::Error> {
-        const LUA: &str = r"
+        static SCRIPT: CachedScript = CachedScript::new(
+            r"
             local n = redis.call('INCR', KEYS[1])
             redis.call('EXPIRE', KEYS[1], ARGV[1])
             return n
-        ";
-        self.client
-            .eval(LUA, vec![key.to_owned()], vec![ttl_secs.to_string()])
+        ",
+        );
+        SCRIPT
+            .eval(
+                &self.client,
+                vec![key.to_owned()],
+                vec![ttl_secs.to_string()],
+            )
             .await
     }
 }

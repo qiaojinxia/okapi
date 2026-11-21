@@ -5,8 +5,9 @@
 
 use super::model::{self, Reading, ThetaState};
 use crate::state::AppState;
-use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::interfaces::KeysInterface;
 use fred::types::{Expiration, SetOptions};
+use okapi_store::CachedScript;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -174,12 +175,14 @@ pub async fn learn(state: &AppState, key: i64, window_secs: i64, reading: Readin
 /// 追加一条样本到这把 key 的留存（LPUSH + LTRIM，新的在前）。`gated`：响应头样本一分钟最多一条。
 pub async fn history_append(state: &AppState, key: i64, sample: &serde_json::Value, gated: bool) {
     // 追加、截断、续期同一个脚本：中途断开不会留下一个没有过期时间的无限增长的列表
-    const LUA: &str = r"
+    static SCRIPT: CachedScript = CachedScript::new(
+        r"
         redis.call('LPUSH', KEYS[1], ARGV[1])
         redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[2]) - 1)
         redis.call('EXPIRE', KEYS[1], ARGV[3])
         return 1
-    ";
+    ",
+    );
     let redis = state.sched.client();
     if gated {
         let acquired: Result<Option<String>, _> = redis
@@ -195,9 +198,9 @@ pub async fn history_append(state: &AppState, key: i64, sample: &serde_json::Val
             return;
         }
     }
-    let pushed: Result<i64, _> = redis
+    let pushed: Result<i64, _> = SCRIPT
         .eval(
-            LUA,
+            redis,
             vec![history_key(key)],
             vec![
                 sample.to_string(),

@@ -1,6 +1,6 @@
 //! 防滥用计数：敏感端点按 IP 限速、发信日配额、兑换码每 IP 次数。
 use super::SchedulerRedis;
-use fred::interfaces::LuaInterface;
+use okapi_store::CachedScript;
 
 impl SchedulerRedis {
     /// 关键接口每 IP 固定窗计数（60s；对齐 new-api rc.24 关键路由限流）。
@@ -27,8 +27,12 @@ impl SchedulerRedis {
     /// 核销失败回退计数（预查通过但翻转竞争失败时）。
     pub async fn redeem_ip_decr(&self, batch: uuid::Uuid, ip: &str) {
         // 只回退仍在窗口内的计数：对已过期的键 DECR 会凭空建出一个不带过期的 -1
-        const LUA: &str = "if redis.call('EXISTS', KEYS[1]) == 1 then return redis.call('DECR', KEYS[1]) end return 0";
+        static SCRIPT: CachedScript = CachedScript::new(
+            "if redis.call('EXISTS', KEYS[1]) == 1 then return redis.call('DECR', KEYS[1]) end return 0",
+        );
         let key = format!("redeem:ip:{batch}:{ip}");
-        let _: Result<i64, _> = self.client.eval(LUA, vec![key], Vec::<String>::new()).await;
+        let _: Result<i64, _> = SCRIPT
+            .eval(&self.client, vec![key], Vec::<String>::new())
+            .await;
     }
 }

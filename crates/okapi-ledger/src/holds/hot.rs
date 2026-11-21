@@ -1,21 +1,23 @@
 use super::{Hold, MAXIMUM_MICROS};
 use crate::{BalanceLedger, LedgerError};
 use chrono::{DateTime, Utc};
-use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface};
+use fred::interfaces::{HashesInterface, KeysInterface};
 use okapi_domain::Money;
+use okapi_store::CachedScript;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const RESERVE: &str = concat!(
+static RESERVE_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("../lua/hold_concurrency.lua"),
     "\n",
     include_str!("../lua/hold_reserve.lua")
-);
-const CLOSE: &str = concat!(
+));
+static CLOSE_SCRIPT: CachedScript = CachedScript::new(concat!(
     include_str!("../lua/hold_concurrency.lua"),
     "\n",
     include_str!("../lua/hold_close.lua")
-);
+));
+static SEAL_SCRIPT: CachedScript = CachedScript::new(include_str!("../lua/hold_seal.lua"));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HotHold {
@@ -89,7 +91,7 @@ pub(super) async fn seal(
 ) -> Result<Option<HotHold>, LedgerError> {
     let raw = eval(
         ledger,
-        include_str!("../lua/hold_seal.lua"),
+        &SEAL_SCRIPT,
         keys(hold),
         vec![
             hold.id.to_string(),
@@ -125,13 +127,13 @@ pub(super) fn keys(hold: &Hold) -> Vec<String> {
 }
 pub(super) async fn eval(
     ledger: &BalanceLedger,
-    script: &str,
+    script: &CachedScript,
     keys: Vec<String>,
     args: Vec<String>,
 ) -> Result<String, LedgerError> {
     tokio::time::timeout(
         Duration::from_secs(10),
-        ledger.client().eval(script, keys, args),
+        script.eval(ledger.client(), keys, args),
     )
     .await
     .map_err(|_| LedgerError::HoldRecoveryRequired)?
@@ -193,7 +195,7 @@ pub(super) async fn reserve(
     keys.push(format!("conc:{{{}}}:k:{}", hold.user_id, hold.api_key_id));
     let raw = eval(
         ledger,
-        RESERVE,
+        &RESERVE_SCRIPT,
         keys,
         vec![
             hold.id.to_string(),
@@ -258,7 +260,7 @@ pub(super) async fn close(ledger: &BalanceLedger, hold: &Hold) -> Result<(), Led
         serde_json::to_string(&wanted).map_err(|_| LedgerError::InvalidHold("receipt"))?;
     let raw = eval(
         ledger,
-        CLOSE,
+        &CLOSE_SCRIPT,
         keys(hold),
         vec![hold.id.to_string(), encoded],
     )

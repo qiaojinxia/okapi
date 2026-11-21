@@ -50,7 +50,13 @@ pub async fn read(state: &AppState, key: i64) -> Option<RefreshHealth> {
 /// gateway 与 worker 会并发记同一把 key：读出原文、在本地算新值，只在原文没被别人改过时写回，
 /// 被抢先就重读再算。裸 GET→SET 会让并发的两次失败只记成一次，退避提前结束。
 pub async fn record(state: &AppState, key: i64, failure: Option<&str>) {
-    use fred::interfaces::LuaInterface;
+    static CAS_SCRIPT: okapi_store::CachedScript = okapi_store::CachedScript::new(
+        r"
+            local old=redis.call('GET',KEYS[1]) or ''
+            if old~=ARGV[1] then return 0 end
+            redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]); return 1
+        ",
+    );
     for _ in 0..8 {
         let raw = match read_raw(state, key).await {
             Ok(raw) => raw,
@@ -71,15 +77,9 @@ pub async fn record(state: &AppState, key: i64, failure: Option<&str>) {
         let Ok(payload) = serde_json::to_string(&health) else {
             return;
         };
-        let written: Result<i64, _> = state
-            .sched
-            .client()
+        let written: Result<i64, _> = CAS_SCRIPT
             .eval(
-                r"
-            local old=redis.call('GET',KEYS[1]) or ''
-            if old~=ARGV[1] then return 0 end
-            redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]); return 1
-        ",
+                state.sched.client(),
                 vec![format!("oauth:refresh:{key}")],
                 vec![
                     raw.unwrap_or_default(),

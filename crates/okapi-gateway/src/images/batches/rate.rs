@@ -1,12 +1,13 @@
 //! Admission counters share the normal generation windows and count expanded
 //! upstream requests. This gate never estimates tokens or changes billing usage.
 use super::{AppState, store};
-use fred::{clients::Client, interfaces::LuaInterface};
-use okapi_store::AuthedKey;
+use fred::clients::Client;
+use okapi_store::{AuthedKey, CachedScript};
 use std::time::Duration;
 
 const AXES: [&str; 5] = ["rpm", "rpd", "model_rpm", "group_rpm", "group_rph"];
-const LUA: &str = r"
+static ADMISSION_SCRIPT: CachedScript = CachedScript::new(
+    r"
     local units = tonumber(ARGV[1])
     local maximum = 9007199254740991
     local ttl = {120, 172800, 120, 120, 7200}
@@ -32,7 +33,8 @@ const LUA: &str = r"
         end
     end
     return 0
-";
+",
+);
 
 pub(super) struct Admission {
     client: Client,
@@ -89,14 +91,16 @@ impl Admission {
         ];
         let mut args = vec![self.units.to_string()];
         args.extend(self.caps.iter().map(ToString::to_string));
-        let outcome: i64 =
-            tokio::time::timeout(Duration::from_secs(3), self.client.eval(LUA, keys, args))
-                .await
-                .map_err(|_| store::Error::AdmissionUnavailable)?
-                .map_err(|error| {
-                    tracing::warn!(%error, "batch rate admission unavailable");
-                    store::Error::AdmissionUnavailable
-                })?;
+        let outcome: i64 = tokio::time::timeout(
+            Duration::from_secs(3),
+            ADMISSION_SCRIPT.eval(&self.client, keys, args),
+        )
+        .await
+        .map_err(|_| store::Error::AdmissionUnavailable)?
+        .map_err(|error| {
+            tracing::warn!(%error, "batch rate admission unavailable");
+            store::Error::AdmissionUnavailable
+        })?;
         match outcome {
             0 => Ok(()),
             1..=5 => Err(store::Error::RateLimited(

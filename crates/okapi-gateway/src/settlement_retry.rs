@@ -1,9 +1,12 @@
 //! Redis journal bridges PG outages; request_id remains the PG idempotency key.
 //! Capacity includes quarantined records: old bills are never evicted.
 use super::state::AppState;
-use fred::interfaces::{HashesInterface, LuaInterface, SortedSetsInterface};
+#[cfg(test)]
+use fred::interfaces::LuaInterface;
+use fred::interfaces::{HashesInterface, SortedSetsInterface};
 use futures::{StreamExt, stream};
 use okapi_ledger::SettlementInput;
+use okapi_store::CachedScript;
 
 const PAYLOADS: &str = "settlement:{retry}:payloads";
 const ORDER: &str = "settlement:{retry}:order";
@@ -34,6 +37,21 @@ if existing==0 and (retained>=tonumber(ARGV[4]) or redis.call('HEXISTS',KEYS[3],
 redis.call('HSET',KEYS[1],ARGV[1],ARGV[2])
 redis.call('ZADD',KEYS[2],'NX',ARGV[3],ARGV[1])
 return 1";
+static SAVE_SCRIPT: CachedScript = CachedScript::new(SAVE);
+static DUE_NOW_SCRIPT: CachedScript =
+    CachedScript::new("return redis.call('ZADD',KEYS[1],'XX',ARGV[1],ARGV[2])");
+static REMOVE_SCRIPT: CachedScript = CachedScript::new(
+    "for _,id in ipairs(ARGV) do redis.call('HDEL',KEYS[1],id); redis.call('ZREM',KEYS[2],id); redis.call('HDEL',KEYS[3],id) end return 1",
+);
+static CLEAN_ORPHAN_SCRIPT: CachedScript = CachedScript::new(
+    "if redis.call('HEXISTS',KEYS[1],ARGV[1])==0 then redis.call('ZREM',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[3],ARGV[1]) end return 1",
+);
+static DEFER_SCRIPT: CachedScript = CachedScript::new(
+    "local n=redis.call('HINCRBY',KEYS[2],ARGV[1],1); local wait=math.min(300000,1000*2^math.min(n,9)); redis.call('ZADD',KEYS[1],tonumber(ARGV[2])+wait,ARGV[1]); return 1",
+);
+static QUARANTINE_SCRIPT: CachedScript = CachedScript::new(
+    "local p=redis.call('HGET',KEYS[1],ARGV[1]); if p==ARGV[2] then redis.call('HSET',KEYS[3],ARGV[1],p);redis.call('HDEL',KEYS[1],ARGV[1]);redis.call('ZREM',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[4],ARGV[1]) end return 1",
+);
 
 fn configured_limit(name: &str, default: i64, max: i64) -> i64 {
     okapi_store::env_config::number(name, default, |v| *v > 0 && *v <= max)
@@ -60,11 +78,9 @@ pub async fn save_in_flight(state: &AppState, input: &SettlementInput<'_>) -> an
 /// 网关自己的重试都失败了：把在途留底改为立即可接手（条目不存在时不新建）。
 pub async fn due_now(state: &AppState, id: uuid::Uuid) -> anyhow::Result<()> {
     let [_, order, _, _] = keys(state);
-    let _: i64 = state
-        .sched
-        .client()
+    let _: i64 = DUE_NOW_SCRIPT
         .eval(
-            "return redis.call('ZADD',KEYS[1],'XX',ARGV[1],ARGV[2])",
+            state.sched.client(),
             vec![order.as_ref()],
             vec![
                 chrono::Utc::now().timestamp_millis().to_string(),
@@ -90,11 +106,9 @@ async fn save_at(state: &AppState, input: &SettlementInput<'_>, due_ms: i64) -> 
         payload.len() <= MAX_PAYLOAD_BYTES,
         "settlement journal payload too large"
     );
-    let accepted: i64 = state
-        .sched
-        .client()
+    let accepted: i64 = SAVE_SCRIPT
         .eval(
-            SAVE,
+            state.sched.client(),
             vec![payloads.as_ref(), order.as_ref(), quarantine.as_ref()],
             vec![
                 input.request_id.to_string(),
@@ -120,10 +134,13 @@ async fn remove_ids(state: &AppState, ids: Vec<String>) -> anyhow::Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    let _: i64 = state.sched.client().eval(
-        "for _,id in ipairs(ARGV) do redis.call('HDEL',KEYS[1],id); redis.call('ZREM',KEYS[2],id); redis.call('HDEL',KEYS[3],id) end return 1",
-        vec![payloads.as_ref(),order.as_ref(),attempts.as_ref()],ids,
-    ).await?;
+    let _: i64 = REMOVE_SCRIPT
+        .eval(
+            state.sched.client(),
+            vec![payloads.as_ref(), order.as_ref(), attempts.as_ref()],
+            ids,
+        )
+        .await?;
     Ok(())
 }
 
@@ -164,10 +181,13 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
     let Some(payload): Option<String> = state.sched.client().hget(payloads.as_ref(), &id).await?
     else {
         // A concurrent save may have populated it since HGET. Check again atomically.
-        let _: i64=state.sched.client().eval(
-            "if redis.call('HEXISTS',KEYS[1],ARGV[1])==0 then redis.call('ZREM',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[3],ARGV[1]) end return 1",
-            vec![payloads.as_ref(),order.as_ref(),attempts.as_ref()],vec![id],
-        ).await?;
+        let _: i64 = CLEAN_ORPHAN_SCRIPT
+            .eval(
+                state.sched.client(),
+                vec![payloads.as_ref(), order.as_ref(), attempts.as_ref()],
+                vec![id],
+            )
+            .await?;
         return Ok(None);
     };
     let owned: okapi_ledger::pg::OwnedSettlementInput = match serde_json::from_str::<
@@ -250,19 +270,33 @@ fn permanent_failure(error: &okapi_ledger::LedgerError) -> bool {
 
 async fn defer(state: &AppState, id: &str) -> anyhow::Result<()> {
     let [_, order, attempts, _] = keys(state);
-    let _: i64=state.sched.client().eval(
-        "local n=redis.call('HINCRBY',KEYS[2],ARGV[1],1); local wait=math.min(300000,1000*2^math.min(n,9)); redis.call('ZADD',KEYS[1],tonumber(ARGV[2])+wait,ARGV[1]); return 1",
-        vec![order.as_ref(),attempts.as_ref()],vec![id.to_owned(),chrono::Utc::now().timestamp_millis().to_string()],
-    ).await?;
+    let _: i64 = DEFER_SCRIPT
+        .eval(
+            state.sched.client(),
+            vec![order.as_ref(), attempts.as_ref()],
+            vec![
+                id.to_owned(),
+                chrono::Utc::now().timestamp_millis().to_string(),
+            ],
+        )
+        .await?;
     Ok(())
 }
 
 async fn quarantine(state: &AppState, id: &str, payload: &str) -> anyhow::Result<()> {
     let [payloads, order, attempts, quarantine] = keys(state);
-    let _: i64=state.sched.client().eval(
-        "local p=redis.call('HGET',KEYS[1],ARGV[1]); if p==ARGV[2] then redis.call('HSET',KEYS[3],ARGV[1],p);redis.call('HDEL',KEYS[1],ARGV[1]);redis.call('ZREM',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[4],ARGV[1]) end return 1",
-        vec![payloads.as_ref(),order.as_ref(),quarantine.as_ref(),attempts.as_ref()],vec![id.to_owned(),payload.to_owned()],
-    ).await?;
+    let _: i64 = QUARANTINE_SCRIPT
+        .eval(
+            state.sched.client(),
+            vec![
+                payloads.as_ref(),
+                order.as_ref(),
+                quarantine.as_ref(),
+                attempts.as_ref(),
+            ],
+            vec![id.to_owned(), payload.to_owned()],
+        )
+        .await?;
     Ok(())
 }
 

@@ -10,8 +10,9 @@
 //! Redis 故障放行。Webhook 可配置签名 secret，逐用户余额须 include_balances 显式开启。
 
 use fred::clients::Client;
-use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::interfaces::KeysInterface;
 use fred::types::{Expiration, SetOptions};
+use okapi_store::CachedScript;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::time::Duration;
@@ -210,11 +211,12 @@ impl Notifier {
         interval: i64,
         success: bool,
     ) {
-        const LUA: &str = "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end if ARGV[2]=='1' then redis.call('SET',KEYS[1],'sent','EX',ARGV[3]) else redis.call('DEL',KEYS[1]) end return 1";
-        let _: Result<i64, _> = self
-            .redis
+        static SCRIPT: CachedScript = CachedScript::new(
+            "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end if ARGV[2]=='1' then redis.call('SET',KEYS[1],'sent','EX',ARGV[3]) else redis.call('DEL',KEYS[1]) end return 1",
+        );
+        let _: Result<i64, _> = SCRIPT
             .eval(
-                LUA,
+                &self.redis,
                 vec![format!("notify:mute:{idx}:{event}")],
                 vec![
                     owner.to_owned(),

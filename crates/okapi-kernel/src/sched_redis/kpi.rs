@@ -1,6 +1,7 @@
 //! 实时 KPI：每秒请求 / tokens / 金额 / 错误四个序列，以及按 key 的限速计数快照。
 use super::SchedulerRedis;
-use fred::interfaces::{KeysInterface, LuaInterface};
+use fred::interfaces::KeysInterface;
+use okapi_store::CachedScript;
 
 impl SchedulerRedis {
     /// 平台实时 KPI 秒桶累加（docs/database.md §2.1 `kpi:*`）。
@@ -14,7 +15,8 @@ impl SchedulerRedis {
     /// 全程 fire-and-forget：**账本原子、统计尽力**（§2.2 末条），
     /// KPI 写失败不得影响结算。
     pub async fn kpi_record(&self, tokens: u64, amount_micro: i64, is_error: bool) {
-        const LUA: &str = r"
+        static SCRIPT: CachedScript = CachedScript::new(
+            r"
             local ttl = tonumber(ARGV[1])
             for i = 1, 4 do
                 local by = tonumber(ARGV[i + 1])
@@ -23,12 +25,12 @@ impl SchedulerRedis {
                 end
             end
             return 1
-        ";
+        ",
+        );
         let sec = chrono::Utc::now().timestamp();
-        let result: Result<i64, _> = self
-            .client
+        let result: Result<i64, _> = SCRIPT
             .eval(
-                LUA,
+                &self.client,
                 Self::kpi_keys(sec),
                 vec![
                     KPI_TTL_SECS.to_string(),

@@ -230,14 +230,54 @@ pub async fn retain_available(
     let mut excluded: Vec<serde_json::Value> = Vec::new();
     let mut earliest_reset: Option<i64> = None;
     let now = chrono::Utc::now().timestamp();
-    // 额度预判的输入一次管道读齐；没有订阅渠道的候选集不多一次往返
-    let forecast_state = match shape {
-        Some(_) if candidates.iter().any(|c| has_quota_hook(&c.provider)) => {
-            let keys: Vec<i64> = candidates.iter().map(|c| c.channel_key_id).collect();
-            forecast::load(state, &keys).await
+    // 额度预判输入与各候选 key 的额度观测并发各用一次管道读齐；没有订阅渠道的候选集零往返
+    let (forecast_state, quota_observations) = tokio::join!(
+        Box::pin(async {
+            match shape {
+                Some(_) if candidates.iter().any(|c| has_quota_hook(&c.provider)) => {
+                    let keys: Vec<i64> = candidates.iter().map(|c| c.channel_key_id).collect();
+                    forecast::load(state, &keys).await
+                }
+                _ => std::collections::HashMap::new(),
+            }
+        }),
+        Box::pin(quota::read_batch_with_burn(state, candidates.iter())),
+    );
+    // 候选集跨多条渠道时，按去重后的 channel_id 并发加载策略与本地上限，避免循环内串行往返 PG
+    let mut unique_channels = Vec::new();
+    let mut seen_channels = std::collections::HashSet::new();
+    for candidate in candidates.iter() {
+        if seen_channels.insert(candidate.channel_id) {
+            unique_channels.push(candidate.channel_id);
         }
-        _ => std::collections::HashMap::new(),
-    };
+    }
+    let channel_checks = Box::pin(futures::future::join_all(unique_channels.into_iter().map(
+        |channel_id| async move {
+            let loaded = policy(state, channel_id)
+                .await
+                .map_err(|error| reason(&error));
+            let local = match &loaded {
+                Ok(policy) => Some(
+                    local_block(state, channel_id, policy)
+                        .await
+                        .map_err(|error| reason(&error)),
+                ),
+                Err(_) => None,
+            };
+            (channel_id, loaded, local)
+        },
+    )))
+    .await;
+    let mut policies: std::collections::HashMap<i64, Result<Arc<Policy>, String>> =
+        std::collections::HashMap::with_capacity(channel_checks.len());
+    let mut local_blocks: std::collections::HashMap<i64, Result<Option<LocalBlock>, String>> =
+        std::collections::HashMap::with_capacity(channel_checks.len());
+    for (channel_id, loaded, local) in channel_checks {
+        policies.insert(channel_id, loaded);
+        if let Some(local) = local {
+            local_blocks.insert(channel_id, local);
+        }
+    }
     let mut assessments: Vec<serde_json::Value> = Vec::new();
     let mut enforcing = false;
     let mut exclude =
@@ -257,40 +297,23 @@ pub async fn retain_available(
                 excluded.push(entry);
             }
         };
-    let mut policies: std::collections::HashMap<i64, Result<Arc<Policy>, String>> =
-        std::collections::HashMap::new();
     let mut available = std::collections::HashSet::with_capacity(candidates.len());
     let mut headroom = std::collections::HashMap::new();
     let mut resets = std::collections::HashMap::new();
-    let mut local_blocks: std::collections::HashMap<i64, Result<Option<LocalBlock>, String>> =
-        std::collections::HashMap::new();
     for candidate in candidates.iter() {
-        let policy = match policies.entry(candidate.channel_id) {
-            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let value = policy(state, candidate.channel_id)
-                    .await
-                    .map_err(|error| reason(&error));
-                e.insert(value).clone()
-            }
+        let Some(policy) = policies.get(&candidate.channel_id) else {
+            continue;
         };
         let policy = match policy {
             Ok(policy) => policy,
             Err(reason) => {
-                exclude(candidate, &reason, None);
+                exclude(candidate, reason, None);
                 continue;
             }
         };
         // 读不到用量按挡下处理：设了上限的渠道，不知道用了多少就不放行
-        let local = match local_blocks.entry(candidate.channel_id) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry
-                .insert(
-                    local_block(state, candidate.channel_id, &policy)
-                        .await
-                        .map_err(|error| reason(&error)),
-                )
-                .clone(),
+        let Some(local) = local_blocks.get(&candidate.channel_id) else {
+            continue;
         };
         match local {
             Ok(None) => {}
@@ -308,15 +331,15 @@ pub async fn retain_available(
                 continue;
             }
             Err(reason) => {
-                exclude(candidate, &reason, None);
+                exclude(candidate, reason, None);
                 continue;
             }
         }
         // 缓存还热的会话可以用到保留线；其余按放置线（没配保留线时两者相同）
         let warm = shape.is_some_and(|s| s.warm_key == Some(candidate.channel_key_id));
-        let observed = quota::read_for_with_burn(state, candidate).await;
-        if let Some((quota, _)) = &observed {
-            if let Some(detail) = quota_block(&policy, quota, now, warm) {
+        let observed = quota_observations.get(&candidate.channel_key_id);
+        if let Some((quota, _)) = observed {
+            if let Some(detail) = quota_block(policy, quota, now, warm) {
                 if let Some(at) = detail["resets_at"].as_i64() {
                     earliest_reset = Some(earliest_reset.map_or(at, |seen| seen.min(at)));
                 }
@@ -332,9 +355,9 @@ pub async fn retain_available(
         }
         if let Some(shape) = shape.filter(|_| policy.quota_forecast != ForecastMode::Off)
             && let Some(assessment) = forecast::assess(
-                &policy,
+                policy,
                 candidate,
-                observed.as_ref(),
+                observed,
                 forecast_state.get(&candidate.channel_key_id),
                 shape,
                 now,

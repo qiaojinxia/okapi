@@ -1,7 +1,61 @@
 use crate::error::StoreError;
-use fred::interfaces::ClientLike;
+use fred::interfaces::{ClientLike, LuaInterface};
 use fred::prelude::*;
+use fred::types::{FromValue, MultipleKeys, MultipleValues};
+use sha1::{Digest, Sha1};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// 预计算 SHA-1 的 Redis Lua 脚本句柄：默认走 `EVALSHA`（只传 40 字节哈希），
+/// 遇到 `NOSCRIPT`（冷启动、Redis 重启、主从切换或 `SCRIPT FLUSH`）自动回退一次 `EVAL`
+/// （同时在目标分片重新缓存脚本，Cluster 下按 `KEYS[1]` 路由无 CROSSSLOT 问题）。
+pub struct CachedScript {
+    source: &'static str,
+    sha1: OnceLock<String>,
+}
+
+impl CachedScript {
+    #[must_use]
+    pub const fn new(source: &'static str) -> Self {
+        Self {
+            source,
+            sha1: OnceLock::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn sha1(&self) -> &str {
+        self.sha1
+            .get_or_init(|| hex::encode(Sha1::digest(self.source.as_bytes())))
+            .as_str()
+    }
+
+    /// 执行脚本：优先 `EVALSHA`，遇 `NOSCRIPT` 回退 `EVAL`。
+    pub async fn eval<R, K, A>(
+        &self,
+        client: &Client,
+        keys: K,
+        args: A,
+    ) -> Result<R, fred::error::Error>
+    where
+        R: FromValue,
+        K: Into<MultipleKeys>,
+        A: TryInto<MultipleValues>,
+        A::Error: Into<fred::error::Error>,
+    {
+        let keys = keys.into();
+        let args = args.try_into().map_err(Into::into)?;
+        let sha1 = self.sha1();
+        match client.evalsha(sha1, keys.clone(), args.clone()).await {
+            Err(err) if is_noscript(&err) => Box::pin(client.eval(self.source, keys, args)).await,
+            other => other,
+        }
+    }
+}
+
+fn is_noscript(err: &fred::error::Error) -> bool {
+    err.details().contains("NOSCRIPT")
+}
 
 /// 单条命令最长等待：热账本、鉴权缓存、结算 journal 的 Redis 调用都受它约束。
 /// 超时按调用方已有的错误分支走（准入 fail-closed、鉴权回源 PG），不再无限挂起。
@@ -28,4 +82,24 @@ pub async fn connect_redis(redis_url: &str) -> Result<Client, StoreError> {
         .build()?;
     client.init().await?;
     Ok(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CachedScript;
+
+    #[test]
+    fn cached_script_computes_standard_redis_sha1() {
+        static TIME_SCRIPT: CachedScript = CachedScript::new("return redis.call('TIME')");
+        // Matches `printf "return redis.call('TIME')" | shasum` / Redis `SCRIPT LOAD`.
+        assert_eq!(
+            TIME_SCRIPT.sha1(),
+            "104ae65debf45156ded1e8e613705534c8e62c17"
+        );
+        // Repeated reads return the same cached hash.
+        assert_eq!(
+            TIME_SCRIPT.sha1(),
+            "104ae65debf45156ded1e8e613705534c8e62c17"
+        );
+    }
 }

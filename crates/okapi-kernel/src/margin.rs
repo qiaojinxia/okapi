@@ -175,20 +175,22 @@ pub async fn compare_set_block(
     expected: Option<&BlockEntry>,
     entry: &BlockEntry,
 ) -> Result<bool, fred::error::Error> {
-    use fred::interfaces::LuaInterface;
+    static SCRIPT: okapi_store::CachedScript = okapi_store::CachedScript::new(
+        r"
+        local old=redis.call('HGET',KEYS[1],ARGV[1]) or ''
+        if old~=ARGV[2] then return 0 end
+        redis.call('HSET',KEYS[1],ARGV[1],ARGV[3]); return 1
+    ",
+    );
     let expected = expected
         .map(serde_json::to_string)
         .transpose()
         .unwrap_or_default()
         .unwrap_or_default();
     let value = serde_json::to_string(entry).unwrap_or_default();
-    client
+    SCRIPT
         .eval(
-            r"
-        local old=redis.call('HGET',KEYS[1],ARGV[1]) or ''
-        if old~=ARGV[2] then return 0 end
-        redis.call('HSET',KEYS[1],ARGV[1],ARGV[3]); return 1
-    ",
+            client,
             vec![BLOCKS_KEY],
             vec![field.to_owned(), expected, value],
         )
@@ -196,10 +198,8 @@ pub async fn compare_set_block(
 }
 
 pub async fn prune_expired(client: &Client, now: i64) -> Result<usize, fred::error::Error> {
-    use fred::interfaces::LuaInterface;
-    client
-        .eval(
-            r"
+    static SCRIPT: okapi_store::CachedScript = okapi_store::CachedScript::new(
+        r"
         local removed=0
         local entries=redis.call('HGETALL',KEYS[1])
         for i=1,#entries,2 do
@@ -210,9 +210,9 @@ pub async fn prune_expired(client: &Client, now: i64) -> Result<usize, fred::err
         end
         return removed
     ",
-            vec![BLOCKS_KEY],
-            vec![now.to_string()],
-        )
+    );
+    SCRIPT
+        .eval(client, vec![BLOCKS_KEY], vec![now.to_string()])
         .await
 }
 
