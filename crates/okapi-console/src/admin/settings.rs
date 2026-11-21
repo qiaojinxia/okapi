@@ -21,9 +21,16 @@ pub struct SetSettingReq {
 pub async fn set_setting(
     State(state): State<AppState>,
     headers: HeaderMap,
-    ExtractJson(req): ExtractJson<SetSettingReq>,
+    ExtractJson(mut req): ExtractJson<SetSettingReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
+    // 列表给的是打码后的值（支付 / OAuth 的密钥字段是占位串）：表单没改密钥就把占位串带回来，
+    // 这里换回库里的原值；认领不到原值的占位串（新增的 OAuth 提供方）要求重新填写
+    if !super::super::manage::is_secret_key(&req.key) {
+        let stored = state.setting_fresh(&req.key).await?;
+        req.value = super::super::manage::restore_redacted(req.value, stored.as_ref())
+            .map_err(|()| AppError::bad_request().with_param(req.key.clone()))?;
+    }
     // 全局默认出口有引用校验与固定分配对账，只能经 PUT /admin/egress/default 写
     if req.key == okapi_store::egress::DEFAULT_SETTING {
         return Err(AppError::bad_request().with_param("egress_default"));
@@ -87,7 +94,7 @@ pub async fn set_setting(
         if super::super::manage::is_secret_key(&req.key) {
             json!({ "redacted": true, "configured": !req.value.is_null() })
         } else {
-            json!({ "value": req.value })
+            json!({ "value": super::super::manage::redact_secret_fields(&req.value) })
         },
     )
     .await;

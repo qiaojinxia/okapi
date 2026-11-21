@@ -787,6 +787,78 @@ async fn admin_list_surface_covers_every_resource() {
         "明文绝不可出现在响应中"
     );
 
+    // ---- 键名不像密钥、值里带密钥的真实设置（Stripe 收款）：列表与审计逐字段打码，
+    //      表单把占位串原样带回时库里保留原密钥。用完删掉（站点级表，别让收款配置残留到别的用例） ----
+    let stripe = json!({"secret_key": "sk_live_fixture_secret", "webhook_secret": "whsec_fixture_secret", "api_base": "https://api.stripe.com"});
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"payment_stripe","value":stripe})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let audit: Value = sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action='settings.set' AND target='payment_stripe' ORDER BY created_at DESC LIMIT 1")
+        .fetch_one(&env.pg).await.unwrap();
+    assert!(
+        !audit.to_string().contains("fixture_secret"),
+        "审计里不能有密钥明文：{audit}"
+    );
+    assert_eq!(audit["value"]["api_base"], "https://api.stripe.com");
+    let (status, body) = get(env.console, "/admin/settings", t).await;
+    assert_eq!(status, 200);
+    assert!(
+        !body.to_string().contains("fixture_secret"),
+        "列表里不能有收款密钥明文"
+    );
+    let row = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "payment_stripe")
+        .expect("收款配置必须在列表");
+    assert_eq!(
+        row["is_secret"], false,
+        "整键不隐藏：编辑表单要回显非密钥字段"
+    );
+    assert_eq!(row["value"]["api_base"], "https://api.stripe.com");
+    let placeholder = row["value"]["secret_key"].clone();
+    assert_ne!(placeholder, Value::Null);
+    // 表单只改了 api_base，两个密钥字段原样带回占位串
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"payment_stripe","value":{"secret_key": placeholder, "webhook_secret": row["value"]["webhook_secret"], "api_base": "https://stripe.example"}})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let stored: Value = sqlx::query_scalar("SELECT value FROM settings WHERE key='payment_stripe'")
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        json!({"secret_key": "sk_live_fixture_secret", "webhook_secret": "whsec_fixture_secret", "api_base": "https://stripe.example"}),
+        "占位串必须换回原密钥，不能把占位串当密钥存进库"
+    );
+    // OAuth 提供方：新增的条目带占位串（没有原值可认领）拒收
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":"oauth_providers","value":[{"code":"github","client_id":"x","client_secret": placeholder}]})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    sqlx::query("DELETE FROM settings WHERE key IN ('payment_stripe', 'oauth_providers')")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
     // ---- 数据保留月数：只收非负整数，写错不落库（清理任务按 bigint 读，坏值让它每轮报错） ----
     for bad in [
         json!(null),

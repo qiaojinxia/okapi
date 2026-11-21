@@ -132,6 +132,92 @@ pub(super) fn is_secret_key(key: &str) -> bool {
     lower == "notify_channels" || NEEDLES.iter().any(|n| lower.contains(n))
 }
 
+/// 列表与审计里代替密钥字段原值的占位串；写回时原样带回的占位串换成库里的原值。
+pub(super) const REDACTED: &str = "********";
+
+/// 设置值里的密钥字段：键名按 `_` / `-` / `.` 切段，含 secret / password / token / credential，
+/// 或某一段就是 `key`（`key`、`secret_key`、`api_key`……；与前端 `containsSecret` 同一判据）。
+/// 键名不像密钥、值却是带密钥字段的对象的设置（`payment_stripe` / `payment_epay` / `oauth_providers`）
+/// 靠这条逐字段打码；按段而不是按子串，`max_tokens`、`invalid_keywords` 这类字段不会被误伤。
+fn is_secret_field(name: &str) -> bool {
+    name.to_ascii_lowercase()
+        .split(['_', '-', '.'])
+        .any(|segment| {
+            matches!(
+                segment,
+                "key" | "secret" | "password" | "passwd" | "token" | "credential" | "credentials"
+            )
+        })
+}
+
+/// 把密钥字段的非空值换成 [`REDACTED`]，结构与其余字段原样保留（编辑表单照常回显非密钥字段）。
+pub(super) fn redact_secret_fields(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(name, item)| {
+                    let hidden = is_secret_field(name)
+                        && !item.is_null()
+                        && item.as_str().is_none_or(|text| !text.is_empty());
+                    let out = if hidden {
+                        Value::String(REDACTED.into())
+                    } else {
+                        redact_secret_fields(item)
+                    };
+                    (name.clone(), out)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_secret_fields).collect()),
+        other => other.clone(),
+    }
+}
+
+/// 写回时：密钥字段仍是 [`REDACTED`] 的，换成库里同一位置的原值（表单没改密钥就原样保存）。
+/// 数组里的对象按 `code` / `id` 认领原值（OAuth 提供方可能被增删、调序），没有标识的按下标；
+/// 认领不到原值（新增条目、标识改了）返回 `Err`——密钥得重新填写，不能把占位串当密钥存进库。
+pub(super) fn restore_redacted(incoming: Value, stored: Option<&Value>) -> Result<Value, ()> {
+    match incoming {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (name, item) in map {
+                let previous = stored.and_then(|s| s.get(&name));
+                let item = if is_secret_field(&name) && item.as_str() == Some(REDACTED) {
+                    match previous {
+                        Some(original) if !original.is_null() => original.clone(),
+                        _ => return Err(()),
+                    }
+                } else {
+                    restore_redacted(item, previous)?
+                };
+                out.insert(name, item);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(items) => {
+            let stored_items = stored.and_then(Value::as_array);
+            let identity = |item: &Value| {
+                ["code", "id"]
+                    .iter()
+                    .find_map(|field| item.get(field).filter(|v| !v.is_null()).cloned())
+            };
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let previous = stored_items.and_then(|list| match identity(&item) {
+                        Some(id) => list.iter().find(|old| identity(old).as_ref() == Some(&id)),
+                        None => list.get(index),
+                    });
+                    restore_redacted(item, previous)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        other => Ok(other),
+    }
+}
+
 pub async fn list_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -144,7 +230,7 @@ pub async fn list_settings(
             let secret = is_secret_key(&r.key);
             json!({
                 "key": r.key,
-                "value": if secret { Value::Null } else { r.value.clone() },
+                "value": if secret { Value::Null } else { redact_secret_fields(&r.value) },
                 "is_secret": secret,
                 "configured": !r.value.is_null(),
                 "updated_by": r.updated_by,
@@ -736,7 +822,91 @@ pub async fn manage_user(
 
 #[cfg(test)]
 mod tests {
-    use super::is_secret_key;
+    use super::{REDACTED, is_secret_key, redact_secret_fields, restore_redacted};
+    use serde_json::json;
+
+    /// 真实的收款 / 登录配置键名不像密钥（`payment_stripe` 等），密钥在值里：逐字段打码，其余字段照常回显。
+    #[test]
+    fn secret_fields_inside_real_setting_values_are_redacted() {
+        for key in ["payment_stripe", "payment_epay", "oauth_providers"] {
+            assert!(
+                !is_secret_key(key),
+                "{key} 走逐字段打码，不整键隐藏（编辑表单要回显非密钥字段）"
+            );
+        }
+        let stripe = json!({"secret_key": "sk_live_x", "webhook_secret": "whsec_x", "api_base": "https://api.stripe.com"});
+        assert_eq!(
+            redact_secret_fields(&stripe),
+            json!({"secret_key": REDACTED, "webhook_secret": REDACTED, "api_base": "https://api.stripe.com"})
+        );
+        let epay = json!({"gateway_url": "https://pay.example", "pid": "1001", "key": "md5-key", "usd_to_cny_milli": 7000});
+        assert_eq!(
+            redact_secret_fields(&epay),
+            json!({"gateway_url": "https://pay.example", "pid": "1001", "key": REDACTED, "usd_to_cny_milli": 7000})
+        );
+        let oauth =
+            json!([{"code": "github", "client_id": "Iv1.abc", "client_secret": "gh-secret"}]);
+        assert_eq!(
+            redact_secret_fields(&oauth),
+            json!([{"code": "github", "client_id": "Iv1.abc", "client_secret": REDACTED}])
+        );
+        // 没配的密钥照实显示为空，前端据此提示「未配置」
+        let unset = json!({"secret_key": "", "webhook_secret": null});
+        assert_eq!(redact_secret_fields(&unset), unset);
+        // 按段判定：这些不是密钥
+        let policy = json!({"invalid_keywords": ["k"], "quota_keywords": [], "max_tokens": 5, "local_tokens": {"cap": 1},
+                            "keys": 2, "monkey": "m", "count_tokens_betas": ["a"]});
+        assert_eq!(redact_secret_fields(&policy), policy);
+    }
+
+    /// 写回：占位串换成原值，改了的密钥照新值存；OAuth 提供方调序后按 `code` 认领；认领不到的占位串拒收。
+    #[test]
+    fn redacted_placeholders_are_restored_on_write() {
+        let stored = json!({"secret_key": "sk_live_x", "webhook_secret": "whsec_x", "api_base": "https://a"});
+        let back =
+            json!({"secret_key": REDACTED, "webhook_secret": "whsec_new", "api_base": "https://b"});
+        assert_eq!(
+            restore_redacted(back, Some(&stored)),
+            Ok(
+                json!({"secret_key": "sk_live_x", "webhook_secret": "whsec_new", "api_base": "https://b"})
+            )
+        );
+        let stored = json!([
+            {"code": "github", "client_id": "a", "client_secret": "gh"},
+            {"code": "discord", "client_id": "b", "client_secret": "dc"},
+        ]);
+        let reordered = json!([
+            {"code": "discord", "client_id": "b", "client_secret": REDACTED},
+            {"code": "github", "client_id": "a2", "client_secret": REDACTED},
+        ]);
+        assert_eq!(
+            restore_redacted(reordered, Some(&stored)),
+            Ok(json!([
+                {"code": "discord", "client_id": "b", "client_secret": "dc"},
+                {"code": "github", "client_id": "a2", "client_secret": "gh"},
+            ]))
+        );
+        let added = json!([{"code": "linuxdo", "client_id": "c", "client_secret": REDACTED}]);
+        assert_eq!(
+            restore_redacted(added, Some(&stored)),
+            Err(()),
+            "新增条目没有原值可认领"
+        );
+        assert_eq!(
+            restore_redacted(json!({"key": REDACTED}), None),
+            Err(()),
+            "库里没有这项设置时，占位串不能当密钥存"
+        );
+        assert_eq!(
+            restore_redacted(json!({"key": REDACTED}), Some(&json!({"key": null}))),
+            Err(())
+        );
+        // 非密钥字段恰好是占位串的，原样保存
+        assert_eq!(
+            restore_redacted(json!({"pid": REDACTED}), None),
+            Ok(json!({"pid": REDACTED}))
+        );
+    }
 
     #[test]
     fn secret_keys_are_detected_case_insensitively() {
