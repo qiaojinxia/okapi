@@ -2,10 +2,10 @@
 //! Money comes from PostgreSQL, never from the currently loaded page or CH.
 
 use super::{LogWindow, LogsQuery};
+use crate::console_auth::authenticate;
 use crate::query::Query;
 use axum::{Json, extract::State, http::HeaderMap};
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
@@ -23,7 +23,7 @@ fn filtered(
     }
     let mut query = QueryBuilder::new(sql);
     query.push(" FROM billing_records b LEFT JOIN api_keys k ON k.id = b.api_key_id AND k.user_id = b.user_id WHERE b.user_id = ").push_bind(user_id);
-    if q.scope.as_deref() != Some("user") {
+    if q.scope.as_deref() != Some("user") && key_id > 0 {
         query.push(" AND b.api_key_id = ").push_bind(key_id);
     }
     if let Some(id) = q.api_key_id {
@@ -139,7 +139,7 @@ pub async fn list(
         None
     };
     Ok(Json(json!({
-        "scope": if q.scope.as_deref() == Some("user") { "user" } else { "key" },
+        "scope": if q.scope.as_deref() == Some("user") || key.key_id == 0 { "user" } else { "key" },
         "window": window.map(|w| json!({ "start_date": w.start, "end_date": w.end, "timezone": w.timezone })),
         "data": data, "next_before": next_before,
     })))
@@ -358,7 +358,7 @@ pub async fn series(
         })
         .collect();
     Ok(Json(json!({
-        "scope": if q.scope.as_deref() == Some("user") { "user" } else { "key" },
+        "scope": if q.scope.as_deref() == Some("user") || key.key_id == 0 { "user" } else { "key" },
         "api_key_id": q.api_key_id,
         "days": days,
         "window": { "start_date": start.to_string(), "end_date": end.to_string(), "timezone": timezone },

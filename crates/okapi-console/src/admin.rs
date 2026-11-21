@@ -4,11 +4,11 @@
 //! 本文件只放各处理器共用的守卫（权限点、own/all 范围、渠道属主、超管）与审计；处理器按资源
 //! 分在子模块里，并从这里原路径再导出（`console/mod.rs` 的路由与其它模块的引用不变）。
 
+use crate::console_auth::authenticate;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_store::AuthedKey;
 use okapi_store::auth::PermScope;

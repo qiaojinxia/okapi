@@ -4,12 +4,12 @@
 //! 鉴权缓存失效（分组变了就 `auth_flush`，网关 60s 缓存立刻作废）。
 
 use super::admin::{audit, guard};
+use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Path;
 use okapi_kernel::extract::{Json as ExtractJson, Query};

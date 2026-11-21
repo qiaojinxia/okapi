@@ -77,12 +77,12 @@ pub async fn my_activity(
     headers: HeaderMap,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = okapi_kernel::auth::authenticate(&state, &headers).await?;
+    let key = crate::console_auth::authenticate(&state, &headers).await?;
     let ch = state
         .ch
         .as_ref()
         .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, codes::STATS_DISABLED))?;
-    let user_scope = matches!(q.scope, Some(Scope::User));
+    let user_scope = matches!(q.scope, Some(Scope::User)) || key.key_id == 0;
     let owner = owner_filter(key.user_id, key.key_id, user_scope);
     // day 来自 CH 服务端时区，返回同源 today/timezone，避免浏览器跨日偏移。
     let metadata = ch.query_json_each_row(&format!(

@@ -1,11 +1,11 @@
 //! Session-owned profile editing. API keys cannot change their owner's identity.
+use crate::console_auth::authenticate;
 use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
 };
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use serde::{Deserialize, Serialize};

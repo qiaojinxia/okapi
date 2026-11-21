@@ -35,7 +35,7 @@ pub async fn my_breakdown(
     headers: HeaderMap,
     Query(q): Query<BreakdownQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = okapi_kernel::auth::authenticate(&state, &headers).await?;
+    let key = crate::console_auth::authenticate(&state, &headers).await?;
     let ch = ch_or_disabled(&state)?;
     let window = super::super::usage_details::CalendarWindow::read(
         ch,
@@ -46,7 +46,7 @@ pub async fn my_breakdown(
     .await?;
     let days = window.days();
     let range = window.day_filter();
-    let user_scope = q.scope.as_deref() == Some("user");
+    let user_scope = q.scope.as_deref() == Some("user") || key.key_id == 0;
     let key_filter = if user_scope {
         String::new()
     } else {
@@ -190,7 +190,7 @@ pub async fn my_daily(
     headers: HeaderMap,
     Query(q): Query<WindowQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = okapi_kernel::auth::authenticate(&state, &headers).await?;
+    let key = crate::console_auth::authenticate(&state, &headers).await?;
     let ch = ch_or_disabled(&state)?;
     let calendar =
         super::super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;

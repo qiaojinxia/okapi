@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 struct TestEnv {
     addr: SocketAddr,
+    pg: sqlx::PgPool,
+    state: okapi_engine::state::AppState,
 }
 
 /// 每次调用给一个独一无二的来源 IP。
@@ -61,7 +63,7 @@ async fn setup_with(policy: Option<Value>, session_limit: Option<i64>) -> TestEn
             std::sync::Arc::new(session_limit.map(Value::from)),
         )
         .await;
-    let app = console::router(state);
+    let app = console::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -73,7 +75,7 @@ async fn setup_with(policy: Option<Value>, session_limit: Option<i64>) -> TestEn
         .await
         .unwrap();
     });
-    TestEnv { addr }
+    TestEnv { addr, pg, state }
 }
 
 fn cookie_of(resp: &reqwest::Response) -> String {
@@ -1585,4 +1587,99 @@ async fn session_gated_endpoints_distinguish_missing_and_expired_sessions() {
         (status, body["error"]["code"].as_str()),
         (401, Some("session_expired"))
     );
+}
+
+/// 纯 HttpOnly Cookie 鉴权收敛：控制台端点无需 Bearer key 即可直接以 okapi_session 鉴权，
+/// 且跨站 CSRF 写操作（Sec-Fetch-Site: cross-site 或跨源 Origin）被拒绝，登出后返回 session_expired。
+#[tokio::test]
+async fn httponly_cookie_authenticates_console_and_enforces_csrf_origin() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let (email, password) = register_user(&client, &env).await;
+    let cookie = login_cookie(&client, &env, &email, &password).await;
+
+    // 1. 纯 Cookie 访问 /api/me 与 /api/me/keys（不带 Authorization 头）
+    let me = client
+        .get(format!("http://{}/api/me", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200);
+    let me_body: Value = me.json().await.unwrap();
+    assert_eq!(me_body["has_web_session"], true);
+    assert_eq!(me_body["key_id"], 0);
+    assert!(me_body["username"].as_str().is_some_and(|s| !s.is_empty()));
+
+    // 2. 纯 Cookie 跨站写操作必须被 CSRF 防护拒绝（403 permission_denied / csrf_origin）
+    let cross_site = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header("sec-fetch-site", "cross-site")
+        .json(&json!({"name": "csrf-blocked"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_site.status(), 403);
+    let cs_body: Value = cross_site.json().await.unwrap();
+    assert_eq!(cs_body["error"]["code"], "permission_denied");
+    assert_eq!(cs_body["error"]["param"], "csrf_origin");
+
+    let bad_origin = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::ORIGIN, "https://evil.example")
+        .json(&json!({"name": "csrf-origin-blocked"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_origin.status(), 403);
+    let bo_body: Value = bad_origin.json().await.unwrap();
+    assert_eq!(bo_body["error"]["param"], "csrf_origin");
+
+    // 3. 同源 Cookie 写操作正常放行
+    let same_origin = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header("sec-fetch-site", "same-origin")
+        .header(reqwest::header::ORIGIN, format!("http://{}", env.addr))
+        .json(&json!({"name": "cookie-created"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(same_origin.status(), 200);
+
+    // 4. 管理员纯 Cookie 访问 /admin/* 端点
+    let user_id = me_body["user_id"].as_i64().unwrap();
+    sqlx::query("UPDATE users SET role = 100 WHERE id = $1")
+        .bind(user_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    env.state.sched.auth_flush().await;
+    let admin_resp = client
+        .get(format!("http://{}/admin/users", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admin_resp.status(), 200);
+
+    // 5. 登出后纯 Cookie 访问 /api/me 返回 401 session_expired
+    let logout = client
+        .post(format!("http://{}/auth/logout", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), 200);
+    let after = client
+        .get(format!("http://{}/api/me", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), 401);
+    let after_body: Value = after.json().await.unwrap();
+    assert_eq!(after_body["error"]["code"], "session_expired");
 }

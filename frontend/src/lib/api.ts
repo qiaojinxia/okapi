@@ -89,6 +89,7 @@ export async function apiFetch<T>(
 
   const resp = await fetch(path, {
     method: init?.method ?? 'GET',
+    credentials: 'same-origin',
     headers,
     body: init?.body === undefined ? undefined : JSON.stringify(init.body),
     signal: init?.signal,
@@ -103,10 +104,18 @@ export async function apiFetch<T>(
     } catch {
       // 非 JSON 错误体：保留 http_<status>
     }
-    // 只认用存着的登录 key 发出、且它此刻仍是当前 key 的请求：显式传 key 的探测（粘贴 key 登录）不算；
-    // 回调清掉 key 之后 getKey() 就变了，同时失败的其余请求不再重复触发。
-    // Missing or expired web session never implies the stored API key is revoked; skip /api/me probes.
-    if (
+    // 1) 纯 HttpOnly Cookie 登录态（无本地 key）收到 session_expired 时直接回调回登录页；
+    // 2) 存着的登录 key 失效时（401 invalid_api_key / key_disabled），验证 /api/me 后回调；
+    //    显式传 key 的探测（粘贴 key 登录）与纯会话错误不触发 key 吊销探测。
+    const cookieOnlyExpired =
+      resp.status === 401 &&
+      code === 'session_expired' &&
+      init?.key === undefined &&
+      key === null &&
+      getLoginMode() === 'account'
+    if (cookieOnlyExpired) {
+      for (const handler of authExpiredHandlers) handler()
+    } else if (
       resp.status === 401 &&
       !SESSION_AUTH_CODES.has(code) &&
       KEY_REVOKED_CODES.has(code) &&

@@ -1,12 +1,12 @@
 //! 门户 API key：列表与额度、按 key 的用量、改（限额 / IP 白名单）与删。
 use super::super::query::{PageQuery, Query};
 use super::{ch_i64, ensure_selectable, key_trends};
+use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;

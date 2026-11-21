@@ -33,8 +33,8 @@ pub async fn session_key(
     headers: HeaderMap,
     body: Option<Json<SessionKeyReq>>,
 ) -> Result<Response, AppError> {
-    let unauthorized = || AppError::unauthorized(okapi_api::codes::INVALID_API_KEY);
-    let sid = session_id(&headers).ok_or_else(unauthorized)?;
+    let sid = session_id(&headers)
+        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::SESSION_REQUIRED))?;
     let user_id = session_user(&state, &sid).await?;
     let bound = session_hash(&sid);
     let name = body
@@ -108,7 +108,7 @@ pub(super) fn totp_binding(
     pending: &str,
 ) -> Result<String, AppError> {
     let sid = session_id(headers)
-        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
+        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::SESSION_REQUIRED))?;
     if pending.len() != 32 || !pending.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(AppError::bad_request().with_param("pending"));
     }

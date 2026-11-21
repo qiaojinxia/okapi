@@ -7,12 +7,12 @@
 //!   payment_epay   = {gateway_url, pid, key, usd_to_cny_milli?=7000}
 //!   payment_stripe = {secret_key, webhook_secret, api_base?=https://api.stripe.com}
 
+use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use md5::{Digest as Md5Digest, Md5};
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_providers::custom_pass::{PassRequest, PassResponse};

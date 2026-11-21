@@ -1,10 +1,10 @@
 //! 可自选的定价分组与邀请返利（aff）。
+use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use serde_json::{Value, json};
 

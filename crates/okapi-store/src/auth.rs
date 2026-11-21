@@ -278,6 +278,95 @@ pub async fn find_key_by_hash(
     .transpose()
 }
 
+/// 为已验证的浏览器 `HttpOnly` 会话用户构造控制面 `AuthedKey`（`key_id = 0`，不对应任何 API key）。
+pub async fn find_user_session_actor(
+    pool: &PgPool,
+    user_id: i64,
+    session_hash: String,
+) -> Result<Option<AuthedKey>, StoreError> {
+    type Row = (
+        i64,
+        i16,
+        i16,
+        Option<serde_json::Value>,
+        i64,
+        String,
+        Option<i32>,
+        Option<i32>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        r"
+        WITH resolved AS (
+            SELECT u.id AS user_id,
+                   u.status AS user_status,
+                   u.role,
+                   ar.permissions AS admin_permissions,
+                   (u.price_multiplier * 1000000)::bigint AS multiplier_scaled,
+                   COALESCE(
+                       (SELECT ug.group_code FROM user_groups ug
+                         WHERE ug.user_id = u.id ORDER BY ug.priority DESC, ug.group_code LIMIT 1),
+                       (SELECT pg2.group_code FROM price_groups pg2 WHERE pg2.is_default
+                         ORDER BY pg2.group_code LIMIT 1),
+                       'default'
+                   ) AS group_code
+            FROM users u
+            LEFT JOIN admin_roles ar ON ar.id = u.admin_role_id
+            WHERE u.id = $1 AND u.deleted_at IS NULL
+        )
+        SELECT r.user_id,
+               r.user_status,
+               r.role,
+               r.admin_permissions,
+               r.multiplier_scaled,
+               r.group_code,
+               pg.rpm_limit,
+               pg.rph_limit,
+               COALESCE(pg.pool_code, 'default') AS pool_code,
+               cp.routing_strategy,
+               cp.fallback_pool_code
+        FROM resolved r
+        LEFT JOIN price_groups pg ON pg.group_code = r.group_code
+        LEFT JOIN channel_pools cp ON cp.pool_code = COALESCE(pg.pool_code, 'default')
+        ",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|r| {
+        Ok(AuthedKey {
+            key_id: 0,
+            quota_limited: false,
+            user_id: r.0,
+            key_status: 1,
+            user_status: r.1,
+            role: r.2,
+            permissions: parse_policy(r.3)?,
+            multiplier_scaled: r.4,
+            group_code: r.5,
+            group_rpm_limit: r.6,
+            group_rph_limit: r.7,
+            pool_code: Some(r.8),
+            pool_strategy: r.9,
+            pool_fallback: r.10,
+            rpm_limit: None,
+            tpm_limit: None,
+            rpd_limit: None,
+            max_concurrency: None,
+            model_allowlist: None,
+            ip_allowlist: None,
+            expires_at: None,
+            member_user_id: None,
+            member_monthly_limit_micro: None,
+            session_hash: Some(session_hash),
+        })
+    })
+    .transpose()
+}
+
 fn parse_policy(value: Option<serde_json::Value>) -> Result<Option<Vec<String>>, StoreError> {
     value
         .map(serde_json::from_value::<Vec<String>>)

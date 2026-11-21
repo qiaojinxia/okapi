@@ -25,12 +25,12 @@ pub use self::keys::{PatchKeyReq, delete_key, keys, patch_key};
 pub(super) use self::keys::{normalize_allowlist, normalize_ip_allowlist, validate_key_limits};
 pub use self::redeem::{RedeemReq, redeem};
 
+use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_store::ChClient;
 use serde::Deserialize;
@@ -65,13 +65,25 @@ pub async fn me(
     let has_web_session = super::auth_web::require_session(&state, &headers)
         .await
         .is_ok_and(|user_id| user_id == key.actor_user_id());
-    let key_info: Option<(String, String, String)> =
+    let key_info: Option<(String, String, String)> = if key.key_id > 0 {
         sqlx::query_as("SELECT k.name, k.key_prefix, u.username FROM api_keys k JOIN users u ON u.id = COALESCE(k.member_user_id,k.user_id) WHERE k.id = $1 AND k.user_id = $2")
             .bind(key.key_id)
             .bind(key.user_id)
             .fetch_optional(&state.pg)
             .await
-            .map_err(okapi_store::StoreError::from)?;
+            .map_err(okapi_store::StoreError::from)?
+    } else {
+        None
+    };
+    let username: Option<String> = if let Some(info) = &key_info {
+        Some(info.2.clone())
+    } else {
+        sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+            .bind(key.actor_user_id())
+            .fetch_optional(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?
+    };
     // 订阅池（§11.28）：热值一次 HMGET；窗口外 / 越界为负对用户都显示 0
     let (sub, sub_until) = state.ledger.sub_balance(key.user_id).await?;
     let sub_active = sub_until > chrono::Utc::now().timestamp();
@@ -98,7 +110,7 @@ pub async fn me(
     Ok(Json(json!({
         "user_id": key.actor_user_id(),
         "wallet_user_id": key.user_id,
-        "username": key_info.as_ref().map(|info| &info.2),
+        "username": username,
         "key_id": key.key_id,
         "key_name": key_info.as_ref().map(|info| &info.0),
         "key_prefix": key_info.as_ref().map(|info| &info.1),

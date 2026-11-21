@@ -139,7 +139,7 @@ pub async fn mine(
     headers: HeaderMap,
     Query(mut q): Query<ToolQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let key = okapi_kernel::auth::authenticate(&state, &headers).await?;
+    let key = crate::console_auth::authenticate(&state, &headers).await?;
     let user_scope = match q.scope.as_deref() {
         None | Some("key") => false,
         Some("user") => true,

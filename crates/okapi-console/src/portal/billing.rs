@@ -1,11 +1,11 @@
 //! 用户的钱与量：用量汇总、余额流水、充值订单。
 use super::super::query::Query;
 use super::{ch_i64, ch_or_disabled, default_limit};
+use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use okapi_engine::state::AppState;
-use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,26 +37,28 @@ pub async fn usage(
     let ch = ch_or_disabled(&state)?;
     let days = q.days.clamp(1, 90);
 
-    let sql = match q.scope.as_str() {
-        "user" => format!(
+    let user_scope = q.scope == "user" || key.key_id == 0;
+    let sql = if user_scope {
+        format!(
             "SELECT day, countMerge(requests) AS requests, sumMerge(tokens) AS tokens, \
                     sumMerge(amount) AS amount_micro \
              FROM mv_user_day WHERE user_id = {} AND day >= today() - {days} \
              GROUP BY day ORDER BY day",
             key.user_id
-        ),
-        _ => format!(
+        )
+    } else {
+        format!(
             "SELECT day, countMerge(requests) AS requests, sumMerge(tokens) AS tokens, \
                     sumMerge(amount) AS amount_micro \
              FROM mv_apikey_day WHERE api_key_id = {} AND day >= today() - {days} \
              GROUP BY day ORDER BY day",
             key.key_id
-        ),
+        )
     };
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
     let total: i64 = rows.iter().map(|r| ch_i64(r, "amount_micro")).sum();
     Ok(Json(json!({
-        "scope": if q.scope == "user" { "user" } else { "key" },
+        "scope": if user_scope { "user" } else { "key" },
         "days": days,
         "total_amount_micro": total,
         "data": rows,
