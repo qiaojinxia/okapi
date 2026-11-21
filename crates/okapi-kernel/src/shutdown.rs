@@ -93,6 +93,12 @@ impl Pending {
         *self.0.draining.borrow()
     }
 
+    /// 订阅下线信号（供受监督的常驻后台任务在优雅下线时退出循环）。
+    #[must_use]
+    pub fn subscribe_draining(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.0.draining.subscribe()
+    }
+
     /// 下线开始时完成；之前一直挂起。
     pub async fn draining(&self) {
         let mut draining = self.0.draining.subscribe();

@@ -89,18 +89,37 @@ async fn run_batcher(
             batch.into_iter().map(|b| (b.input, b.reply)).unzip();
         let _permit = gate.acquire().await;
         let started = std::time::Instant::now();
-        let outcomes = okapi_ledger::sync::record_batch(&pg, &ledger, &inputs).await;
-        let fallbacks = outcomes
-            .iter()
-            .filter(|o| matches!(o, Ok(BatchOutcome::Fallback) | Err(_)))
-            .count();
-        okapi_kernel::metrics::global().record_settlement_batch(
-            batch_len,
-            started.elapsed(),
-            fallbacks,
-        );
-        for (reply, outcome) in replies.into_iter().zip(outcomes) {
-            let _ = reply.send(outcome);
+        // 单批 panic 兜底：不让微批协程永久退出（退出会导致后续所有提交永久退化为单笔路径）
+        let outcomes = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+            okapi_ledger::sync::record_batch(&pg, &ledger, &inputs),
+        ))
+        .await;
+        if let Ok(outcomes) = outcomes {
+            let fallbacks = outcomes
+                .iter()
+                .filter(|o| matches!(o, Ok(BatchOutcome::Fallback) | Err(_)))
+                .count();
+            okapi_kernel::metrics::global().record_settlement_batch(
+                batch_len,
+                started.elapsed(),
+                fallbacks,
+            );
+            for (reply, outcome) in replies.into_iter().zip(outcomes) {
+                let _ = reply.send(outcome);
+            }
+        } else {
+            tracing::error!(
+                batch_len,
+                "settlement micro-batcher panicked; falling back affected entries to single-row path"
+            );
+            okapi_kernel::metrics::global().record_settlement_batch(
+                batch_len,
+                started.elapsed(),
+                batch_len,
+            );
+            for reply in replies {
+                let _ = reply.send(Ok(BatchOutcome::Fallback));
+            }
         }
     }
 }

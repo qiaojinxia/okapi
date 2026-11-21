@@ -24,5 +24,6 @@ pub mod security_headers;
 pub mod shutdown;
 pub mod ssrf;
 pub mod state;
+pub mod supervision;
 pub mod text;
 pub mod trace_context;

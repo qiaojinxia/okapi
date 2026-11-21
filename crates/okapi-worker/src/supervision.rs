@@ -1,6 +1,5 @@
-//! Restart unexpectedly stopped workers without restarting during shutdown.
-use futures::FutureExt;
-use std::{future::Future, panic::AssertUnwindSafe, sync::OnceLock, time::Duration};
+//! Worker 任务启停过滤 + 复用 `okapi_kernel::supervision` 统一监督重启。
+use std::{future::Future, sync::OnceLock};
 use tokio::sync::watch;
 
 /// 只观测 / 只外联、关掉也不影响记账的任务。气隙或只读部署用 `OKAPI_WORKER_DISABLE` 逗号分隔关掉；
@@ -34,7 +33,7 @@ fn disabled(name: &str) -> bool {
         .any(|off| off == name)
 }
 
-pub(super) async fn run<F, Fut>(name: &'static str, mut stop: watch::Receiver<bool>, mut start: F)
+pub(super) async fn run<F, Fut>(name: &'static str, stop: watch::Receiver<bool>, start: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = ()>,
@@ -43,38 +42,17 @@ where
         tracing::info!(worker = name, "disabled by OKAPI_WORKER_DISABLE");
         return;
     }
-    let mut delay = Duration::from_secs(1);
-    loop {
-        if *stop.borrow() {
-            return;
-        }
-        let started = std::time::Instant::now();
-        let outcome = AssertUnwindSafe(async { start().await })
-            .catch_unwind()
-            .await;
-        if *stop.borrow() || stop.has_changed().is_err() {
-            return;
-        }
-        if started.elapsed() >= Duration::from_mins(1) {
-            delay = Duration::from_secs(1);
-        }
-        tracing::error!(
-            worker = name,
-            panicked = outcome.is_err(),
-            restart_delay_ms = delay.as_millis(),
-            "worker exited unexpectedly; restarting"
-        );
-        tokio::select! {
-            _ = stop.changed() => return,
-            () = tokio::time::sleep(delay) => {}
-        }
-        delay = delay.saturating_mul(2).min(Duration::from_secs(30));
-    }
+    okapi_kernel::supervision::run(name, stop, start).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
 
     #[test]
     fn only_optional_tasks_can_be_disabled() {
@@ -83,10 +61,6 @@ mod tests {
         assert_eq!(rejected, ["reconcile", "sweep", "typo"]);
         assert_eq!(parse_disabled(""), (vec![], vec![]));
     }
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
 
     #[tokio::test]
     async fn panic_is_restarted_and_shutdown_stops_restarts() {
