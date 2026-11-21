@@ -1199,3 +1199,174 @@ async fn downgrade_rejects_or_records_tools_it_cannot_carry() {
     assert_eq!(resp.status(), 200);
     resp.text().await.unwrap();
 }
+
+async fn mock_responses_only(body: axum::body::Bytes) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use std::fmt::Write as _;
+
+    let req: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(req["model"], "gpt-upstream");
+    assert_eq!(req["instructions"], "be terse");
+    assert!(
+        req.get("messages").is_none(),
+        "must convert to Responses input"
+    );
+    assert_eq!(req["input"][0]["content"][0]["text"], "ping");
+    let usage = json!({"input_tokens": 50, "output_tokens": 10, "total_tokens": 60});
+    if req["stream"].as_bool().unwrap_or(false) {
+        let events = [
+            (
+                "response.created",
+                json!({"type":"response.created","response":{"id":"resp_rev_1","created_at":1_700_000_010,"model":"gpt-upstream"}}),
+            ),
+            (
+                "response.output_text.delta",
+                json!({"type":"response.output_text.delta","item_id":"m1","delta":"pong"}),
+            ),
+            (
+                "response.completed",
+                json!({"type":"response.completed","response":{"id":"resp_rev_1","created_at":1_700_000_010,"model":"gpt-upstream","status":"completed","usage":usage}}),
+            ),
+        ];
+        let mut sse = String::new();
+        for (name, ev) in events {
+            let _ = write!(sse, "event: {name}\ndata: {ev}\n\n");
+        }
+        (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            sse,
+        )
+            .into_response()
+    } else {
+        axum::Json(json!({
+            "id": "resp_rev_json",
+            "object": "response",
+            "created_at": 1_700_000_010,
+            "model": "gpt-upstream",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "id": "m1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "pong", "annotations": []}]
+            }],
+            "usage": usage,
+        }))
+        .into_response()
+    }
+}
+
+/// 反向协议转换端到端验证：仅暴露 `/v1/responses` 的上游（`capabilities.chat_completions = false`），
+/// 同时承接 `/v1/chat/completions` 与 `/v1/messages` 的非流式与流式请求，并返回对应协议形状与精确计费。
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn chat_and_messages_route_to_responses_only_upstream_in_json_and_sse() {
+    let mock_app = Router::new().route("/only/v1/responses", post(mock_responses_only));
+    let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_addr = mock_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock_app).await.unwrap();
+    });
+
+    let env = setup("openai", "/native/v1", None).await;
+    sqlx::query(
+        "UPDATE channels SET api_base = $2, capabilities = '{\"chat_completions\": false}'::jsonb \
+          WHERE id = $1",
+    )
+    .bind(env.channel_id)
+    .bind(format!("http://{mock_addr}/only/v1"))
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    env.state.invalidate_routing_caches();
+    let addr = env.gateway;
+
+    let client = reqwest::Client::new();
+    // 1. OpenAI Chat Completions (non-stream)
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "model": env.model,
+            "messages": [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "ping"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "pong");
+    assert_eq!(body["usage"]["prompt_tokens"], 50);
+    assert_eq!(body["usage"]["completion_tokens"], 10);
+
+    // 2. OpenAI Chat Completions (SSE stream)
+    let resp = client
+        .post(format!("http://{addr}/v1/chat/completions"))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "model": env.model,
+            "stream": true,
+            "messages": [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "ping"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let sse = resp.text().await.unwrap();
+    assert!(sse.contains("\"pong\""), "expected pong chunk: {sse}");
+    assert!(sse.contains("[DONE]"), "expected Chat [DONE]: {sse}");
+
+    // 3. Anthropic Messages (non-stream) -> Responses -> Anthropic
+    let resp = client
+        .post(format!("http://{addr}/v1/messages"))
+        .header("x-api-key", &env.token)
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": env.model,
+            "max_tokens": 64,
+            "system": "be terse",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "message");
+    assert_eq!(body["content"][0]["text"], "pong");
+    assert_eq!(body["usage"]["input_tokens"], 50);
+    assert_eq!(body["usage"]["output_tokens"], 10);
+
+    // 4. Anthropic Messages (SSE stream) -> Responses -> Anthropic SSE
+    let resp = client
+        .post(format!("http://{addr}/v1/messages"))
+        .header("x-api-key", &env.token)
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": env.model,
+            "max_tokens": 64,
+            "stream": true,
+            "system": "be terse",
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let sse = resp.text().await.unwrap();
+    assert!(sse.contains("event: content_block_delta"), "{sse}");
+    assert!(sse.contains("\"pong\""), "{sse}");
+    assert!(sse.contains("event: message_stop"), "{sse}");
+
+    let (status, amount) = wait_record(&env.pg, env.user_id).await;
+    assert_eq!(status, 20);
+    assert_eq!(amount, 120, "(50+10)×1×$2/1M");
+}

@@ -27,6 +27,7 @@ pub struct ExecutionPlan {
     pub adapter: &'static ProviderDescriptor,
     pub dialect: Dialect,
     pub operation: Operation,
+    chat_fallback: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -75,17 +76,35 @@ impl ExecutionPlan {
         requirements: Requirements,
     ) -> Result<Self, PlanError> {
         let adapter = registry::lookup(provider).ok_or(PlanError::Unregistered)?;
-        if !adapter.accepts(format(ingress), upstream_model, native) {
+        let native = adapter.native_responses.enabled(Some(native));
+        let chat_via_responses = allows(caps, "chat_via_responses")
+            && native
+            && matches!(
+                ingress,
+                Ingress::OpenAi | Ingress::Anthropic | Ingress::Gemini
+            );
+        if !adapter.accepts(format(ingress), upstream_model, native) && !chat_via_responses {
             return Err(PlanError::Endpoint);
         }
         let dialect = adapter.dialect(upstream_model);
-        let native = adapter.native_responses.enabled(Some(native));
         let operation = match ingress {
             Ingress::ResponsesCompact => Operation::ResponsesCompact,
             Ingress::Responses if native => Operation::Responses,
+            Ingress::OpenAi | Ingress::Anthropic | Ingress::Gemini
+                if dialect == Dialect::OpenAi
+                    && native
+                    && (chat_via_responses || denies(caps, "chat_completions")) =>
+            {
+                Operation::Responses
+            }
             Ingress::OpenAi | Ingress::Anthropic | Ingress::Responses | Ingress::Gemini => {
                 match dialect {
-                    Dialect::OpenAi => Operation::ChatCompletions,
+                    Dialect::OpenAi => {
+                        if denies(caps, "chat_completions") {
+                            return Err(PlanError::Capability);
+                        }
+                        Operation::ChatCompletions
+                    }
                     Dialect::Anthropic => Operation::Messages,
                     Dialect::Gemini => Operation::GenerateContent,
                     Dialect::Opaque => return Err(PlanError::Endpoint),
@@ -100,10 +119,14 @@ impl ExecutionPlan {
         {
             return Err(PlanError::Capability);
         }
+        let chat_fallback = matches!(operation, Operation::Responses)
+            && matches!(adapter.native_responses, NativeResponses::Optional { .. })
+            && !denies(caps, "chat_completions");
         Ok(Self {
             adapter,
             dialect,
             operation,
+            chat_fallback,
         })
     }
 
@@ -161,11 +184,7 @@ impl ExecutionPlan {
     }
 
     pub const fn can_fallback_to_chat(self) -> bool {
-        matches!(self.operation, Operation::Responses)
-            && matches!(
-                self.adapter.native_responses,
-                NativeResponses::Optional { .. }
-            )
+        self.chat_fallback
     }
 
     /// WS ingress currently requires a registered native WS adapter even when bridging HTTP.
@@ -196,6 +215,10 @@ pub fn format(ingress: Ingress) -> ApiFormat {
         Ingress::ResponsesCompact => ApiFormat::ResponsesCompact,
         Ingress::Gemini => ApiFormat::Gemini,
     }
+}
+
+fn allows(caps: &Value, name: &str) -> bool {
+    caps.get(name).and_then(Value::as_bool) == Some(true)
 }
 
 fn denies(caps: &Value, name: &str) -> bool {
@@ -481,5 +504,40 @@ mod tests {
             }
         }
         assert!(compared > 200, "对照的组合太少，循环条件写错了：{compared}");
+    }
+
+    #[test]
+    fn responses_only_channels_and_opt_in_codex_accept_chat_messages_and_gemini() {
+        for ingress in [Ingress::OpenAi, Ingress::Anthropic, Ingress::Gemini] {
+            let responses_only =
+                plan(ingress, "openai", true, json!({"chat_completions": false})).unwrap();
+            assert_eq!(responses_only.operation, Operation::Responses);
+            assert!(responses_only.converts(ingress));
+            assert!(!responses_only.can_fallback_to_chat());
+            assert_eq!(responses_only.endpoint(false), "/v1/responses");
+
+            // Non-native compat with chat_completions=false cannot serve either operation.
+            assert_eq!(
+                plan(
+                    ingress,
+                    "openai_compat",
+                    false,
+                    json!({"chat_completions": false})
+                )
+                .unwrap_err(),
+                PlanError::Capability
+            );
+
+            // Codex preserves its Responses-only default unless explicitly opted in.
+            assert_eq!(
+                plan(ingress, "codex", true, json!({})).unwrap_err(),
+                PlanError::Endpoint
+            );
+            let codex_opt_in =
+                plan(ingress, "codex", true, json!({"chat_via_responses": true})).unwrap();
+            assert_eq!(codex_opt_in.operation, Operation::Responses);
+            assert!(codex_opt_in.converts(ingress));
+            assert!(!codex_opt_in.can_fallback_to_chat());
+        }
     }
 }
