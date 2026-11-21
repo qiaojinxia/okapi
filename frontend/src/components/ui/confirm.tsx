@@ -85,19 +85,19 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
         role="alertdialog"
         aria-modal="true"
         aria-label={req.title}
-        className="relative z-10 flex w-full max-w-md flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-popover animate-zoom-in"
+        className="relative z-10 flex w-full max-w-md flex-col gap-4 overflow-hidden rounded-2xl border border-border/90 bg-card p-5 shadow-popover animate-zoom-in"
       >
         <div className="flex items-start gap-3">
           <span
             className={
               destructive
-                ? 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-destructive/12 text-destructive'
-                : 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary'
+                ? 'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-destructive/10 text-destructive ring-1 ring-inset ring-destructive/20'
+                : 'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/20'
             }
           >
             <AlertTriangle className="h-4 w-4" />
           </span>
-          <div className="flex min-w-0 flex-col gap-1 pt-1">
+          <div className="flex min-w-0 flex-col gap-1 pt-0.5">
             <h2 className="text-sm font-semibold break-words">{req.title}</h2>
             {req.description !== undefined && (
               <p className="text-xs leading-5 text-muted-foreground">{req.description}</p>
@@ -121,7 +121,7 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
           </div>
         )}
 
-        <div className="flex justify-end gap-2">
+        <div className="-mx-5 -mb-5 mt-1 flex justify-end gap-2 border-t border-border/65 bg-muted/25 px-5 py-3.5">
           <Button variant="ghost" size="sm" onClick={close}>
             {t('common:cancel')}
           </Button>

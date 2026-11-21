@@ -47,7 +47,7 @@ export function Alert({
     <div
       role={tone === 'destructive' ? 'alert' : 'status'}
       className={cn(
-        'flex items-start gap-3 rounded-lg border px-4 py-3 text-sm animate-fade-in',
+        'flex items-start gap-3 rounded-xl border px-4 py-3 text-sm animate-fade-in',
         TONE[tone].wrap,
         className,
       )}

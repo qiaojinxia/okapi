@@ -225,7 +225,11 @@ export function ModelPricingPage() {
           )
         }
       >
-        <Table stickyHeader aria-label={t('admin:modelListTitle')}>
+        <Table
+          stickyHeader
+          aria-label={t('admin:modelListTitle')}
+          className="[&_th]:px-2 [&_td]:px-2 [&_th:first-child]:pl-3 [&_td:first-child]:pl-3 [&_th:last-child]:pr-3 [&_td:last-child]:pr-3"
+        >
           <THead>
             <Tr>
               <Th>{t('admin:modelName')}</Th>
@@ -249,7 +253,13 @@ export function ModelPricingPage() {
                   <div className="flex items-center gap-2.5">
                     <VendorIcon vendor={modelVendor(m)} size="sm" />
                     <div className="min-w-0">
-                      <p className="font-mono font-medium">{m.model_name}</p>
+                      <button
+                        type="button"
+                        onClick={() => setDrawer({ model: m })}
+                        className="block max-w-full cursor-pointer truncate rounded-sm text-left font-mono font-medium leading-5 outline-none transition-colors hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                      >
+                        {m.model_name}
+                      </button>
                       {(m.display_name || m.catalog_config?.kind) && <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
                         {m.catalog_config?.kind && <Badge variant="muted">{t(`catalog:modelKinds.${m.catalog_config.kind}`, { defaultValue: m.catalog_config.kind })}</Badge>}
                         {m.display_name && m.display_name !== m.model_name && <span>{m.display_name}</span>}
@@ -268,7 +278,7 @@ export function ModelPricingPage() {
                 </Td>
                 <Td numeric>{formatRatio(m.model_ratio)}</Td>
                 <Td numeric>{formatRatio(m.completion_ratio)}</Td>
-                <Td numeric className="text-xs text-muted-foreground">
+                <Td numeric className={m.pricing_mode === 'ratio' && m.model_ratio !== null ? 'text-xs text-foreground/85' : 'text-xs text-muted-foreground'}>
                   {m.pricing_mode !== 'ratio' || m.model_ratio === null
                     ? '—'
                     : `${formatUnitPrice(perMillion(m.model_ratio), i18n.language)} / ${formatUnitPrice(perMillion(
@@ -279,7 +289,7 @@ export function ModelPricingPage() {
                 <Td numeric>{formatRatio(m.cache_ratio)}</Td>
                 <Td numeric>{formatRatio(m.cache_write_ratio)}</Td>
                 <Td numeric>
-                  {m.audio_ratio === null || Number(m.audio_ratio) === 1
+                  {m.audio_ratio == null || Number(m.audio_ratio) === 1
                     ? '—'
                     : `${formatRatio(m.audio_ratio)} ×${formatRatio(m.audio_completion_ratio ?? '1')}`}
                 </Td>
@@ -292,7 +302,7 @@ export function ModelPricingPage() {
                   ) : (
                     <Link
                       to="/admin/channels"
-                      className="whitespace-nowrap text-xs underline decoration-dotted hover:text-foreground"
+                      className="whitespace-nowrap text-xs text-muted-foreground underline decoration-dotted underline-offset-4 transition-colors hover:text-primary"
                     >
                       {t('admin:modelChannelCount', { n: channelCount.get(m.model_name) })}
                     </Link>

@@ -92,10 +92,13 @@ export function FilterBar({ search, scope, trailing }: {
   if (search.group !== undefined) chips.push({ dim: 'group', text: search.group })
 
   return (
-    <div data-slot="analytics-filters" className="min-w-0">
-      <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2">
+    <div
+      data-slot="analytics-filters"
+      className="min-w-0 rounded-xl border border-border/80 bg-card px-3.5 py-2.5 shadow-card"
+    >
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-4 gap-y-2.5">
         <section aria-label={t('analytics:quickFilters')} className="min-w-0 max-w-full flex-1 basis-96 space-y-2">
-          <form className="flex min-w-0 flex-wrap items-start gap-2" onSubmit={(e) => { e.preventDefault(); add() }}>
+          <form className="flex min-w-0 flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); add() }}>
             <Select
               aria-label={t('analytics:filterDimension')}
               value={dim}
@@ -120,32 +123,39 @@ export function FilterBar({ search, scope, trailing }: {
               aria-label={dimLabel[dim]} value={value} onChange={changeValue} onSubmit={add}
               onBlur={() => setBlurred(true)} className="min-w-36 flex-1 sm:max-w-80"
               aria-invalid={showError || undefined} aria-describedby={showError ? `${inputId}-error` : undefined} />}
-            <Button type="submit" size="sm" variant="outline" className="min-h-9 max-sm:w-full" disabled={value.trim() === '' || numericInvalid}>
+            <Button type="submit" size="sm" variant="outline" className="min-h-9 shrink-0 max-sm:w-full" disabled={value.trim() === '' || numericInvalid}>
               {t('analytics:addFilter')}
             </Button>
           </form>
           {showError && <p id={`${inputId}-error`} role="alert" className="text-xs text-destructive">{t(malformedEntityId(value) ? 'analytics:invalidFilterId' : 'analytics:entitySelectionRequired')}</p>}
           {chips.length > 0 && (
-            <FilterChips label={t('analytics:activeFilters')}>
-              {chips.map((c) => (
-                <FilterChip key={c.dim} label={dimLabel[c.dim]} value={c.text}
-                  removeLabel={t('analytics:removeFilter', { name: c.text })} onRemove={() => apply({ [c.dim]: undefined })} />
-              ))}
-              {chips.length > 1 && (
-                <button
-                  type="button"
-                  className="min-h-7 rounded px-2 text-xs text-muted-foreground underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40"
-                  onClick={() =>
-                    apply({ user_id: undefined, api_key_id: undefined, channel_id: undefined, model: undefined, group: undefined })
-                  }
-                >
-                  {t('analytics:clearFilters')}
-                </button>
-              )}
-            </FilterChips>
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <span className="text-[11px] font-medium text-muted-foreground">{t('analytics:activeFilters')}</span>
+              <FilterChips label={t('analytics:activeFilters')}>
+                {chips.map((c) => (
+                  <FilterChip key={c.dim} label={dimLabel[c.dim]} value={c.text}
+                    removeLabel={t('analytics:removeFilter', { name: c.text })} onRemove={() => apply({ [c.dim]: undefined })} />
+                ))}
+                {chips.length > 1 && (
+                  <button
+                    type="button"
+                    className="min-h-7 cursor-pointer rounded px-2 text-xs text-muted-foreground underline-offset-2 outline-none transition-colors hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-primary/40"
+                    onClick={() =>
+                      apply({ user_id: undefined, api_key_id: undefined, channel_id: undefined, model: undefined, group: undefined })
+                    }
+                  >
+                    {t('analytics:clearFilters')}
+                  </button>
+                )}
+              </FilterChips>
+            </div>
           )}
         </section>
-        {trailing}
+        {trailing && (
+          <div className="flex min-w-0 max-w-full shrink-0 items-center lg:border-l lg:border-border/65 lg:pl-4">
+            {trailing}
+          </div>
+        )}
       </div>
     </div>
   )

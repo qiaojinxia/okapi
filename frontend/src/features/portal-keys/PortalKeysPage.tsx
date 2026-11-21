@@ -261,14 +261,14 @@ export function PortalKeysPage() {
           <colgroup>
             {/* Explicit widths share extra desktop space; the name no longer absorbs it all. */}
             <col className="w-40" />
-            <col className="w-[132px]" />
-            <col className="w-22" />
-            <col className="w-[104px]" />
-            <col className="w-[108px]" />
-            <col className="w-20" />
-            <col className="w-20" />
-            <col className="w-24" />
             <col className="w-[136px]" />
+            <col className="w-[78px]" />
+            <col className="w-[96px]" />
+            <col className="w-[126px]" />
+            <col className="w-[76px]" />
+            <col className="w-[72px]" />
+            <col className="w-24" />
+            <col className="w-[144px]" />
             <col className="w-[152px] md:w-[116px]" />
           </colgroup>
           <THead>
@@ -300,7 +300,7 @@ export function PortalKeysPage() {
               <Tr key={k.id}>
                 <Td className="whitespace-nowrap">
                   <div className="flex min-w-0 items-center gap-1.5">
-                    <code className="truncate rounded bg-muted/70 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">{k.key_prefix}…</code>
+                    <code className="truncate rounded bg-muted/75 px-1.5 py-0.5 font-mono text-xs text-muted-foreground ring-1 ring-inset ring-border/50">{k.key_prefix}…</code>
                     <KeyCopyButton id={k.id} name={k.name} status={k.copy_status} hasSession={me.data?.has_web_session === true} />
                   </div>
                 </Td>

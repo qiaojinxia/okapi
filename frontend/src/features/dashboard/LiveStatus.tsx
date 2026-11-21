@@ -38,17 +38,53 @@ export function LiveStatus() {
   const recentQps = (d.qps_milli / 1_000).toLocaleString(locale, { maximumFractionDigits: 3 })
   const hasRequests = d.requests > 0
   const updated = q.dataUpdatedAt > 0 ? t('common:updatedAt', { time: new Date(q.dataUpdatedAt).toLocaleTimeString(locale) }) : ''
-  const detail = [
-    `${t('admin:realtimeAvgQps')} ${qps}`,
-    `${t('admin:realtimeReqs60')} ${formatCount(d.requests, locale)}`,
-    // 最近一分钟没有调用时错误率没有意义，不显示成 0%
-    hasRequests ? `${t('admin:kpiErrorRate')} ${formatBp(d.error_rate_bp, locale)}` : '',
-    `${t('admin:kpiTokens')} ${formatCount(d.tokens, locale)}`,
-    `${t('admin:kpiRevenue')} ${formatMoneyAggregate(d.amount_micro, locale, true)}`,
-    t('admin:realtimeQpsHint', { seconds: windowSecs, recentSeconds: Math.min(windowSecs, 10), recentQps }),
-    [t('admin:dashboardLiveHint'), updated].filter(Boolean).join(' · '),
-  ].filter(Boolean).join(' · ')
-  return frame(<Tooltip content={detail}>
+  const errorTone = d.error_rate_bp >= 500 ? 'text-destructive' : d.error_rate_bp > 0 ? 'text-warning' : 'text-foreground'
+  const detailCard = (
+    <div className="w-[256px] max-w-full space-y-2.5 text-left">
+      <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-2">
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-success" />
+          {t('admin:dashboardLive')}
+        </span>
+        {updated && <span className="text-[11px] tabular-nums text-muted-foreground">{updated}</span>}
+      </div>
+      <div className="space-y-1.5 text-xs">
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">{t('admin:realtimeAvgQps')}</span>
+          <span className="sr-only"> </span>
+          <span className="font-semibold tabular-nums text-foreground">{qps}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">{t('admin:realtimeReqs60')}</span>
+          <span className="sr-only"> </span>
+          <span className="font-semibold tabular-nums text-foreground">{formatCount(d.requests, locale)}</span>
+        </div>
+        {/* 最近一分钟没有调用时错误率没有意义，不显示成 0% */}
+        {hasRequests && (
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-muted-foreground">{t('admin:kpiErrorRate')}</span>
+            <span className="sr-only"> </span>
+            <span className={`font-semibold tabular-nums ${errorTone}`}>{formatBp(d.error_rate_bp, locale)}</span>
+          </div>
+        )}
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">{t('admin:kpiTokens')}</span>
+          <span className="sr-only"> </span>
+          <span className="font-semibold tabular-nums text-foreground">{formatCount(d.tokens, locale)}</span>
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <span className="text-muted-foreground">{t('admin:kpiRevenue')}</span>
+          <span className="sr-only"> </span>
+          <span className="font-semibold tabular-nums text-foreground">{formatMoneyAggregate(d.amount_micro, locale, true)}</span>
+        </div>
+      </div>
+      <div className="space-y-1 border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">
+        <p>{t('admin:realtimeQpsHint', { seconds: windowSecs, recentSeconds: Math.min(windowSecs, 10), recentQps })}</p>
+        <p className="text-[10.5px] text-muted-foreground/80">{t('admin:dashboardLiveHint')}</p>
+      </div>
+    </div>
+  )
+  return frame(<Tooltip content={detailCard}>
     <span tabIndex={0} className="inline-flex items-center gap-1.5 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
       <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-success" />
       {hasRequests ? t('admin:dashboardLiveBusy', { n: formatCount(d.requests, locale), qps }) : t('admin:dashboardLiveIdle')}

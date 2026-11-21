@@ -52,7 +52,7 @@ export function CompactMeter({
 
   const track = (
     <div
-      className="relative h-2 w-full overflow-hidden rounded-full bg-muted/90 ring-1 ring-inset ring-border/70 dark:bg-white/[0.07] dark:ring-white/[0.07]"
+      className="relative h-2 w-full overflow-hidden rounded-full bg-muted ring-1 ring-inset ring-border/75 dark:bg-white/[0.08] dark:ring-white/[0.08]"
       role="progressbar"
       aria-label={meterLabel}
       aria-valuemin={0}
@@ -89,8 +89,8 @@ export function CompactMeter({
             </span>
             <span
               className={cn(
-                'shrink-0 text-xs tabular-nums',
-                idle ? 'font-medium text-muted-foreground/80' : cn('font-semibold', tone.text),
+                'shrink-0 text-[13px] tabular-nums',
+                idle ? 'font-medium text-muted-foreground/75' : cn('font-semibold', tone.text),
               )}
             >
               {percent === null ? '—' : `${percent}%`}
@@ -98,7 +98,7 @@ export function CompactMeter({
           </div>
           <span
             data-slot="quota-reset"
-            className="flex min-w-0 shrink items-center justify-end gap-1 text-[11px] leading-4 text-muted-foreground tabular-nums"
+            className="flex min-w-0 shrink items-center justify-end gap-1 text-[11.5px] leading-4 text-muted-foreground tabular-nums"
             title={footerTitle}
           >
             {footer}
@@ -113,23 +113,23 @@ export function CompactMeter({
     <div
       data-slot={slot}
       className={cn(
-        'grid min-w-0 grid-cols-[auto_1fr] items-center gap-x-2.5 gap-y-1 sm:gap-y-0',
+        'grid min-w-0 grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 sm:gap-y-0',
         wideLabel
-          ? 'sm:grid-cols-[4rem_minmax(0,1fr)_2.5rem_5.5rem]'
-          : 'sm:grid-cols-[2.25rem_minmax(0,1fr)_2.5rem_5.5rem]',
+          ? 'sm:grid-cols-[4.25rem_minmax(0,1fr)_2.75rem_5.75rem]'
+          : 'sm:grid-cols-[2.25rem_minmax(0,1fr)_2.75rem_5.75rem]',
       )}
     >
-      <div className="flex min-w-0 items-baseline gap-1.5 sm:contents">
+      <div className="flex min-w-0 items-center gap-1.5 sm:contents">
         <span
-          className="truncate font-mono text-[11px] font-medium tracking-tight text-muted-foreground"
+          className="inline-flex h-[18px] items-center justify-center truncate rounded bg-muted/90 px-1.5 font-mono text-[10.5px] font-semibold tracking-tight text-foreground/75 ring-1 ring-inset ring-border/65 dark:bg-white/[0.07]"
           title={title}
         >
           {label}
         </span>
         <span
           className={cn(
-            'shrink-0 text-xs tabular-nums sm:order-3 sm:text-right',
-            idle ? 'font-medium text-muted-foreground/75' : cn('font-semibold', tone.text),
+            'shrink-0 text-[13px] leading-4 tabular-nums sm:order-3 sm:text-right',
+            idle ? 'font-medium text-muted-foreground/65' : cn('font-semibold', tone.text),
           )}
         >
           {percent === null ? '—' : `${percent}%`}
@@ -137,7 +137,7 @@ export function CompactMeter({
       </div>
       <span
         data-slot="quota-reset"
-        className="flex min-w-0 items-center justify-end gap-1 text-[11px] leading-4 text-muted-foreground/80 tabular-nums sm:order-4"
+        className="flex min-w-0 items-center justify-end gap-1 text-[11.5px] leading-4 text-muted-foreground tabular-nums sm:order-4"
         title={footerTitle}
       >
         {footer}

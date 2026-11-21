@@ -1,11 +1,11 @@
 import { cloneElement, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 
 interface TooltipProps {
-  /// 提示文字；空串 = 不显示。
-  content: string
+  /// 提示内容；空串 / null / undefined / false = 不显示。支持纯文本或结构化 ReactNode。
+  content: ReactNode
   side?: 'top' | 'bottom'
   /// 触发元素；需能接受 mouse/focus 事件（普通 DOM 元素或透传 props 的组件）。
   children: React.ReactElement
@@ -21,6 +21,9 @@ interface TooltipProps {
 ///
 /// 外观采用克制的浮层卡片（index.css 的 `.note` / `.note-body`）：
 /// 与弹窗 / 菜单共用纸白与暗板表面、细边与轻投影，清晰易读且不过度装饰。
+/// 全站同一时刻只显示一枚悬浮提示：悬停或聚焦到另一处时立刻收起上一枚，避免屏幕上同时浮出两张提示卡。
+let dismissActiveTooltip: (() => void) | null = null
+
 export function Tooltip({ content, side = 'top', children, className }: TooltipProps) {
   const anchor = useRef<HTMLSpanElement>(null)
   const popup = useRef<HTMLSpanElement>(null)
@@ -28,17 +31,33 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
   const hovered = useRef(false)
   const id = useId()
   const [open, setOpen] = useState(false)
-  const visible = open && content !== ''
+  const empty = content === '' || content === null || content === undefined || content === false
+  const visible = open && !empty
   const cancelClose = () => { if (timer.current !== null) clearTimeout(timer.current); timer.current = null }
-  const show = () => { cancelClose(); if (content !== '') setOpen(true) }
-  const hide = () => { cancelClose(); setOpen(false) }
+  const dismissRef = useRef<() => void>(() => undefined)
+  const hide = () => {
+    cancelClose()
+    if (dismissActiveTooltip === dismissRef.current) dismissActiveTooltip = null
+    setOpen(false)
+  }
+  dismissRef.current = hide
+  const show = () => {
+    cancelClose()
+    if (empty) return
+    if (dismissActiveTooltip && dismissActiveTooltip !== dismissRef.current) dismissActiveTooltip()
+    dismissActiveTooltip = dismissRef.current
+    setOpen(true)
+  }
   const leave = () => {
     cancelClose()
     timer.current = setTimeout(() => {
-      if (!hovered.current && !anchor.current?.contains(document.activeElement)) setOpen(false)
+      if (!hovered.current && !anchor.current?.contains(document.activeElement)) hide()
     }, 120)
   }
-  useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current) }, [])
+  useEffect(() => () => {
+    if (timer.current !== null) clearTimeout(timer.current)
+    if (dismissActiveTooltip === dismissRef.current) dismissActiveTooltip = null
+  }, [])
 
   useLayoutEffect(() => {
     const tip = popup.current, trigger = anchor.current
@@ -104,6 +123,7 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
         className={cn('inline-flex', className)}
         onMouseEnter={() => { hovered.current = true; show() }}
         onMouseLeave={() => { hovered.current = false; leave() }}
+        onClick={() => { hovered.current = false; hide() }}
         onFocus={show}
         onBlur={leave}
       >
@@ -119,7 +139,14 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
             style={{ visibility: 'hidden', left: 0, top: 0 }}
           >
             {/* max-h-[inherit]：定位代码把可用高度写在外层上，内层照这个高度滚动 */}
-            <span className="note-body block max-h-[inherit] overflow-auto overscroll-contain px-2.5 py-1.5 text-xs leading-[1.35] whitespace-normal [overflow-wrap:anywhere]">
+            <span
+              className={cn(
+                'note-body block max-h-[inherit] overflow-auto overscroll-contain text-xs',
+                typeof content === 'string'
+                  ? 'px-2.5 py-1.5 leading-[1.4] whitespace-pre-line [overflow-wrap:anywhere]'
+                  : 'p-3 leading-normal',
+              )}
+            >
               {content}
             </span>
           </span>,

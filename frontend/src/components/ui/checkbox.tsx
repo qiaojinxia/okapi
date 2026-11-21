@@ -48,7 +48,7 @@ export function Checkbox({
           aria-checked={indeterminate ? 'mixed' : checked}
           data-indeterminate={indeterminate || undefined}
           onChange={(e) => onChange(e.target.checked)}
-          className="peer h-4 w-4 cursor-inherit appearance-none rounded border border-input bg-card shadow-xs transition-colors outline-none hover:border-muted-foreground/50 checked:border-primary checked:bg-primary data-[indeterminate]:border-primary data-[indeterminate]:bg-primary focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed"
+          className="peer h-4 w-4 cursor-inherit appearance-none rounded-[5px] border border-muted-foreground/35 bg-card shadow-xs transition-[border-color,background-color,box-shadow] duration-150 outline-none hover:border-primary/70 checked:border-primary checked:bg-primary checked:shadow-[inset_0_1px_0_oklch(1_0_0/0.25)] data-[indeterminate]:border-primary data-[indeterminate]:bg-primary focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed dark:border-muted-foreground/45"
         />
         {(checked || indeterminate) && (
           <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-primary-foreground">

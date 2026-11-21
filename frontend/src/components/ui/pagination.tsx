@@ -145,7 +145,9 @@ export function Pagination({
                 className={cn(
                   'h-9 min-w-9 px-2 text-xs tabular-nums',
                   // 当前页是一枚淡色胶囊，不是实心主色按钮：翻页是次要操作，不该在整页里最抢眼
-                  p === current ? 'bg-muted font-semibold text-foreground hover:bg-muted' : 'text-muted-foreground hover:text-foreground',
+                  p === current
+                    ? 'bg-muted font-semibold text-foreground ring-1 ring-inset ring-border/75 hover:bg-muted'
+                    : 'text-muted-foreground hover:text-foreground',
                 )}
                 aria-current={p === current ? 'page' : undefined}
                 disabled={disabled}

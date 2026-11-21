@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import dayjs from 'dayjs'
 import { Activity, Pencil, Plus, Trash2, Upload } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -34,10 +35,10 @@ function failureText(t: (key: string, options?: Record<string, unknown>) => stri
 
 function ProxyStatus({ proxy }: { proxy: ProxyRow }) {
   const { t } = useTranslation()
-  if (proxy.status !== 1) return <Badge variant="muted">{t('common:disabled')}</Badge>
+  if (proxy.status !== 1) return <Badge variant="muted" dot>{t('common:disabled')}</Badge>
   if (proxy.cooling) {
     return (
-      <Badge variant="warning" title={failureText(t, proxy.last_error)}>
+      <Badge variant="warning" dot title={failureText(t, proxy.last_error)}>
         {t('admin:proxyCooling')}
       </Badge>
     )
@@ -51,8 +52,8 @@ function TrafficCell({ row }: { row: { up_bytes: number; down_bytes: number } | 
   if (!row) return <span className="text-muted-foreground">—</span>
   return (
     <span className="flex flex-col items-end tabular-nums">
-      <span className="font-medium">{formatBytes(row.up_bytes + row.down_bytes, i18n.language)}</span>
-      <span className="text-muted-foreground">
+      <span className="font-medium text-foreground">{formatBytes(row.up_bytes + row.down_bytes, i18n.language)}</span>
+      <span className="text-[11px] text-muted-foreground">
         {t('admin:proxyTrafficSplit', {
           down: formatBytes(row.down_bytes, i18n.language),
           up: formatBytes(row.up_bytes, i18n.language),
@@ -68,6 +69,7 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
   const { confirm, dialog } = useConfirm()
   const [drawer, setDrawer] = useState<{ proxy?: ProxyRow } | null>(null)
   const [importing, setImporting] = useState(false)
+  const [testingId, setTestingId] = useState<number | null>(null)
   const report = useReportToast()
   const { query: list, pager, rows } = usePagedQuery({
     queryKey: (page) => qk.adminProxiesPage(page),
@@ -79,6 +81,7 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
   const invalidate = () => void invalidateEgress(queryClient)
   const test = useMutation({
     mutationFn: (id: number) => apiFetch<ProbeResult>(`/admin/proxies/${id}/test`, { method: 'POST' }),
+    onMutate: (id) => setTestingId(id),
     onSuccess: (r) => {
       if (r.ok && r.exit_ip_changed) {
         // 出口 IP 变了：固定分配在它上面的账号都随之换了 IP，用警告而不是成功提示
@@ -98,6 +101,7 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
       invalidate()
     },
     onError: (err) => toast.error(describeError(err)),
+    onSettled: () => setTestingId(null),
   })
   const remove = useMutation({
     mutationFn: (id: number) => apiFetch(`/admin/proxies/${id}`, { method: 'DELETE' }),
@@ -124,7 +128,7 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
         </Button>
         {create}
       </ListToolbar>
-      <ListState query={list} skeleton={{ rows: 6, cols: 7 }} empty={<EmptyState hint={t('admin:proxiesEmptyHint')} action={create} />}>
+      <ListState query={list} skeleton={{ rows: 6, cols: 6 }} empty={<EmptyState hint={t('admin:proxiesEmptyHint')} action={create} />}>
         <Table stickyHeader>
           <THead>
             <Tr>
@@ -144,7 +148,14 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
                   <Td>
                     <span className="flex max-w-72 flex-col">
                       <span className="flex items-center gap-1.5">
-                        <span className="truncate font-medium" title={p.name}>{p.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => setDrawer({ proxy: p })}
+                          className="cursor-pointer truncate rounded-sm text-left font-medium outline-none transition-colors hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                          title={p.name}
+                        >
+                          {p.name}
+                        </button>
                         {p.is_default && <Badge variant="info">{t('admin:egressDefaultBadge')}</Badge>}
                       </span>
                       <span className="truncate font-mono text-xs text-muted-foreground" title={p.url_masked}>
@@ -169,7 +180,7 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
                     ) : (
                       <span className="flex flex-col text-xs">
                         <span className="flex items-center gap-1.5">
-                          <span className="font-mono">{p.exit_ip ?? '—'}</span>
+                          <span className="font-mono font-medium text-foreground">{p.exit_ip ?? '—'}</span>
                           {p.exit_country && <Badge variant="outline">{p.exit_country}</Badge>}
                           {exitIpRecentlyChanged(p) && (
                             <Badge
@@ -189,9 +200,12 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
                             {t('admin:proxyLastProbeFailed')}
                           </span>
                         )}
-                        <span className="text-muted-foreground tabular-nums">
+                        <span
+                          className="text-[11px] text-muted-foreground tabular-nums"
+                          title={new Date(p.checked_at).toLocaleString()}
+                        >
                           {p.latency_ms !== null ? `${p.latency_ms} ms · ` : ''}
-                          {new Date(p.checked_at).toLocaleString()}
+                          {dayjs(p.checked_at).format('MM-DD HH:mm')}
                         </span>
                       </span>
                     )}
@@ -224,7 +238,8 @@ export function ProxyList({ tabs }: { tabs: React.ReactNode }) {
                         <IconButton
                           icon={Activity}
                           label={t('admin:proxyTest')}
-                          disabled={test.isPending}
+                          loading={testingId === p.id}
+                          disabled={test.isPending && testingId !== p.id}
                           onClick={() => test.mutate(p.id)}
                         />
                         <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer({ proxy: p })} />

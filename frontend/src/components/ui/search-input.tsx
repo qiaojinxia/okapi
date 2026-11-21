@@ -34,7 +34,7 @@ export function SearchInput({
   const input = useRef<HTMLInputElement>(null)
   return (
     <div className={cn('relative flex min-w-0 max-w-full items-center', className)}>
-      {!hideIcon && <Search className="pointer-events-none absolute left-2.5 h-4 w-4 text-muted-foreground" />}
+      {!hideIcon && <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-muted-foreground/70" />}
       <input
         ref={input}
         type="search"
@@ -65,7 +65,7 @@ export function SearchInput({
             onChange('')
             input.current?.focus({ preventScroll: true })
           }}
-          className="absolute right-0 flex h-full w-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40"
+          className="absolute right-1 flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40"
         >
           <X className="h-3.5 w-3.5" />
         </button>

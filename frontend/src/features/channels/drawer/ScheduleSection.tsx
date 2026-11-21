@@ -8,11 +8,13 @@ import type { ChannelForm } from './use-channel-form'
 import { KeySchedule } from './key-panels'
 
 /// 「调度」：优先级、相对成本、每把 key 的并发与权重、账号级控制（额度上限、暂停、授权续期）。
-export function ScheduleSection({ f, channel, limitsOpen, onDone }: {
+export function ScheduleSection({ f, channel, limitsOpen, scheduleOpen, onDone }: {
   f: ChannelForm
   channel: ChannelRow | undefined
-  /** 「额度上限」一开始就展开（从列表行菜单直接进来时）。 */
+  /** 「额度上限」一开始就展开（从列表卡片或菜单直接进来时）。 */
   limitsOpen?: boolean
+  /** 「调度与成本设置」一开始就展开（从列表点击优先级 / 成本系数进来时）。 */
+  scheduleOpen?: boolean
   onDone: () => void
 }) {
   const { t } = useTranslation()
@@ -25,6 +27,7 @@ export function ScheduleSection({ f, channel, limitsOpen, onDone }: {
   return (
     <>
       <OptionalSection id="channel-schedule-options" title={t('admin:channelScheduleOptions')} hint={t('admin:groupScheduleHint')}
+        defaultOpen={scheduleOpen}
         summary={scheduleSummary}
         error={costMilli === null ? t('errors:bad_request', { param: 'cost_milli' })
           : priority === null ? t('errors:bad_request', { param: 'priority' }) : undefined}>

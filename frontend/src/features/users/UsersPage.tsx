@@ -106,7 +106,7 @@ export function UsersPage() {
 
       <ListState
         query={users}
-        skeleton={{ rows: 10, cols: 8 }}
+        skeleton={{ rows: 10, cols: usage.enabled ? 9 : 8 }}
         empty={
           <EmptyState
             title={query !== '' ? t('common:noResults') : undefined}
@@ -132,14 +132,23 @@ export function UsersPage() {
             {rows.map((u) => (
               <Tr key={u.id}>
                 <Td className="font-mono text-muted-foreground tabular-nums">{u.id}</Td>
-                <Td className="max-w-48 truncate font-medium">{u.username}</Td>
+                <Td className="max-w-48 font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setSelected(u.id)}
+                    className="block max-w-full cursor-pointer truncate rounded-sm text-left outline-none transition-colors hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                    title={u.username}
+                  >
+                    {u.username}
+                  </button>
+                </Td>
                 <Td className="max-w-48 truncate text-xs text-muted-foreground">
                   {u.email ?? '—'}
                 </Td>
                 <Td>
                   <Badge variant={u.role >= 10 ? 'success' : 'muted'}>
                     {roleLabel(u.role, t)}
-                    {u.admin_role_id !== null ? ` #${u.admin_role_id}` : ''}
+                    {u.admin_role_id != null ? ` #${u.admin_role_id}` : ''}
                   </Badge>
                 </Td>
                 <Td>
@@ -147,7 +156,7 @@ export function UsersPage() {
                     {u.status === 1 ? t('common:enabled') : t('common:disabled')}
                   </Badge>
                 </Td>
-                <Td numeric>{formatMoney(u.balance_micro, i18n.language)}</Td>
+                <Td numeric className="font-medium">{formatMoney(u.balance_micro, i18n.language)}</Td>
                 {usage.enabled && (
                   <Td>
                     <UsageCell
@@ -157,7 +166,7 @@ export function UsersPage() {
                     />
                   </Td>
                 )}
-                <Td numeric className="font-mono text-xs">×{u.price_multiplier}</Td>
+                <Td numeric className="font-mono text-xs">{u.price_multiplier != null ? `×${u.price_multiplier}` : '—'}</Td>
                 <Td>
                   <div className="flex items-center justify-end">
                     <ActionGroup label={t('common:actions')}>

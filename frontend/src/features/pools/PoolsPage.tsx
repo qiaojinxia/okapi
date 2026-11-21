@@ -64,7 +64,7 @@ export function PoolsPage() {
 
       <ListState
         query={pools}
-        skeleton={{ rows: 6, cols: 6 }}
+        skeleton={{ rows: 6, cols: 7 }}
         empty={
           <EmptyState
             hint={t('admin:poolsEmptyHint')}
@@ -96,7 +96,13 @@ export function PoolsPage() {
                 <Tr key={p.pool_code}>
                   <Td>
                     <span className="inline-flex items-center gap-1.5">
-                      <span className="font-mono text-xs font-medium">{p.pool_code}</span>
+                      <button
+                        type="button"
+                        onClick={() => setDrawer({ pool: p })}
+                        className="cursor-pointer rounded-sm text-left font-mono text-xs font-medium outline-none transition-colors hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                      >
+                        {p.pool_code}
+                      </button>
                       {p.builtin && <Badge variant="muted">{t('admin:poolBuiltin')}</Badge>}
                     </span>
                   </Td>
@@ -105,8 +111,14 @@ export function PoolsPage() {
                       {t(STRATEGY_LABEL[strategyOf(p.routing_strategy)])}
                     </Badge>
                   </Td>
-                  <Td className="font-mono text-xs">
-                    {p.fallback_pool_code ?? <span className="text-muted-foreground">—</span>}
+                  <Td>
+                    {p.fallback_pool_code ? (
+                      <span className="inline-flex max-w-full items-center truncate rounded bg-muted/85 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60 dark:bg-white/[0.06]">
+                        {p.fallback_pool_code}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
                   </Td>
                   <Td className="max-w-64 truncate text-xs text-muted-foreground">
                     {p.description ?? '—'}

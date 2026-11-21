@@ -30,7 +30,7 @@ export function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; 
     return <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
   }
   if (q.isPending) {
-    return <TableSkeleton dense rows={10} cols={9} />
+    return <TableSkeleton dense rows={10} cols={10} />
   }
   const rows = q.data.data
   return (
@@ -90,7 +90,13 @@ export function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; 
                   <Td className="py-1"><LogTokenUsage row={r} /></Td>
                   <Td numeric className="whitespace-nowrap font-medium">{logMoney(r.amount_micro, locale)}</Td>
                   <Td numeric className="py-1"><LogPerformance row={r} /></Td>
-                  <Td className="truncate text-xs text-muted-foreground" title={r.client_type || undefined}>{r.client_type || '—'}</Td>
+                  <Td className="truncate text-xs text-muted-foreground" title={r.client_type || undefined}>
+                    {r.client_type ? (
+                      <span className="inline-block max-w-full truncate rounded bg-muted/75 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                        {r.client_type}
+                      </span>
+                    ) : '—'}
+                  </Td>
                 </Tr>
 
               )

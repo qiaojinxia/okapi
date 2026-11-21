@@ -238,7 +238,7 @@ export function LoginForm() {
         </Link>
       }
     >
-      <div className="flex flex-col gap-5 rounded-xl border border-border bg-card p-6 shadow-card">
+      <div className="flex flex-col gap-5 rounded-2xl border border-border bg-card p-6 shadow-card">
         <Segmented
           className="w-full [&>button]:flex-1 [&>button]:gap-1 [&>button]:px-2 [&>button]:text-xs sm:[&>button]:gap-1.5 sm:[&>button]:px-3 sm:[&>button]:text-sm"
           ariaLabel={t('common:login')}

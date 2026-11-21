@@ -16,8 +16,8 @@ export function OptionalSection({ id, title, summary, hint, error, defaultOpen, 
   return <section data-slot="optional-section" className="border-t border-border py-4 first:border-t-0 first:pt-0 last:pb-0">
     <details id={id} className="group/optional" open={defaultOpen || undefined}
       onToggle={(event) => onOpenChange?.(event.currentTarget.open)}>
-      <summary tabIndex={0} className="flex cursor-pointer list-none items-start gap-2 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary/40 [&::-webkit-details-marker]:hidden">
-        <ChevronRight aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open/optional:rotate-90" />
+      <summary tabIndex={0} className="-mx-1.5 flex cursor-pointer list-none items-start gap-2 rounded-lg px-1.5 py-0.5 outline-none transition-colors hover:bg-muted/45 focus-visible:ring-2 focus-visible:ring-primary/40 [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/80 transition-transform duration-150 group-open/optional:rotate-90" />
         <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
           <span data-slot="optional-section-title" className="text-sm font-medium">{title}</span>
           <span className="min-w-0 break-words text-xs leading-5 text-muted-foreground">{summary}</span>

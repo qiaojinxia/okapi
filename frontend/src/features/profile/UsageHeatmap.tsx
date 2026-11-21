@@ -54,8 +54,30 @@ export function UsageHeatmap({ days, today, metric, selected, onSelect }: {
             {days.map((day, index) => {
               const future = day.day > today
               const label = `${day.day} · ${day.tokens.toLocaleString(i18n.language)} Token · ${t('profile:requestCount', { count: day.requests })} · ${formatMoney(day.amount_micro, i18n.language)}`
+              const tooltipCard = (
+                <div className="w-48 space-y-1.5 text-left tabular-nums">
+                  <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-1">
+                    <span className="font-mono text-[11px] font-semibold text-foreground">{day.day}</span>
+                    <span className="rounded bg-muted/80 px-1 py-px font-mono text-[10px] text-muted-foreground">UTC</span>
+                  </div>
+                  <div className="space-y-1 text-[11.5px]">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-muted-foreground">{t('common:tokens')}</span>
+                      <span className="font-semibold text-foreground">{day.tokens.toLocaleString(i18n.language)}</span>
+                    </div>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-muted-foreground">{t('common:requests')}</span>
+                      <span className="font-medium text-foreground/90">{t('profile:requestCount', { count: day.requests })}</span>
+                    </div>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-muted-foreground">{t('common:amount')}</span>
+                      <span className="font-medium text-foreground/90">{formatMoney(day.amount_micro, i18n.language)}</span>
+                    </div>
+                  </div>
+                </div>
+              )
               return future ? <span key={day.day} aria-hidden data-future={day.day} className="size-[var(--heat-cell)] rounded-[3px] border border-dashed border-border/50" /> : (
-                <Tooltip key={day.day} content={label} className="min-w-0">
+                <Tooltip key={day.day} content={tooltipCard} className="min-w-0">
                   <button
                     type="button"
                     ref={(node) => { if (node) buttons.current.set(day.day, node); else buttons.current.delete(day.day) }}

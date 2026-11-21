@@ -23,7 +23,15 @@ export function LogTokenUsage({ row }: { row: Pick<LogRow, 'usage' | 'usage_deta
     {/* 占位行：与 Token 行的缓存标签行等高，两种行的第一行落在同一个位置 */}
     <span aria-hidden className="h-4" />
   </div>
-  const readHint = hit ? [t('logs:cacheHitHint', { n: number(read) }), share && t('logs:cacheInputShare', { percent: share })].filter(Boolean).join(' ')
+  const readHint = hit && share ? (
+    <div className="w-[244px] max-w-full space-y-1.5 text-left whitespace-normal">
+      <div className="flex items-center gap-1.5 border-b border-border/60 pb-1.5 text-[11.5px] font-medium text-foreground">
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-success" />
+        <span>{t('logs:cacheInputShare', { percent: share })}</span>
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{t('logs:cacheHitHint', { n: number(read) })}</p>
+    </div>
+  ) : hit ? t('logs:cacheHitHint', { n: number(read) })
     : read === 0 ? t('logs:cacheMissHint') : t('logs:cacheReadMissing', { state: missing })
   const writeHint = write === null ? t('logs:cacheWriteMissing', { state: missing }) : t('logs:cacheWriteHint', { n: number(write) })
   const chip = 'inline-flex h-4 items-center gap-1 rounded border px-1 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-primary/40'

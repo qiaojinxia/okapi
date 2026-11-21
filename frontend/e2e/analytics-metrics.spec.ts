@@ -172,3 +172,40 @@ test('趋势金额纵轴和数据表保留 micro 精度，负退款不被零起�
   await page.getByRole('button', { name: '数据表', exact: true }).click()
   await expect(page.getByRole('row').filter({ hasText: '2026-09-30' })).toContainText('-US$0.000001')
 })
+
+test('分析页直接操控：点 KPI 切指标、点拆分实体名下钻、点高级条件芯片即可单条清除', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/admin/stats?endpoint=%2Fv1%2Fmessages')
+  const advanced = page.locator('[data-slot="analysis-filter-summary"]')
+  await expect(advanced).toContainText('/v1/messages')
+  await advanced.getByRole('button', { name: /移除过滤.*\/v1\/messages/ }).click()
+  await expect(page).not.toHaveURL(/endpoint=/)
+  await expect(advanced).not.toContainText('/v1/messages')
+
+  // 点击错误率 KPI 卡直接把趋势图切到错误率
+  await page.getByRole('button', { name: /错误率 33\.33%/ }).click()
+  await expect(page).toHaveURL(/measure=error_rate/)
+
+  // 拆分视图：点击 Tokens KPI 与表头「请求数」均可直接切排序度量；高频维度一键切换；支持行内追踪流向与实体名下钻
+  await page.getByRole('tab', { name: '拆分', exact: true }).click()
+  await page.getByRole('button', { name: /Tokens 1,600/ }).click()
+  await expect(page).toHaveURL(/metric=tokens/)
+  await page.getByRole('table').getByRole('button', { name: '请求数', exact: true }).click()
+  await expect(page).toHaveURL(/metric=requests/)
+  await page.getByRole('button', { name: '渠道', exact: true }).click()
+  await expect(page).toHaveURL(/by=channel/)
+  await page.getByRole('button', { name: '模型', exact: true }).click()
+  await expect(page).not.toHaveURL(/by=/)
+  await expect(page.getByLabel('按')).toHaveValue('model')
+  await page.getByRole('row').filter({ hasText: 'measured-zero' }).getByRole('button', { name: '在流向中追踪路径', exact: true }).click()
+  await expect(page).toHaveURL(/view=flow/)
+  await expect(page).toHaveURL(/model=measured-zero/)
+  await page.goBack()
+  await page.getByRole('row').filter({ hasText: 'measured-zero' }).getByRole('button', { name: 'measured-zero', exact: true }).click()
+  await expect(page).toHaveURL(/model=measured-zero/)
+
+  // 拆分视图点击平均时延 KPI 卡自动切回趋势图并选中时延
+  await page.getByRole('button', { name: /平均时延 3,500 ms/ }).click()
+  await expect(page).toHaveURL(/measure=latency/)
+  await expect(page.getByRole('tab', { name: '趋势', exact: true })).toHaveAttribute('aria-selected', 'true')
+})

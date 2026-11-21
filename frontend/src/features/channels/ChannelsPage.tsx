@@ -1,11 +1,13 @@
 import {
   Activity,
+  AlertTriangle,
   Copy,
   Ellipsis,
   ExternalLink,
   Gauge,
   Globe,
   KeyRound,
+  Loader2,
   MessageSquareText,
   Pencil,
   Plus,
@@ -20,11 +22,10 @@ import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChannelBalance, ChannelRow } from '@/features/channels/types'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
-import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
+import { ChannelDrawer, type ChannelEditFocus } from '@/features/channels/ChannelDrawer'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
 import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import { Switch } from '@/components/ui/switch'
@@ -46,6 +47,7 @@ import { proxyGroupOptions, proxyOptions } from '@/features/proxies/options'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Menu, MenuItem, MenuSeparator } from '@/components/ui/menu'
+import { Tooltip } from '@/components/ui/tooltip'
 import {
   CHANNEL_STATUS_FILTERS,
   CHANNEL_STATUS_VALUE,
@@ -88,15 +90,15 @@ interface ChannelPage {
 
 /// 渠道列表页。
 ///
-/// 采用「双层结构化渠道卡片行」：
-/// - 上层（身份与操作）：勾选框 + 品牌徽章 + 名称 / 协议档位 / 账号或主机 / 出口 / 路由信息（池、模型数、优先级、成本系数、多 key），
-///   右侧是实时健康胶囊、最近测试、调度开关与快捷动作组；若存在冷却或异常 key，下方直接展开诊断告警条。
-/// - 下层（遥测仪表盘）：三栏定比网格（额度与余额 / 近 24h 健康与 TTFT / 近 30 天消费与流量），
-///   每个额度窗口独占一行满宽展开，各卡片同一列严格纵向对齐，窄屏自动流式堆叠、告别横向滚动。
+/// 「所见即可点」的双层结构化渠道卡片行：
+/// - 点击名称打开编辑抽屉；点击池 / 未入池直达渠道池配置；点击模型数悬停看全表、点击直达模型编辑；
+///   点击优先级 / 成本直达调度参数；点击出口代理直达出口设置；点击测活延迟 / 错误码原地重测；
+///   点击额度条直达额度上限；点击上游余额原地刷新；点击近 24h 任一位置看健康时间线；点击近 30 天消费直达该渠道请求日志。
 export function ChannelsPage() {
   const { i18n, t } = useTranslation()
   const queryClient = useQueryClient()
   const [picked, setPicked] = useState<Set<number>>(new Set())
+  const [attentionOnly, setAttentionOnly] = useState(false)
   const search = routeApi.useSearch()
   const navigate = routeApi.useNavigate()
   const query = search.q ?? ''
@@ -104,7 +106,7 @@ export function ChannelsPage() {
   const statusFilter = search.status ?? ''
   const [draft, setDraft] = useDraft(query)
   const [drawer, setDrawer] = useState<
-    { mode: 'create' } | { mode: 'edit'; channel: ChannelRow; focus?: 'limits' } | null
+    { mode: 'create' } | { mode: 'edit'; channel: ChannelRow; focus?: ChannelEditFocus } | null
   >(null)
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
@@ -116,7 +118,8 @@ export function ChannelsPage() {
   const { confirm, dialog } = useConfirm()
   const pager = usePagination()
 
-  const setFilters = (next: { q?: string; provider?: string; status?: string }) =>
+  const setFilters = (next: { q?: string; provider?: string; status?: string }) => {
+    setAttentionOnly(false)
     void navigate({
       search: (prev) => ({
         ...prev,
@@ -126,6 +129,7 @@ export function ChannelsPage() {
         page: undefined,
       }),
     })
+  }
 
   const health = useChannelHealth24h()
   const usage = useChannelUsage()
@@ -278,11 +282,27 @@ export function ChannelsPage() {
   const rows = channels.data?.data ?? []
   const total = channels.data?.total ?? 0
   const enabledCount = channels.data?.enabled ?? 0
-  const allPicked = rows.length > 0 && rows.every((c) => picked.has(c.id))
-  const somePicked = rows.some((c) => picked.has(c.id))
+  const enriched = rows.map((c) => {
+    const enabled = c.status === 1
+    const pools = c.pools ?? []
+    const orphan = enabled && pools.length === 0
+    const rowStat = health.data?.data.find((s) => s.channel_id === c.id)
+    const rowUsage = usage.data?.data.find((u) => u.channel_id === c.id)
+    const rowHealth = channelRowHealth(c.keys, enabled, orphan, rowStat)
+    return { channel: c, enabled, pools, orphan, rowStat, rowUsage, rowHealth }
+  })
+  const issueCount = enriched.filter((r) => r.rowHealth === 'warning' || r.rowHealth === 'destructive').length
+  const focusingIssues = attentionOnly && issueCount > 0
+  const visibleRows = focusingIssues
+    ? enriched.filter((r) => r.rowHealth === 'warning' || r.rowHealth === 'destructive')
+    : enriched
+
+  const allPicked = visibleRows.length > 0 && visibleRows.every((r) => picked.has(r.channel.id))
+  const somePicked = visibleRows.some((r) => picked.has(r.channel.id))
   const filtered = query !== '' || providerFilter !== '' || statusFilter !== ''
   const applySearch = () => setFilters({ q: draft })
   const clearFilters = () => setFilters({ q: '', provider: '', status: '' })
+  const openEdit = (channel: ChannelRow, focus?: ChannelEditFocus) => setDrawer({ mode: 'edit', channel, focus })
   const egressLabel = (c: ChannelRow) => {
     const egress = c.egress
     if (egress?.mode === 'proxy') {
@@ -425,28 +445,43 @@ export function ChannelsPage() {
                         onChange={(on) =>
                           setPicked((prev) => {
                             const next = new Set(prev)
-                            for (const c of rows) {
-                              if (on) next.add(c.id)
-                              else next.delete(c.id)
+                            for (const r of visibleRows) {
+                              if (on) next.add(r.channel.id)
+                              else next.delete(r.channel.id)
                             }
                             return next
                           })
                         }
                       />
+                      {issueCount > 0 && (
+                        <button
+                          type="button"
+                          data-slot="channel-attention-filter"
+                          aria-pressed={focusingIssues}
+                          onClick={() => setAttentionOnly((v) => !v)}
+                          className={cn(
+                            'inline-flex h-6 cursor-pointer items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium tabular-nums ring-1 ring-inset outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
+                            focusingIssues
+                              ? 'bg-warning/15 text-warning ring-warning/35'
+                              : 'bg-card text-muted-foreground ring-border/80 hover:border-warning/40 hover:text-foreground',
+                          )}
+                        >
+                          <AlertTriangle aria-hidden className={cn('h-3 w-3', focusingIssues ? 'text-warning' : 'text-warning/85')} />
+                          <span>{t('admin:channelAttentionOnly')}</span>
+                          <span className={cn('rounded-full px-1.5 text-[10.5px] font-semibold', focusingIssues ? 'bg-warning/20 text-warning' : 'bg-muted text-foreground/80')}>
+                            {issueCount}
+                          </span>
+                        </button>
+                      )}
                     </div>
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((c) => {
-                  const enabled = c.status === 1
+                {visibleRows.map(({ channel: c, enabled, orphan, rowStat, rowUsage, rowHealth }) => {
                   const selected = picked.has(c.id)
-                  const pools = c.pools ?? []
-                  const orphan = enabled && pools.length === 0
-                  const rowStat = health.data?.data.find((s) => s.channel_id === c.id)
-                  const rowUsage = usage.data?.data.find((u) => u.channel_id === c.id)
-                  const rowHealth = channelRowHealth(c.keys, enabled, orphan, rowStat)
                   const hasKeyAlert = enabled && c.keys.length > 0 && c.keys.some((k) => k.status !== 1)
+                  const canQueryBalance = enabled && balanceSupported(c.provider)
                   const egress =
                     c.egress !== undefined && c.egress.mode !== 'inherit'
                       ? {
@@ -480,11 +515,11 @@ export function ChannelsPage() {
                                     : 'border-border/65 bg-card/70 hover:border-border/90 hover:bg-card/90',
                           )}
                         >
-                          {/* 左侧 3.5px 语义状态条：异常与选中常亮，健康态悬停轻亮 */}
+                          {/* 左侧 3px 圆角语义状态条：内缩避开圆角裁切，异常与选中常亮，健康态悬停轻亮 */}
                           <span
                             aria-hidden
                             className={cn(
-                              'pointer-events-none absolute inset-y-0 left-0 w-[3.5px] transition-colors',
+                              'pointer-events-none absolute top-3 bottom-3 left-[3px] w-[3px] rounded-full transition-colors',
                               selected
                                 ? 'bg-primary'
                                 : rowHealth === 'destructive'
@@ -500,7 +535,7 @@ export function ChannelsPage() {
                           {/* 上层：身份与路由 + 实时状态与快捷控制 */}
                           <div className="px-4 pt-3 pb-2.5 sm:px-5">
                             <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2.5">
-                              {/* 左侧：勾选 + 品牌徽章 + 名称 / 协议档位 / 出口与路由 */}
+                              {/* 左侧：勾选 + 品牌徽章 + 名称 / 协议档位 / 出口与路由（各项所见即可点） */}
                               <div className="flex min-w-0 flex-1 items-start gap-3">
                                 <div className="flex h-10 items-center">
                                   <Checkbox
@@ -509,23 +544,49 @@ export function ChannelsPage() {
                                     onChange={() => togglePick(c.id)}
                                   />
                                 </div>
-                                <ChannelIdentity channel={c} egress={egress} />
+                                <ChannelIdentity
+                                  channel={c}
+                                  egress={egress}
+                                  onEdit={(focus) => openEdit(c, focus)}
+                                />
                               </div>
 
-                              {/* 右侧：状态胶囊 + 未入池 + 最近测活 | 调度开关 + 动作组 */}
+                              {/* 右侧：状态胶囊 + 未入池 + 最近测活（点即重测）| 调度开关 + 动作组 */}
                               <div className="flex w-full shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 pl-7 sm:w-auto sm:justify-end sm:pl-2">
                                 <div data-slot="channel-status" className="flex items-center gap-2">
-                                  <KeyStateSummary keys={c.keys} enabled={enabled} />
+                                  <KeyStateSummary
+                                    keys={c.keys}
+                                    enabled={enabled}
+                                    onInspectKeys={() => openEdit(c, c.keys.length === 0 ? 'conn' : 'keys')}
+                                  />
                                   {orphan && (
-                                    <Badge
-                                      variant="destructive"
-                                      className="min-h-[22px] shrink-0 rounded-md px-2 py-0 text-[11px]"
-                                      title={t('admin:poolOrphanWarning')}
+                                    <Tooltip
+                                      content={
+                                        <div className="w-[240px] max-w-full space-y-2 text-left">
+                                          <div className="flex items-start gap-2 text-[11.5px] leading-relaxed text-foreground">
+                                            <span aria-hidden className="mt-1.5 size-1.5 shrink-0 rounded-full bg-destructive" />
+                                            <span>{t('admin:poolOrphanWarning')}</span>
+                                          </div>
+                                          <div className="border-t border-border/60 pt-1.5 text-[11px] text-muted-foreground">
+                                            {t('admin:channelClickPools')}
+                                          </div>
+                                        </div>
+                                      }
                                     >
-                                      {t('admin:channelOrphan')}
-                                    </Badge>
+                                      <button
+                                        type="button"
+                                        onClick={() => openEdit(c, 'pools')}
+                                        className="inline-flex min-h-[22px] shrink-0 cursor-pointer items-center rounded-md bg-destructive/10 px-2 py-0 text-[11px] font-medium whitespace-nowrap text-destructive ring-1 ring-inset ring-destructive/22 outline-none transition-colors hover:bg-destructive/16 focus-visible:ring-2 focus-visible:ring-primary/40"
+                                      >
+                                        {t('admin:channelOrphan')}
+                                      </button>
+                                    </Tooltip>
                                   )}
-                                  <LastProbe probe={c.last_test} />
+                                  <LastProbe
+                                    probe={c.last_test}
+                                    probing={testingId === c.id}
+                                    onProbe={() => test.mutate(c)}
+                                  />
                                 </div>
 
                                 <span aria-hidden className="hidden h-5 w-px bg-border/70 sm:inline-block" />
@@ -549,7 +610,7 @@ export function ChannelsPage() {
                                     <IconButton
                                       icon={Pencil}
                                       label={t('common:edit')}
-                                      onClick={() => setDrawer({ mode: 'edit', channel: c })}
+                                      onClick={() => openEdit(c)}
                                     />
                                     <Menu
                                       strategy="fixed"
@@ -579,7 +640,7 @@ export function ChannelsPage() {
                                       )}
                                       <MenuItem
                                         icon={Gauge}
-                                        onSelect={() => setDrawer({ mode: 'edit', channel: c, focus: 'limits' })}
+                                        onSelect={() => openEdit(c, 'limits')}
                                       >
                                         {t('admin:channelLimitsTitle')}
                                       </MenuItem>
@@ -607,40 +668,76 @@ export function ChannelsPage() {
                               </div>
                             </div>
 
-                            {/* 异常凭证诊断条：仅当有冷却 / 限流 / 失效 key 时展开，不打扰健康渠道 */}
+                            {/* 异常凭证诊断条：露出错误原因，整条点击直达凭证与恢复操作 */}
                             {hasKeyAlert && (
                               <div className="mt-2 pl-7 sm:pl-[4.75rem]">
-                                <KeyStateDetail keys={c.keys} enabled={enabled} />
+                                <KeyStateDetail
+                                  keys={c.keys}
+                                  enabled={enabled}
+                                  onInspect={() => openEdit(c, 'keys')}
+                                />
                               </div>
                             )}
                           </div>
 
                           {/* 下层遥测仪表盘：三栏定比对齐——额度与余额 / 近 24h 健康与 TTFT / 近 30 天用量 */}
-                          <div className="border-t border-border/55 bg-muted/[0.22] px-4 py-2 sm:px-5 dark:bg-white/[0.018]">
-                            <div className="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)_minmax(11.5rem,0.72fr)] md:items-center md:gap-0 md:divide-x md:divide-border/55">
-                              {/* 区域一：额度仪表与上游余额 */}
+                          <div className="border-t border-border/60 bg-muted/[0.26] px-4 py-2.5 sm:px-5 dark:bg-white/[0.022]">
+                            <div className="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1.55fr)_minmax(0,1.05fr)_minmax(11.5rem,0.72fr)] md:items-center md:gap-0 md:divide-x md:divide-border/60">
+                              {/* 区域一：额度仪表（点击直达额度上限）与上游余额（点时间即原地刷新） */}
                               <div
                                 data-slot="channel-quota"
                                 className="flex min-w-0 flex-col justify-center gap-2 md:pr-5"
                               >
-                                <ChannelQuotaCell
-                                  channelId={c.id}
-                                  provider={c.provider}
-                                  control={c.settings?.account_control}
-                                  enabled={enabled}
-                                  fallback={
-                                    c.last_balance ? null : (
-                                      <div className="flex items-center gap-2 text-xs text-muted-foreground/65">
-                                        <span className="text-[11px]">{t('admin:channelColQuota')}</span>
-                                        <span aria-hidden>—</span>
-                                      </div>
-                                    )
-                                  }
+                                <div
+                                  title={enabled ? t('admin:channelClickLimits') : undefined}
+                                  onClick={(e) => {
+                                    if (!enabled) return
+                                    if ((e.target as HTMLElement).closest('button, a')) return
+                                    openEdit(c, 'limits')
+                                  }}
+                                  className={cn(
+                                    'min-w-0 empty:hidden',
+                                    enabled && '-mx-2 -my-1 cursor-pointer rounded-lg px-2 py-1 transition-colors hover:bg-accent/65',
+                                  )}
+                                >
+                                  <ChannelQuotaCell
+                                    channelId={c.id}
+                                    provider={c.provider}
+                                    control={c.settings?.account_control}
+                                    enabled={enabled}
+                                    fallback={
+                                      c.last_balance ? null : canQueryBalance ? (
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="text-[11px] leading-4 font-medium text-muted-foreground/80">{t('admin:channelColQuota')}</span>
+                                          <button
+                                            type="button"
+                                            disabled={balancingId === c.id}
+                                            onClick={() => balance.mutate(c)}
+                                            className="-ml-1.5 inline-flex w-fit cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium text-primary outline-none transition-colors hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-60"
+                                          >
+                                            {balancingId === c.id
+                                              ? <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
+                                              : <Wallet aria-hidden className="h-3 w-3" />}
+                                            {t('admin:balanceQuery')}
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="flex flex-col gap-0.5">
+                                          <span className="text-[11px] leading-4 font-medium text-muted-foreground/75">{t('admin:channelColQuota')}</span>
+                                          <span className="text-sm leading-5 text-muted-foreground/60" aria-hidden>—</span>
+                                        </div>
+                                      )
+                                    }
+                                  />
+                                </div>
+                                <LastBalance
+                                  balance={c.last_balance}
+                                  refreshing={balancingId === c.id}
+                                  onRefresh={balanceSupported(c.provider) ? () => balance.mutate(c) : undefined}
                                 />
-                                <LastBalance balance={c.last_balance} />
                               </div>
 
-                              {/* 区域二：近 24h 健康度与首字延迟 */}
+                              {/* 区域二：近 24h 健康度与首字延迟（整块点开时间线抽屉） */}
                               <div
                                 data-slot="channel-health"
                                 className="flex min-w-0 flex-col justify-center border-t border-border/45 pt-2.5 md:border-t-0 md:px-5 md:pt-0"
@@ -651,9 +748,13 @@ export function ChannelsPage() {
                                 />
                               </div>
 
-                              {/* 区域三：近 30 天花费与流量 */}
+                              {/* 区域三：近 30 天花费与流量（点击直达该渠道请求日志） */}
                               <div className="flex min-w-0 flex-col justify-center border-t border-border/45 pt-2.5 md:border-t-0 md:pl-5 md:pt-0">
-                                <ChannelUsage usage={rowUsage} settled={usage.data !== undefined} />
+                                <ChannelUsage
+                                  usage={rowUsage}
+                                  channelId={c.id}
+                                  settled={usage.data !== undefined}
+                                />
                               </div>
                             </div>
                           </div>
@@ -702,6 +803,7 @@ export function ChannelsPage() {
       {dialog}
       {drawer !== null && (
         <ChannelDrawer
+          key={drawer.mode === 'edit' ? `${drawer.channel.id}:${drawer.focus ?? 'default'}` : 'create'}
           channel={editingChannel}
           focus={drawer.mode === 'edit' ? drawer.focus : undefined}
           onClose={() => setDrawer(null)}
@@ -735,15 +837,70 @@ function hostOf(base: string): string {
 
 const SUBSCRIPTION_PROVIDERS = new Set(['anthropic_max', 'codex'])
 
-/// 渠道身份与路由摘要块：
-/// 第一行是名称 + #ID + 平台/档位胶囊 + 供应商控制台直达；
-/// 第二行是账号或主机名 + 显式出口 + 调度路由信息（所属池、模型数、优先级、非默认成本系数、多 key 计数）。
+/// 模型悬停卡片：以等宽标签展示实际服务的模型名（超过 12 个折成 +N），比逗号串更易扫读。
+function ModelPreviewCard({ models, title, hint }: { models: string[]; title: string; hint: string }) {
+  if (models.length === 0) return <span>{hint}</span>
+  const shown = models.slice(0, 12)
+  const extra = models.length - shown.length
+  return (
+    <div className="max-w-72 space-y-2 text-left">
+      <div className="border-b border-border/60 pb-1.5 text-[11px] font-medium text-muted-foreground">
+        {title}
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {shown.map((m, idx) => (
+          <code
+            key={m}
+            className="rounded bg-muted/85 px-1.5 py-0.5 font-mono text-[11px] text-foreground/90 ring-1 ring-inset ring-border/60"
+          >
+            {m}
+            {idx < shown.length - 1 && <span className="sr-only">, </span>}
+          </code>
+        ))}
+        {extra > 0 && (
+          <span className="inline-flex items-center rounded bg-muted/55 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+            +{extra}
+          </span>
+        )}
+      </div>
+      <div className="border-t border-border/55 pt-1.5 text-[11px] text-muted-foreground/85">{hint}</div>
+    </div>
+  )
+}
+
+function PoolsPreviewCard({ pools, title, hint }: { pools: string[]; title: string; hint: string }) {
+  return (
+    <div className="max-w-64 space-y-2 text-left">
+      <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-1.5 text-[11px] font-medium text-muted-foreground">
+        <span>{title}</span>
+        <span className="tabular-nums">{pools.length}</span>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {pools.map((p) => (
+          <code
+            key={p}
+            className="rounded bg-muted/85 px-1.5 py-0.5 font-mono text-[11px] text-foreground/90 ring-1 ring-inset ring-border/60"
+          >
+            {p}
+          </code>
+        ))}
+      </div>
+      <div className="border-t border-border/55 pt-1.5 text-[11px] text-muted-foreground/85">{hint}</div>
+    </div>
+  )
+}
+
+/// 渠道身份与路由摘要块（所见即可点）：
+/// 第一行：名称（点击编辑接入）+ #ID + 平台/档位胶囊 + 供应商控制台直达；
+/// 第二行：账号或主机名 + 出口代理（点击直达出口配置）+ 所属池（点击直达池配置）+ 模型数（悬停见模型表、点击直达模型编辑）+ 优先级/成本（点击直达调度）+ 多 key 数。
 function ChannelIdentity({
   channel: c,
   egress,
+  onEdit,
 }: {
   channel: ChannelRow
   egress?: { label: string; title: string; mono: boolean }
+  onEdit: (focus?: ChannelEditFocus) => void
 }) {
   const { t } = useTranslation()
   const plans = [...new Set(c.keys.map((k) => k.account_plan).filter((v): v is string => Boolean(v)))]
@@ -763,18 +920,20 @@ function ChannelIdentity({
         className={cn(enabled ? 'group-hover/row:scale-[1.03]' : 'opacity-45 grayscale')}
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
-        {/* 第一行：主标题 + 编号 + 平台档位 + 控制台外链 */}
+        {/* 第一行：主标题（点击直达编辑）+ 编号 + 平台档位 + 控制台外链 */}
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span
+          <button
+            type="button"
             data-slot="channel-name"
+            onClick={() => onEdit('conn')}
             className={cn(
-              'max-w-full truncate text-[15px] leading-5 font-semibold tracking-[-0.012em]',
+              'max-w-full cursor-pointer truncate rounded-sm text-left text-[15px] leading-5 font-semibold tracking-[-0.012em] underline-offset-2 outline-none transition-colors hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-primary/40',
               !enabled && 'text-muted-foreground',
             )}
             title={shownName(c)}
           >
             {shownName(c)}
-          </span>
+          </button>
           <span className="shrink-0 font-mono text-[11px] font-normal text-muted-foreground/55 tabular-nums">
             #{c.id}
           </span>
@@ -826,7 +985,13 @@ function ChannelIdentity({
           )}
 
           {egress !== undefined && (
-            <span data-slot="channel-egress" className="inline-flex min-w-0 items-center gap-1">
+            <button
+              type="button"
+              data-slot="channel-egress"
+              onClick={() => onEdit('egress')}
+              className="-mx-1 inline-flex min-w-0 cursor-pointer items-center gap-1 rounded px-1 outline-none transition-colors hover:bg-accent/80 hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40"
+              aria-label={`${t('admin:channelStatusEgress')}: ${egress.label} · ${t('admin:channelClickEgress')}`}
+            >
               <span className="inline-flex shrink-0 text-muted-foreground/70" title={t('admin:channelStatusEgress')}>
                 <Globe aria-hidden className="h-3 w-3" strokeWidth={1.8} />
                 <span className="sr-only">{t('admin:channelStatusEgress')}</span>
@@ -834,52 +999,74 @@ function ChannelIdentity({
               <span className={cn('max-w-[11rem] truncate text-[11.5px]', egress.mono && 'tabular-nums')} title={egress.title}>
                 {egress.label}
               </span>
-            </span>
+            </button>
           )}
 
           {hasConnectionMeta && (
-            <span aria-hidden className="hidden text-border sm:inline">·</span>
+            <span aria-hidden className="hidden h-3 w-px bg-border/80 sm:inline-block" />
           )}
 
           <span
             data-slot="channel-schedule"
-            className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
+            className="inline-flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1"
           >
             <span className="sr-only">{t('admin:channelColSchedule')}</span>
             {pools.length > 0 && (
-              <span
-                className="inline-flex h-[18px] max-w-[9rem] shrink-0 items-center truncate rounded bg-muted/85 px-1.5 font-mono text-[10.5px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60 dark:bg-white/[0.06]"
-                title={pools.join(', ')}
-              >
-                {pools.length <= 2 ? pools.join(', ') : `${pools[0]} +${pools.length - 1}`}
-              </span>
+              <Tooltip content={<PoolsPreviewCard pools={pools} title={t('admin:poolsTitle')} hint={t('admin:channelClickPools')} />}>
+                <button
+                  type="button"
+                  onClick={() => onEdit('pools')}
+                  className="inline-flex h-[19px] max-w-[9rem] shrink-0 cursor-pointer items-center truncate rounded-md bg-muted px-1.5 font-mono text-[11px] font-medium text-foreground/85 ring-1 ring-inset ring-border/75 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 dark:bg-white/[0.08]"
+                >
+                  {pools.length <= 2 ? pools.join(', ') : `${pools[0]} +${pools.length - 1}`}
+                </button>
+              </Tooltip>
             )}
-            <span
-              className="shrink-0 whitespace-nowrap"
-              title={c.models.length > 0 ? c.models.join(', ') : undefined}
+            <Tooltip
+              content={
+                <ModelPreviewCard
+                  models={c.models}
+                  title={t('admin:channelModelCount', { n: c.models.length })}
+                  hint={t('admin:channelClickModels')}
+                />
+              }
             >
-              {t('admin:channelModelCount', { n: c.models.length })}
-            </span>
-            <span className="shrink-0 whitespace-nowrap tabular-nums">
-              {t('admin:priority')}{' '}
-              <span className={cn(c.priority > 0 && 'font-medium text-foreground/85')}>{c.priority}</span>
-            </span>
-            {c.cost_milli !== 1000 && (
-              <span
-                className="shrink-0 font-mono text-[11px] font-medium text-primary tabular-nums"
-                title={t('admin:channelCostMilli')}
+              <button
+                type="button"
+                onClick={() => onEdit('models')}
+                className="-mx-1 shrink-0 cursor-pointer rounded px-1 font-medium whitespace-nowrap text-foreground/80 outline-none transition-colors hover:bg-accent/80 hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/40"
               >
-                ×{costMilliToRatio(c.cost_milli)}
-              </span>
-            )}
+                {t('admin:channelModelCount', { n: c.models.length })}
+              </button>
+            </Tooltip>
+            <Tooltip content={t('admin:channelClickSchedule')}>
+              <button
+                type="button"
+                onClick={() => onEdit('schedule')}
+                className="-mx-1 inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded px-1 whitespace-nowrap tabular-nums outline-none transition-colors hover:bg-accent/80 hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
+                <span>
+                  {t('admin:priority')}{' '}
+                  <span className={cn(c.priority > 0 ? 'font-semibold text-foreground' : 'font-medium text-foreground/75')}>{c.priority}</span>
+                </span>
+                {c.cost_milli !== 1000 && (
+                  <span className="rounded bg-primary/10 px-1 py-px font-mono text-[11px] font-semibold text-primary ring-1 ring-inset ring-primary/20">
+                    ×{costMilliToRatio(c.cost_milli)}
+                  </span>
+                )}
+              </button>
+            </Tooltip>
             {c.keys.length > 1 && (
-              <span
-                className="inline-flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground/90 tabular-nums"
-                title={t('admin:keyStateAllActive', { n: c.keys.length })}
-              >
-                <KeyRound aria-hidden className="h-3 w-3 opacity-75" />
-                {c.keys.length}
-              </span>
+              <Tooltip content={t('admin:keyStateAllActive', { n: c.keys.length })}>
+                <button
+                  type="button"
+                  onClick={() => onEdit('keys')}
+                  className="inline-flex h-[19px] shrink-0 cursor-pointer items-center gap-1 rounded-md bg-muted/75 px-1.5 text-[11px] font-medium text-foreground/80 tabular-nums ring-1 ring-inset ring-border/60 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 dark:bg-white/[0.06]"
+                >
+                  <KeyRound aria-hidden className="h-3 w-3 opacity-75" />
+                  {c.keys.length}
+                </button>
+              </Tooltip>
             )}
           </span>
         </div>

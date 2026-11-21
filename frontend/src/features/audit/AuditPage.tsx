@@ -245,7 +245,7 @@ export function AuditPage() {
                     <Td className="px-1 text-muted-foreground">
                       <RowExpander open={expanded} name={String(r.id)} controls={detailId} onToggle={() => setSelected(r.id)} />
                     </Td>
-                    <Td className="whitespace-nowrap text-xs text-muted-foreground">
+                    <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground tabular-nums">
                       {dayjs(r.created_at).format('MM-DD HH:mm:ss')}
                     </Td>
                     <Td>
@@ -335,7 +335,7 @@ function AuditDetail({ row, id, onClose, actor, kind }: {
       <FieldGroup title={t('admin:auditDetail')}>
         {entries.length ? <dl className="space-y-4">{entries.map(([key, value]) => <div key={key} className="min-w-0 space-y-1.5">
           <dt className="break-all font-mono text-xs text-muted-foreground">{key}</dt>
-          <dd className="rounded-lg bg-muted/50 p-3"><AuditValue value={value} /></dd>
+          <dd className="rounded-lg border border-border/60 bg-muted/35 p-3"><AuditValue value={value} /></dd>
         </div>)}</dl> : <p className="text-sm text-muted-foreground">—</p>}
       </FieldGroup>
     </div>

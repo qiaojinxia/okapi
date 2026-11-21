@@ -115,7 +115,7 @@ export function Tabs({
               root.current?.querySelectorAll<HTMLButtonElement>('[role=tab]')[next]?.focus({ preventScroll: true })
             }}
             className={cn(
-              'inline-flex min-h-11 shrink-0 items-center gap-1.5 px-3 text-sm whitespace-nowrap transition-colors outline-none md:min-h-8',
+              'group/tab inline-flex min-h-11 shrink-0 items-center gap-1.5 px-3 text-sm whitespace-nowrap transition-colors outline-none md:min-h-8',
               'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60',
               underline
                 ? cn('-mb-px border-b-2 py-2', on
@@ -127,7 +127,15 @@ export function Tabs({
             )}
             onClick={() => { if (!on) onChange(item.id) }}
           >
-            {item.icon && <item.icon aria-hidden className="h-4 w-4" />}
+            {item.icon && (
+              <item.icon
+                aria-hidden
+                className={cn(
+                  'h-4 w-4 transition-colors',
+                  on && underline ? 'text-primary' : !on && 'opacity-75 group-hover/tab:opacity-100',
+                )}
+              />
+            )}
             {item.label}
             {item.count !== undefined && <TabCount n={item.count} active={on} />}
           </button>

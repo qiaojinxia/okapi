@@ -55,13 +55,13 @@ export function StatBar({ applied }: { applied: Draft }) {
           {cell('RPM', s ? formatCount(s.rpm, locale) : '—')}
           {cell('TPM', s ? formatCount(s.tpm, locale) : '—')}
         </div>
-        <div className="flex w-full shrink-0 items-center justify-end gap-3 border-t border-border/60 px-3 py-1.5 md:w-auto md:flex-col md:items-end md:gap-1 md:border-t-0 md:py-2">
+        <div className="flex w-full shrink-0 items-center justify-end gap-3 border-t border-border/60 px-3 py-1.5 md:w-auto md:flex-col md:items-end md:gap-1 md:border-t-0 md:border-l md:py-2">
           {s && (
             <Badge variant="muted" title={t('admin:logsRateSourceHint')}>
               {s.rate_source === 'redis' ? t('admin:logsRateLive') : t('admin:logsRateWindow')}
             </Badge>
           )}
-          <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="flex items-center gap-1 rounded text-xs text-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+          <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="flex cursor-pointer items-center gap-1 rounded text-xs text-primary outline-none transition-colors hover:text-primary/80 focus-visible:ring-2 focus-visible:ring-primary/40">
             {t('logs:moreMetrics')}<ChevronDown aria-hidden className={`h-3.5 w-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
           </button>
         </div>

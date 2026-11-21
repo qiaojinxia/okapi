@@ -56,12 +56,33 @@ export function UsageSection({ userId }: { userId: number }) {
               <BarChart data={d.daily.map((x) => ({ ...x, day: x.day.slice(5), usd: x.amount_micro / 1_000_000 }))} margin={{ top: 14, right: 4, left: 4, bottom: 0 }}>
                 <XAxis dataKey="day" fontSize={10} />
                 <Tooltip
-                  formatter={(v) => [`$${Number(v).toFixed(4)}`, t('common:amount')]}
+                  cursor={{ fill: 'var(--color-primary)', fillOpacity: 0.08 }}
+                  content={({ active, payload }) => {
+                    const row = payload?.[0]?.payload as { day?: string; amount_micro?: number; requests?: number } | undefined
+                    if (!active || !row) return null
+                    return (
+                      <div className="note-body min-w-36 px-3 py-2 text-xs tabular-nums">
+                        <p className="mb-1.5 border-b border-border/60 pb-1 font-mono text-[11px] font-medium text-muted-foreground">
+                          {row.day}
+                        </p>
+                        <div className="space-y-1">
+                          <div className="flex items-baseline justify-between gap-4">
+                            <span className="text-muted-foreground">{t('common:amount')}</span>
+                            <span className="font-semibold text-foreground">{formatMoney(row.amount_micro ?? 0, locale)}</span>
+                          </div>
+                          <div className="flex items-baseline justify-between gap-4">
+                            <span className="text-muted-foreground">{t('common:requests')}</span>
+                            <span className="font-medium text-foreground/90">{formatCount(row.requests ?? 0, locale)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  }}
                 />
                 <Bar
                   dataKey="usd"
                   fill="var(--color-primary)"
-                  radius={[2, 2, 0, 0]}
+                  radius={[3, 3, 0, 0]}
                   isAnimationActive={false}
                 >
                   {/* 柱顶直接标当天消费，0 不标 */}
@@ -74,14 +95,17 @@ export function UsageSection({ userId }: { userId: number }) {
           d.stats_available && <EmptyState className="py-4" />
         )}
         {d.by_model.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
+          <ul className="divide-y divide-border/60 rounded-lg border border-border/75 bg-card/70 text-xs tabular-nums">
             {d.by_model.slice(0, 6).map((m) => (
-              <Badge key={m.model} variant="muted" title={`${formatCount(m.tokens, locale)} tokens`}>
-                <span className="font-mono">{m.model}</span> · {formatMoney(m.amount_micro, locale)} ·{' '}
-                {formatCount(m.requests, locale)}
-              </Badge>
+              <li key={m.model} className="flex items-center justify-between gap-3 px-2.5 py-1.5" title={`${formatCount(m.tokens, locale)} tokens`}>
+                <span className="min-w-0 truncate font-mono text-[11.5px] font-medium text-foreground">{m.model}</span>
+                <span className="flex shrink-0 items-baseline gap-3">
+                  <span className="text-[11px] text-muted-foreground">{formatCount(m.requests, locale)} · {formatCount(m.tokens, locale)}</span>
+                  <span className="min-w-16 text-right font-semibold text-foreground">{formatMoney(m.amount_micro, locale)}</span>
+                </span>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </FieldGroup>
 

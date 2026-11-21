@@ -14,7 +14,11 @@ import { sparkValues } from './sparkline-data'
 
 /// 右上角的对照：`good` / `bad` 是语义（错误率涨是坏事），不是箭头方向；`neutral` 用于今天的昨日参照。
 interface Aside { text: string; tone: 'good' | 'bad' | 'neutral' }
-const ASIDE_TONE = { good: 'text-success', bad: 'text-destructive', neutral: 'text-muted-foreground' } as const
+const ASIDE_TONE = {
+  good: 'bg-success/10 text-success ring-success/18',
+  bad: 'bg-destructive/10 text-destructive ring-destructive/18',
+  neutral: 'bg-muted/75 text-muted-foreground ring-border/60',
+} as const
 
 /// 一张指标卡：标签 + 对照、主数字 + 副行、右侧迷你趋势。整张卡是进入同窗分析的链接。
 /// 时段已在页头，卡片上不重复显示；读屏和链接名仍带上，脱离页头也知道是哪段时间。
@@ -41,7 +45,7 @@ function Kpi({ loading, label, hint, period, value, valueClassName, aside, sub, 
     className={cn(card, 'group outline-none transition-[border-color,box-shadow] duration-150 hover:border-primary/40 hover:shadow-popover focus-visible:ring-2 focus-visible:ring-primary/50')}>
     <span className="flex items-center justify-between gap-2 text-[13px] text-muted-foreground">
       <span title={hint} className="min-w-0 truncate">{label}</span>
-      {aside && <span className={cn('shrink-0 text-xs font-medium tabular-nums', ASIDE_TONE[aside.tone])}>{aside.text}</span>}
+      {aside && <span className={cn('shrink-0 rounded-md px-1.5 py-0.5 text-[11px] leading-4 font-medium tabular-nums ring-1 ring-inset', ASIDE_TONE[aside.tone])}>{aside.text}</span>}
     </span>
     <span className="flex items-end justify-between gap-3">
       <span className="flex min-w-0 flex-col gap-0.5">

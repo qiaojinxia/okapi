@@ -11,9 +11,10 @@ import { PoolMembership, PoolMembershipEditor } from '@/features/channels/PoolMe
 import type { ChannelForm } from './use-channel-form'
 
 /// 「模型与渠道池」：服务的模型（手填 / 从上游拉取）与池成员关系。
-export function ModelsSection({ f, channel, discover, onDone }: {
+export function ModelsSection({ f, channel, poolsOpen, discover, onDone }: {
   f: ChannelForm
   channel: ChannelRow | undefined
+  poolsOpen?: boolean
   discover: { isPending: boolean; mutate: () => void }
   onDone: () => void
 }) {
@@ -63,6 +64,7 @@ export function ModelsSection({ f, channel, discover, onDone }: {
         <PoolMembership
           channelId={channel.id}
           current={channel.pool_members ?? []}
+          defaultOpen={poolsOpen}
           onDone={onDone}
         />
       )}

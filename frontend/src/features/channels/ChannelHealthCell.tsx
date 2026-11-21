@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { ChevronRight } from 'lucide-react'
+import { ArrowUpRight, ChevronRight, Loader2, RefreshCw } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip } from '@/components/ui/tooltip'
 import { ChannelTimelineDrawer } from '@/features/channels/ChannelTimelineDrawer'
 import type { ChannelBalance, ChannelKeyRow, ChannelProbe } from '@/features/channels/types'
 import type { ChannelRow as ChannelStatRow } from '@/features/stats/types'
@@ -61,8 +63,18 @@ export function channelRowHealth(keys: ChannelKeyRow[], enabled: boolean, orphan
   return 'normal'
 }
 
-/// 状态点 + 文字（轻量珐琅语义胶囊）。
-function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'destructive' | 'muted'; title?: string; children: ReactNode }) {
+/// 状态点 + 文字（轻量珐琅语义胶囊）。异常态支持直接点击进入对应处理区。
+function StateDot({
+  tone,
+  title,
+  onClick,
+  children,
+}: {
+  tone: 'success' | 'warning' | 'destructive' | 'muted'
+  title?: string
+  onClick?: () => void
+  children: ReactNode
+}) {
   const color = { success: 'text-success', warning: 'text-warning', destructive: 'text-destructive', muted: 'text-muted-foreground' }[tone]
   const surface = {
     success: 'bg-success/10 ring-success/22',
@@ -70,29 +82,43 @@ function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'de
     destructive: 'bg-destructive/10 ring-destructive/22',
     muted: 'bg-muted/80 ring-border/75',
   }[tone]
+  const cls = cn(
+    'inline-flex h-[22px] shrink-0 items-center rounded-md px-2 text-xs leading-4 font-medium whitespace-nowrap ring-1 ring-inset',
+    'before:mr-1.5 before:inline-block before:size-1.5 before:shrink-0 before:rounded-full before:bg-current before:content-[""]',
+    color,
+    surface,
+    onClick && 'cursor-pointer transition-[filter,box-shadow] hover:brightness-95 dark:hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+  )
+  if (onClick) {
+    return (
+      <button type="button" data-slot="key-state-summary" className={cls} title={title} onClick={onClick}>
+        {children}
+      </button>
+    )
+  }
   return (
-    <span
-      className={cn(
-        'inline-flex h-[22px] shrink-0 items-center rounded-md px-2 text-xs leading-4 font-medium whitespace-nowrap ring-1 ring-inset',
-        'before:mr-1.5 before:inline-block before:size-1.5 before:shrink-0 before:rounded-full before:bg-current before:content-[""]',
-        color,
-        surface,
-      )}
-      title={title}
-    >
+    <span data-slot="key-state-summary" className={cls} title={title}>
       {children}
     </span>
   )
 }
 
-export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
+export function KeyStateSummary({
+  keys,
+  enabled,
+  onInspectKeys,
+}: {
+  keys: ChannelKeyRow[]
+  enabled: boolean
+  onInspectKeys?: () => void
+}) {
   const { t } = useTranslation()
   const state = keyStateOf(keys, enabled)
   switch (state.kind) {
     case 'disabled':
       return <StateDot tone="muted">{t('common:disabled')}</StateDot>
     case 'noKeys':
-      return <StateDot tone="destructive">{t('admin:keyStateNoKeys')}</StateDot>
+      return <StateDot tone="destructive" onClick={onInspectKeys}>{t('admin:keyStateNoKeys')}</StateDot>
     case 'allActive':
       return (
         <StateDot tone="success" title={t('admin:keyStateAllActive', { n: state.total })}>
@@ -101,7 +127,7 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
       )
     case 'partial':
       return (
-        <StateDot tone={state.active === 0 ? 'destructive' : 'warning'}>
+        <StateDot tone={state.active === 0 ? 'destructive' : 'warning'} onClick={onInspectKeys}>
           {state.active === 0
             ? t('admin:keyStateNoneActive')
             : t('admin:keyStateSomeActive', { active: state.active, total: state.total })}
@@ -110,22 +136,23 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
   }
 }
 
-/// 部分 key 不可用时的告警条：各态计数与最近一把的恢复时间；其余状态不占位。
-export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
+/// 部分 key 不可用时的诊断条：各态计数、最近一把的恢复时间与首个错误原因；整条可直接点击去处置。
+export function KeyStateDetail({
+  keys,
+  enabled,
+  onInspect,
+}: {
+  keys: ChannelKeyRow[]
+  enabled: boolean
+  onInspect?: () => void
+}) {
   const { t } = useTranslation()
   const state = keyStateOf(keys, enabled)
   if (state.kind !== 'partial') return null
   const critical = state.active === 0
-  return (
-    <div
-      data-slot="key-state-detail"
-      className={cn(
-        'inline-flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-lg px-2.5 py-1 text-xs ring-1 ring-inset',
-        critical
-          ? 'bg-destructive/[0.06] ring-destructive/20 dark:bg-destructive/[0.11]'
-          : 'bg-warning/[0.08] ring-warning/22 dark:bg-warning/[0.12]',
-      )}
-    >
+  const firstError = [...state.titles.values()].map((s) => s.trim()).find(Boolean)
+  const content = (
+    <>
       <span className="sr-only">{t('admin:channelStatusKeys')}</span>
       {state.counts.map(([name, n]) => (
         <Badge
@@ -142,43 +169,146 @@ export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabl
           {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(state.soonest.diff(dayjs(), 'minute', true))) })}
         </span>
       )}
+      {firstError && (
+        <span className="max-w-[26rem] truncate font-mono text-[11px] text-muted-foreground/85" title={firstError}>
+          · {firstError}
+        </span>
+      )}
+      {onInspect && (
+        <ChevronRight aria-hidden className="h-3 w-3 shrink-0 text-muted-foreground/60 transition-transform group-hover/alert:translate-x-0.5 group-hover/alert:text-foreground" />
+      )}
+    </>
+  )
+  const cls = cn(
+    'group/alert inline-flex max-w-full flex-wrap items-center gap-x-2 gap-y-1 rounded-lg px-2.5 py-1 text-left text-xs ring-1 ring-inset transition-colors',
+    critical
+      ? 'bg-destructive/[0.06] ring-destructive/20 hover:bg-destructive/[0.1] dark:bg-destructive/[0.11]'
+      : 'bg-warning/[0.08] ring-warning/22 hover:bg-warning/[0.14] dark:bg-warning/[0.12]',
+    onInspect && 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+  )
+  if (onInspect) {
+    return (
+      <button type="button" data-slot="key-state-detail" className={cls} onClick={onInspect}>
+        {content}
+      </button>
+    )
+  }
+  return (
+    <div data-slot="key-state-detail" className={cls}>
+      {content}
     </div>
   )
 }
 
 const stampOf = (when: dayjs.Dayjs) => (when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm'))
 
-/// 最近测试：延迟 + 测试时间；失败给错误码。
-export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
+/// 最近测试：延迟 + 测试时间；失败给错误码。直接点击即可重新发起一次测活。
+export function LastProbe({
+  probe,
+  onProbe,
+  probing = false,
+}: {
+  probe: ChannelProbe | null
+  onProbe?: () => void
+  probing?: boolean
+}) {
   const { t } = useTranslation()
-  if (probe === null) {
-    return <span data-slot="last-probe" className="text-xs whitespace-nowrap text-muted-foreground/75">{t('admin:probeNever')}</span>
-  }
-  const when = dayjs(probe.at)
-  const failure = probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))
-  const result = probe.ok ? (
-    <span className={cn('shrink-0 text-xs font-medium tabular-nums', probe.latency_ms >= 2_000 ? 'text-warning' : 'text-foreground/90')}>
-      {probe.latency_ms} ms
-    </span>
-  ) : (
-    <span className="min-w-0 truncate text-xs font-medium text-destructive" title={failure}>{failure}</span>
+  const when = probe ? dayjs(probe.at) : null
+  const failure = probe && !probe.ok
+    ? (probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed')))
+    : null
+  const plainHint = when
+    ? t('admin:probeAt', { at: when.format('YYYY-MM-DD HH:mm') })
+    : undefined
+  const tooltipHint = when
+    ? (
+      <div className="w-[220px] max-w-full space-y-1.5 text-left whitespace-normal">
+        <div className="flex items-center justify-between gap-3 text-[11.5px]">
+          <span className="inline-flex min-w-0 items-center gap-1.5 font-medium">
+            <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', probe?.ok ? 'bg-success' : 'bg-destructive')} />
+            <span className={cn('truncate font-mono', probe?.ok ? 'text-foreground' : 'text-destructive')}>
+              {probe?.ok ? `${probe.latency_ms} ms` : failure}
+            </span>
+          </span>
+        </div>
+        <p className="text-[11px] tabular-nums text-muted-foreground">
+          {plainHint}
+        </p>
+        {onProbe && (
+          <div className="border-t border-border/60 pt-1.5 text-[11px] text-muted-foreground">
+            {t('admin:channelClickProbe')}
+          </div>
+        )}
+      </div>
+    )
+    : (onProbe ? t('admin:channelClickProbe') : undefined)
+
+  const inner = (
+    <>
+      {probing && <Loader2 aria-hidden className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />}
+      {probe === null ? (
+        <span className="text-xs whitespace-nowrap text-muted-foreground/75">{t('admin:probeNever')}</span>
+      ) : (
+        <>
+          {probe.ok ? (
+            <span className={cn('shrink-0 font-mono text-xs font-semibold tabular-nums', probe.latency_ms >= 2_000 ? 'text-warning' : 'text-foreground/85')}>
+              {probe.latency_ms} ms
+            </span>
+          ) : (
+            <span
+              className="min-w-0 truncate rounded-md bg-destructive/10 px-1.5 py-0.5 font-mono text-[11px] font-medium text-destructive ring-1 ring-inset ring-destructive/20"
+              title={failure ?? undefined}
+            >
+              {failure}
+            </span>
+          )}
+          {when && (
+            <span className="hidden text-[11px] text-muted-foreground/75 tabular-nums sm:inline">
+              · {stampOf(when)}
+            </span>
+          )}
+        </>
+      )}
+    </>
   )
+
+  if (onProbe) {
+    return (
+      <Tooltip content={tooltipHint ?? ''}>
+        <button
+          type="button"
+          data-slot="last-probe"
+          disabled={probing}
+          onClick={onProbe}
+          className="-mx-1.5 inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 whitespace-nowrap outline-none transition-colors hover:bg-accent/80 focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-70"
+        >
+          {inner}
+        </button>
+      </Tooltip>
+    )
+  }
+
   return (
     <span
       data-slot="last-probe"
       className="inline-flex min-w-0 items-baseline gap-1.5 whitespace-nowrap"
-      title={t('admin:probeAt', { at: when.format('YYYY-MM-DD HH:mm') })}
+      title={plainHint}
     >
-      {result}
-      <span className="hidden text-[11px] text-muted-foreground/70 tabular-nums sm:inline">
-        · {stampOf(when)}
-      </span>
+      {inner}
     </span>
   )
 }
 
-/// 最近一次上游余额（§11.33）：横向仪表读数（金额 + 余额标签在左，查询时间在右），与额度条视觉同源。
-export function LastBalance({ balance }: { balance: ChannelBalance | null | undefined }) {
+/// 最近一次上游余额（§11.33）：横向仪表读数（金额 + 余额标签在左，查询时间 + 一键刷新在右）。
+export function LastBalance({
+  balance,
+  onRefresh,
+  refreshing = false,
+}: {
+  balance: ChannelBalance | null | undefined
+  onRefresh?: () => void
+  refreshing?: boolean
+}) {
   const { i18n, t } = useTranslation()
   if (balance === null || balance === undefined) return null
   const when = dayjs(balance.at)
@@ -187,31 +317,45 @@ export function LastBalance({ balance }: { balance: ChannelBalance | null | unde
     ? Math.min(100, Math.max(0, Math.round((balance.used_micro! / balance.total_micro!) * 100)))
     : null
   return (
-    <div data-slot="channel-balance" className="flex min-w-0 flex-col gap-1.5" title={t('admin:balanceProbe', { probe: balance.probe })}>
-      <div className="flex min-w-0 items-baseline justify-between gap-2">
-        <span className="flex items-baseline gap-2 whitespace-nowrap">
-          <span className={cn('text-[15px] leading-5 font-semibold tracking-[-0.01em] tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
-            {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language, true)}
-          </span>
-          <span className="rounded bg-muted/85 px-1.5 py-px text-[10.5px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60 dark:bg-white/[0.06]">
-            {t('admin:channelBalanceLabel')}
-          </span>
+    <div data-slot="channel-balance" className="flex min-w-0 flex-col gap-1" title={t('admin:balanceProbe', { probe: balance.probe })}>
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="text-[11px] leading-4 font-medium text-muted-foreground/85">
+          {t('admin:channelBalanceLabel')}
         </span>
-        <span className="text-[11px] whitespace-nowrap text-muted-foreground/75 tabular-nums">
-          {t('admin:channelBalanceAt', { at: stampOf(when) })}
-        </span>
+        {onRefresh ? (
+          <Tooltip content={t('admin:channelClickBalanceRefresh')}>
+            <button
+              type="button"
+              disabled={refreshing}
+              onClick={onRefresh}
+              className="-mr-1.5 inline-flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] whitespace-nowrap text-muted-foreground/85 tabular-nums outline-none transition-colors hover:bg-accent/80 hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-65"
+            >
+              <span>{t('admin:channelBalanceAt', { at: stampOf(when) })}</span>
+              <RefreshCw aria-hidden className={cn('h-3 w-3 opacity-70', refreshing && 'animate-spin opacity-100')} />
+            </button>
+          </Tooltip>
+        ) : (
+          <span className="text-[11px] whitespace-nowrap text-muted-foreground/75 tabular-nums">
+            {t('admin:channelBalanceAt', { at: stampOf(when) })}
+          </span>
+        )}
       </div>
-      {usedPct !== null && (
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted/90 ring-1 ring-inset ring-border/70 dark:bg-white/[0.07] dark:ring-white/[0.07]">
-          <div
-            className={cn(
-              'h-full rounded-full transition-[width] duration-300',
-              usedPct >= 90 ? 'bg-destructive' : usedPct >= 70 ? 'bg-warning' : 'bg-success',
-            )}
-            style={{ width: `${usedPct}%` }}
-          />
-        </div>
-      )}
+      <div className="flex min-w-0 items-center gap-3">
+        <span className={cn('shrink-0 text-[17px] leading-5 font-semibold tracking-[-0.015em] tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
+          {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language, true)}
+        </span>
+        {usedPct !== null && (
+          <div className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-muted ring-1 ring-inset ring-border/75 dark:bg-white/[0.08] dark:ring-white/[0.08]">
+            <div
+              className={cn(
+                'h-full rounded-full transition-[width] duration-300',
+                usedPct >= 90 ? 'bg-destructive' : usedPct >= 70 ? 'bg-warning' : 'bg-success',
+              )}
+              style={{ width: `${usedPct}%` }}
+            />
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -226,7 +370,7 @@ export function useChannelHealth24h() {
   })
 }
 
-/// 近 24h 健康遥测块：首行可点击打开健康时间线（错误率 + 请求数），次行直接露出首字延迟 p50/p95 与渠道切换次数。
+/// 近 24h 健康遥测块：整块区域均可点击打开健康时间线（无论点错误率、TTFT 还是渠道切换，都符合直觉）。
 export function Health24h({
   stat,
   channel,
@@ -248,45 +392,58 @@ export function Health24h({
   const showLatency = !idle && (stat.ttft_p50_ms > 0 || stat.ttft_p95_ms > 0 || stat.failovers > 0)
 
   return (
-    <div className="flex min-w-0 flex-col gap-0.5">
+    <>
       <button
         type="button"
-        data-slot="health-24h"
-        className="group/health -mx-1.5 inline-flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-left text-xs leading-5 whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-accent/80 hover:text-foreground"
+        className="group/health -mx-2 -my-1 flex w-[calc(100%+1rem)] min-w-0 cursor-pointer flex-col gap-1 rounded-lg px-2 py-1 text-left outline-none transition-colors hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-primary/40"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >
-        <span className="truncate">
-          <span className="text-muted-foreground/75">{t('admin:channelStatus24h')}</span>{' '}
-          {idle ? t('admin:health24hIdle') : (
-            <>
-              <span className={cn('font-semibold tabular-nums', tone)}>{formatBp(stat.error_rate_bp, i18n.language)}</span>{' '}
-              {t('admin:health24hErrorRate')} · {t('admin:channelUsageRequests', { n: formatCount(stat.requests, i18n.language) })}
-            </>
+        <span data-slot="health-24h" className="flex min-w-0 flex-col gap-0.5 tabular-nums">
+          <span className="inline-flex items-center gap-1 text-[11px] leading-4 font-medium text-muted-foreground/85">
+            <span>{t('admin:channelStatus24h')}</span>
+            <ChevronRight
+              aria-hidden
+              className="h-3 w-3 shrink-0 text-muted-foreground/50 transition-[transform,color] group-hover/health:translate-x-0.5 group-hover/health:text-foreground"
+            />
+          </span>
+          {' '}
+          {idle ? (
+            <span className="text-[13px] leading-5 text-muted-foreground/75">{t('admin:health24hIdle')}</span>
+          ) : (
+            <span className="flex min-w-0 items-baseline gap-1 truncate whitespace-nowrap">
+              <span className={cn('text-[16px] leading-5 font-semibold tracking-[-0.015em] tabular-nums', tone)}>
+                {formatBp(stat.error_rate_bp, i18n.language)}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {' '}{t('admin:health24hErrorRate')} ·{' '}
+                <span className="font-medium text-foreground/85">
+                  {t('admin:channelUsageRequests', { n: formatCount(stat.requests, i18n.language) })}
+                </span>
+              </span>
+            </span>
           )}
         </span>
-        <ChevronRight
-          aria-hidden
-          className="h-3 w-3 shrink-0 text-muted-foreground/50 transition-[transform,opacity,color] group-hover/health:translate-x-0.5 group-hover/health:text-foreground group-hover/health:opacity-100"
-        />
+        {showLatency && (
+          <span data-slot="health-ttft" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] leading-4 text-muted-foreground tabular-nums">
+            {stat.ttft_p50_ms > 0 && (
+              <span className="whitespace-nowrap">
+                TTFT p50 <span className="font-medium text-foreground/80">{formatCount(stat.ttft_p50_ms, i18n.language)} ms</span>
+                {stat.ttft_p95_ms > 0 && (
+                  <> · p95 <span className="font-medium text-foreground/80">{formatCount(stat.ttft_p95_ms, i18n.language)} ms</span></>
+                )}
+              </span>
+            )}
+            {stat.failovers > 0 && (
+              <span className="inline-flex shrink-0 items-center rounded-md bg-warning/12 px-1.5 py-px text-[10.5px] font-medium whitespace-nowrap text-warning ring-1 ring-inset ring-warning/25">
+                {t('admin:statFailovers')} {formatCount(stat.failovers, i18n.language)}
+              </span>
+            )}
+          </span>
+        )}
       </button>
-      {showLatency && (
-        <div data-slot="health-ttft" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-4 text-muted-foreground/80 tabular-nums">
-          {stat.ttft_p50_ms > 0 && (
-            <span className="whitespace-nowrap">
-              TTFT p50 {formatCount(stat.ttft_p50_ms, i18n.language)} ms
-              {stat.ttft_p95_ms > 0 && <> · p95 {formatCount(stat.ttft_p95_ms, i18n.language)} ms</>}
-            </span>
-          )}
-          {stat.failovers > 0 && (
-            <span className="inline-flex shrink-0 items-center rounded bg-warning/12 px-1.5 py-px text-[10.5px] font-medium whitespace-nowrap text-warning ring-1 ring-inset ring-warning/25">
-              {t('admin:statFailovers')} {formatCount(stat.failovers, i18n.language)}
-            </span>
-          )}
-        </div>
-      )}
       {open && <ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} />}
-    </div>
+    </>
   )
 }
 
@@ -315,18 +472,26 @@ export function useChannelUsage() {
   })
 }
 
-/// 近 30 天用量遥测块：金额打头，下面一行清晰呈现请求次数与 token 总量；明细（输入 / 缓存 / 输出、上游成本）在悬停提示里。
-export function ChannelUsage({ usage, settled = false }: { usage: ChannelUsageRow | undefined; settled?: boolean }) {
+/// 近 30 天用量遥测块：悬停即见完整输入/缓存/输出与上游成本明细，点击直达该渠道的请求日志。
+export function ChannelUsage({
+  usage,
+  channelId,
+  settled = false,
+}: {
+  usage: ChannelUsageRow | undefined
+  channelId?: number
+  settled?: boolean
+}) {
   const { t, i18n } = useTranslation()
   if (!usage || usage.requests === 0) {
     if (!settled) return null
     return (
       <div
         data-slot="channel-usage"
-        className="flex items-baseline justify-between gap-2 md:justify-end"
+        className="flex flex-row items-baseline justify-between gap-2 md:flex-col md:items-end md:gap-0.5"
         title={t('admin:channelUsageEmpty')}
       >
-        <span className="text-[11px] leading-5 text-muted-foreground/70">{t('admin:channelColUsage30')}</span>
+        <span className="text-[11px] leading-4 font-medium text-muted-foreground/80">{t('admin:channelColUsage30')}</span>
         <span className="text-sm leading-5 text-muted-foreground/60">
           <span aria-hidden>—</span>
           <span className="sr-only">{t('admin:channelUsageEmpty')}</span>
@@ -338,6 +503,10 @@ export function ChannelUsage({ usage, settled = false }: { usage: ChannelUsageRo
   const total = usage.prompt_tokens + usage.completion_tokens
   const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
   const amount = formatMoneyAggregate(usage.amount_micro, lang, false, true)
+  const upstreamCost = formatMoneyAggregate(usage.upstream_cost_micro, lang, false, true)
+  const cachePct = usage.prompt_tokens > 0 && usage.cached_tokens > 0
+    ? `${Math.round((usage.cached_tokens / usage.prompt_tokens) * 100)}%`
+    : null
   const detail = t('admin:channelUsageDetail', {
     days: USAGE_DAYS,
     requests: formatCount(usage.requests, lang),
@@ -345,23 +514,92 @@ export function ChannelUsage({ usage, settled = false }: { usage: ChannelUsageRo
     cached: formatCount(usage.cached_tokens, lang),
     completion: formatCount(usage.completion_tokens, lang),
     amount,
-    cost: formatMoneyAggregate(usage.upstream_cost_micro, lang, false, true),
+    cost: upstreamCost,
   })
+  const detailCard = (
+    <div className="w-60 space-y-2 text-left">
+      <div className="flex items-baseline justify-between gap-3 border-b border-border/60 pb-1.5">
+        <span className="text-[11px] font-medium text-muted-foreground">{t('admin:channelColUsage30')}</span>
+        <span className="text-xs font-medium text-foreground tabular-nums">
+          {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
+        </span>
+      </div>
+      <div className="space-y-1 tabular-nums">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-muted-foreground">{t('admin:channelUsageBilled')}</span>
+          <span className="font-semibold text-foreground">{amount}</span>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-muted-foreground">{t('admin:channelUsageUpstreamCost')}</span>
+          <span className="font-medium text-foreground/85">{upstreamCost}</span>
+        </div>
+      </div>
+      <div className="space-y-1 border-t border-border/55 pt-1.5 text-[11.5px] tabular-nums">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-muted-foreground">{t('logs:inputShort')}</span>
+          <span className="text-foreground/90">{formatCount(usage.prompt_tokens, lang)}</span>
+        </div>
+        {usage.cached_tokens > 0 && (
+          <div className="flex items-baseline justify-between gap-3 pl-2.5 text-[11px]">
+            <span className="text-muted-foreground/85">{t('logs:cacheRead')}</span>
+            <span className="font-medium text-success">
+              {formatCount(usage.cached_tokens, lang)}
+              {cachePct && <span className="ml-1 text-muted-foreground font-normal">({cachePct})</span>}
+            </span>
+          </div>
+        )}
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-muted-foreground">{t('logs:outputShort')}</span>
+          <span className="text-foreground/90">{formatCount(usage.completion_tokens, lang)}</span>
+        </div>
+      </div>
+      <div className="border-t border-border/55 pt-1.5 text-[11px] text-muted-foreground/85">
+        {t('admin:channelClickLogs')}
+      </div>
+    </div>
+  )
+  const inner = (
+    <>
+      <span className="inline-flex items-center gap-1 text-[11px] leading-4 font-medium whitespace-nowrap text-muted-foreground/85">
+        {channelId !== undefined && (
+          <ArrowUpRight
+            aria-hidden
+            className="h-3 w-3 shrink-0 text-muted-foreground/50 opacity-0 transition-[opacity,transform,color] group-hover/usage:translate-x-0.5 group-hover/usage:-translate-y-0.5 group-hover/usage:text-foreground group-hover/usage:opacity-100"
+          />
+        )}
+        <span>{t('admin:channelColUsage30')}</span>
+      </span>
+      <span data-slot="channel-spend" className="text-[17px] leading-5 font-semibold tracking-[-0.015em] text-foreground tabular-nums">
+        {amount}
+      </span>
+      <span className="max-w-full truncate text-[11.5px] leading-4 whitespace-nowrap text-muted-foreground tabular-nums">
+        {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })} · {compact.format(total)} tokens
+      </span>
+    </>
+  )
+
+  if (channelId !== undefined) {
+    return (
+      <Tooltip content={detailCard} className="block w-full">
+        <Link
+          to="/admin/logs"
+          search={{ channel_id: channelId }}
+          data-slot="channel-usage"
+          className="group/usage -mx-2 -my-1 flex w-[calc(100%+1rem)] min-w-0 flex-col items-start gap-0.5 rounded-lg px-2 py-1 outline-none transition-colors hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-primary/40 md:items-end"
+        >
+          {inner}
+        </Link>
+      </Tooltip>
+    )
+  }
+
   return (
     <div
       data-slot="channel-usage"
-      className="flex min-w-0 flex-row items-baseline justify-between gap-2 md:flex-col md:items-end md:gap-0.5"
+      className="flex min-w-0 flex-col items-start gap-0.5 md:items-end"
       title={detail}
     >
-      <div className="flex items-baseline gap-1.5 whitespace-nowrap">
-        <span className="text-[11px] text-muted-foreground/75">{t('admin:channelColUsage30')}</span>
-        <span data-slot="channel-spend" className="text-[15px] leading-5 font-semibold tracking-[-0.01em] text-foreground tabular-nums">
-          {amount}
-        </span>
-      </div>
-      <span className="max-w-full truncate text-xs leading-5 whitespace-nowrap text-muted-foreground tabular-nums">
-        {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })} · {compact.format(total)} tokens
-      </span>
+      {inner}
     </div>
   )
 }

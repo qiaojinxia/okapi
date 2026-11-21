@@ -118,70 +118,74 @@ export function TrafficPanel({ tabs }: { tabs: React.ReactNode }) {
   return (
     <>
       {toolbar}
-      <Card className="space-y-4 p-5">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <Total label={t('admin:proxyTrafficDown')} value={formatBytes(total.down, locale)} />
-          <Total label={t('admin:proxyTrafficUp')} value={formatBytes(total.up, locale)} />
-          <Total label={t('admin:proxyTrafficRequests')} value={formatCount(total.requests, locale)} />
-        </div>
-        <TimeChart
-          stacked
-          defaultType="area"
-          data={data}
-          unit={scale.unit}
-          format={format}
-          label={t('admin:proxyTrafficChart')}
-          partialBucket={data.at(-1)?.bucket}
-          series={[
-            { key: 'down', label: t('admin:proxyTrafficDown'), color: chartColor(0) },
-            { key: 'up', label: t('admin:proxyTrafficUp'), color: chartColor(1) },
-          ]}
-        />
-        <p className="text-xs text-muted-foreground">{t('admin:proxyTrafficBasis')}</p>
-      </Card>
-      <Table stickyHeader>
-        <THead>
-          <Tr>
-            <Th>{t('admin:proxyName')}</Th>
-            <Th numeric>{t('admin:proxyTrafficDown')}</Th>
-            <Th numeric>{t('admin:proxyTrafficUp')}</Th>
-            <Th numeric>{t('admin:proxyTrafficTotal')}</Th>
-            <Th numeric>{t('admin:proxyTrafficRequests')}</Th>
-          </Tr>
-        </THead>
-        <TBody>
-          {rows.map((r) => {
-            const active = String(r.proxy_id) === proxy
-            return (
-              <Tr key={r.proxy_id} className={cn(active && 'bg-muted/60')}>
-                <Td>
-                  <button
-                    type="button"
-                    aria-pressed={active}
-                    className="truncate font-medium hover:text-primary"
-                    onClick={() => setProxy(active ? '' : String(r.proxy_id))}
-                  >
-                    {nameOf(r.proxy_id)}
-                  </button>
-                </Td>
-                <Td numeric>{formatBytes(r.down_bytes, locale)}</Td>
-                <Td numeric>{formatBytes(r.up_bytes, locale)}</Td>
-                <Td numeric className="font-medium">{formatBytes(r.up_bytes + r.down_bytes, locale)}</Td>
-                <Td numeric>{formatCount(r.requests, locale)}</Td>
+      <div className="min-h-0 !flex-1 !shrink overflow-y-auto pr-0.5">
+        <div className="flex flex-col gap-4 pb-1">
+          <Card className="space-y-4 p-5">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <Total label={t('admin:proxyTrafficDown')} value={formatBytes(total.down, locale)} />
+              <Total label={t('admin:proxyTrafficUp')} value={formatBytes(total.up, locale)} />
+              <Total label={t('admin:proxyTrafficRequests')} value={formatCount(total.requests, locale)} />
+            </div>
+            <TimeChart
+              stacked
+              defaultType="area"
+              data={data}
+              unit={scale.unit}
+              format={format}
+              label={t('admin:proxyTrafficChart')}
+              partialBucket={data.at(-1)?.bucket}
+              series={[
+                { key: 'down', label: t('admin:proxyTrafficDown'), color: chartColor(0) },
+                { key: 'up', label: t('admin:proxyTrafficUp'), color: chartColor(1) },
+              ]}
+            />
+            <p className="text-xs text-muted-foreground">{t('admin:proxyTrafficBasis')}</p>
+          </Card>
+          <Table wrapperClassName="max-h-none">
+            <THead>
+              <Tr>
+                <Th>{t('admin:proxyName')}</Th>
+                <Th numeric>{t('admin:proxyTrafficDown')}</Th>
+                <Th numeric>{t('admin:proxyTrafficUp')}</Th>
+                <Th numeric>{t('admin:proxyTrafficTotal')}</Th>
+                <Th numeric>{t('admin:proxyTrafficRequests')}</Th>
               </Tr>
-            )
-          })}
-        </TBody>
-      </Table>
+            </THead>
+            <TBody>
+              {rows.map((r) => {
+                const active = String(r.proxy_id) === proxy
+                return (
+                  <Tr key={r.proxy_id} className={cn(active && 'bg-muted/60')}>
+                    <Td>
+                      <button
+                        type="button"
+                        aria-pressed={active}
+                        className="cursor-pointer truncate font-medium transition-colors hover:text-primary"
+                        onClick={() => setProxy(active ? '' : String(r.proxy_id))}
+                      >
+                        {nameOf(r.proxy_id)}
+                      </button>
+                    </Td>
+                    <Td numeric>{formatBytes(r.down_bytes, locale)}</Td>
+                    <Td numeric>{formatBytes(r.up_bytes, locale)}</Td>
+                    <Td numeric className="font-medium">{formatBytes(r.up_bytes + r.down_bytes, locale)}</Td>
+                    <Td numeric>{formatCount(r.requests, locale)}</Td>
+                  </Tr>
+                )
+              })}
+            </TBody>
+          </Table>
+        </div>
+      </div>
     </>
   )
 }
 
 function Total({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-border/70 px-3 py-2">
+    <div className="rounded-xl border border-border/75 bg-muted/25 px-4 py-3">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="text-lg font-semibold tabular-nums">{value}</p>
+      <p className="mt-1 text-xl leading-7 font-semibold tracking-tight tabular-nums">{value}</p>
     </div>
   )
 }

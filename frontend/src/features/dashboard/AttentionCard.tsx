@@ -79,7 +79,45 @@ export function HealthSummary() {
   const enabled = parts.filter((part) => part.state !== 'off')
   const down = enabled.filter((part) => part.state === 'down')
   const detail = [...parts.map((part) => `${part.name}: ${t(`admin:dashboardHealth_${part.state}`)}`), t('admin:healthEpoch', { n: h.pricebook_epoch })].join(' · ')
-  return frame(<Tooltip content={detail}>
+  const detailCard = (
+    <div className="w-[224px] max-w-full space-y-2 text-left">
+      <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-1.5">
+        <span className="text-[11px] font-medium text-muted-foreground">{t('admin:dashboardSystemHealth')}</span>
+        <span className={cn('text-[11px] font-semibold tabular-nums', down.length > 0 ? 'text-destructive' : 'text-success')}>
+          {enabled.length - down.length}/{enabled.length}
+        </span>
+      </div>
+      <div className="space-y-1.5 text-xs">
+        {parts.map((part) => (
+          <div key={part.name} className="flex items-center justify-between gap-4">
+            <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+              <span
+                aria-hidden
+                className={cn(
+                  'size-1.5 shrink-0 rounded-full',
+                  part.state === 'ok' ? 'bg-success' : part.state === 'down' ? 'bg-destructive' : 'bg-muted-foreground/40',
+                )}
+              />
+              {part.name}
+            </span>
+            <span className="sr-only">: </span>
+            <span
+              className={cn(
+                'text-[11.5px]',
+                part.state === 'ok' ? 'text-muted-foreground' : part.state === 'down' ? 'font-medium text-destructive' : 'text-muted-foreground/70',
+              )}
+            >
+              {t(`admin:dashboardHealth_${part.state}`)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="border-t border-border/60 pt-1.5 text-[11px] tabular-nums text-muted-foreground">
+        {t('admin:healthEpoch', { n: h.pricebook_epoch })}
+      </div>
+    </div>
+  )
+  return frame(<Tooltip content={detailCard}>
     <span tabIndex={0} className={cn('rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40', down.length > 0 && 'font-medium text-destructive')}>
       {down.length > 0 ? t('admin:dashboardServicesDown', { names: down.map((part) => part.name).join(' / ') }) : t('admin:dashboardServicesOk', { ok: enabled.length, total: enabled.length })}
       <span className="sr-only"> ({detail})</span>
@@ -282,10 +320,13 @@ export function AttentionStrip({ days }: { days: number }) {
       {visible.map((item) => {
         const critical = item.tone === 'destructive'
         return <Link key={item.key} to={item.to} search={item.search} aria-label={item.text}
-          className={cn('group flex min-h-11 min-w-0 flex-1 basis-[22.5rem] items-center gap-3 bg-card px-3.5 py-2 text-[13px] outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40', critical && 'border-l-[3px] border-l-destructive')}>
+          className={cn(
+            'group relative flex min-h-11 min-w-0 flex-1 basis-[22.5rem] items-center gap-3 bg-card px-4 py-2.5 text-[13px] outline-none transition-colors hover:bg-muted/45 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40',
+            critical && 'before:absolute before:top-2.5 before:bottom-2.5 before:left-1 before:w-[3px] before:rounded-full before:bg-destructive',
+          )}>
           <span className={cn('shrink-0 rounded-[5px] px-2 py-0.5 text-xs font-semibold whitespace-nowrap ring-1 ring-inset', critical ? 'bg-destructive/10 text-destructive ring-destructive/20' : 'bg-warning/14 text-warning ring-warning/25')}>{critical ? t('admin:attnCritical') : t('admin:attnNotice')}</span>
           <span className="min-w-0 flex-1 leading-5"><b className="font-semibold">{item.summary}</b><span className="text-muted-foreground"> · {item.text}</span></span>
-          <span className="shrink-0 whitespace-nowrap text-primary group-hover:underline">{item.action}<span aria-hidden> →</span></span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap font-medium text-primary group-hover:underline">{item.action}<span aria-hidden className="inline-block transition-transform duration-150 group-hover:translate-x-0.5">→</span></span>
         </Link>
       })}
     </div>}

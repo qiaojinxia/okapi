@@ -43,8 +43,8 @@ export function AuthLayout({
           <p className="text-base leading-7 text-muted-foreground">{t('auth:heroSubtitle')}</p>
           <ul className="flex flex-col gap-3">
             {points.map((p) => (
-              <li key={p} className="flex items-start gap-2.5 text-sm">
-                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+              <li key={p} className="flex items-start gap-2.5 text-sm leading-6 text-foreground/90">
+                <CheckCircle2 className="mt-1 h-4 w-4 shrink-0 text-primary" />
                 <span>{p}</span>
               </li>
             ))}
@@ -68,7 +68,7 @@ export function AuthLayout({
           <Button
             variant="ghost"
             size="icon"
-            className="h-9 w-9"
+            className="h-9 w-9 text-muted-foreground hover:text-foreground"
             aria-label={t('common:theme')}
             onClick={theme.toggle}
           >

@@ -153,10 +153,12 @@ export function PoolMembershipEditor({
 export function PoolMembership({
   channelId,
   current,
+  defaultOpen,
   onDone,
 }: {
   channelId: number
   current: PoolMember[]
+  defaultOpen?: boolean
   onDone: () => void
 }) {
   const { t } = useTranslation()
@@ -177,6 +179,7 @@ export function PoolMembership({
 
   return (
     <OptionalSection id="channel-pools" title={t('admin:poolMembership')} hint={t('admin:poolMembershipHint')}
+      defaultOpen={defaultOpen}
       summary={members.map((member) => member.pool_code + (member.priority_override !== null || member.weight_override !== null
         ? ` (${t('admin:channelOptionsCustomized')})` : '')).join(', ') || t('admin:channelPoolsEmpty')}
       error={members.length === 0 ? t('admin:poolOrphanWarning') : undefined}>

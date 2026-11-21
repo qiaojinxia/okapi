@@ -10,8 +10,24 @@ import type { LogRow } from './types'
 export function LogPerformance({ row }: { row: Pick<LogRow, 'is_stream' | 'ttft_ms' | 'latency_ms' | 'usage'> }) {
   const { t, i18n } = useTranslation()
   const { average } = outputRates(row), rate = formatOutputRate(average, i18n.language, true)
+  const tooltipContent = (
+    <div className="w-[252px] max-w-full space-y-2 text-left whitespace-normal">
+      {average == null ? (
+        <p className="border-b border-border/60 pb-1.5 text-[11.5px] font-medium text-foreground">
+          {t('logs:outputThroughputMissing')}
+        </p>
+      ) : (
+        <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-1.5">
+          <span className="text-[11px] font-medium text-muted-foreground">{t('charts:throughput')}</span>
+          <span className="sr-only"> </span>
+          <span className="text-xs font-semibold tabular-nums text-foreground">{formatOutputRate(average, i18n.language)}</span>
+        </div>
+      )}
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{t('logs:outputThroughputHint')}</p>
+    </div>
+  )
   return <div data-slot="log-performance" className="ml-auto grid w-58 grid-cols-[6rem_minmax(0,1fr)] items-center gap-x-2 text-xs leading-4 tabular-nums whitespace-nowrap">
-    <Tooltip className="w-full" content={`${average == null ? t('logs:outputThroughputMissing') : `${t('charts:throughput')} ${formatOutputRate(average, i18n.language)} ·`} ${t('logs:outputThroughputHint')}`}>
+    <Tooltip className="w-full" content={tooltipContent}>
       <span data-slot="output-throughput" data-state={average == null ? 'missing' : 'measured'} tabIndex={0}
         aria-label={`${t('charts:throughput')} ${rate}`}
         className={cn('inline-flex h-6 w-full items-center justify-center gap-1 rounded px-1.5 text-[11px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-primary/40', average == null ? 'border border-dashed border-border text-muted-foreground' : 'bg-primary/8 text-foreground')}>

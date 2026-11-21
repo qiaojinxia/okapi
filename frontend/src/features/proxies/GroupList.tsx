@@ -75,7 +75,13 @@ export function GroupList({ tabs }: { tabs: React.ReactNode }) {
                 <Td>
                   <span className="flex flex-col">
                     <span className="flex items-center gap-1.5">
-                      <span className="font-medium">{g.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setDrawer({ group: g })}
+                        className="cursor-pointer rounded-sm text-left font-medium outline-none transition-colors hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                      >
+                        {g.name}
+                      </button>
                       {g.is_default && <Badge variant="info">{t('admin:egressDefaultBadge')}</Badge>}
                     </span>
                     <span className="font-mono text-xs text-muted-foreground">{g.code}</span>
@@ -103,10 +109,16 @@ export function GroupList({ tabs }: { tabs: React.ReactNode }) {
                   </span>
                 </Td>
                 <Td className="text-xs">
-                  <span className="flex flex-col">
+                  <span className="flex flex-col items-start">
                     <span>{t('admin:proxyUsageChannels', { n: g.channel_count })}</span>
                     {g.unassigned_keys > 0 && (
-                      <span className="text-warning">{t('admin:proxyGroupUnassigned', { n: g.unassigned_keys })}</span>
+                      <button
+                        type="button"
+                        onClick={() => setAssignments(g)}
+                        className="cursor-pointer rounded-sm text-left text-warning underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40"
+                      >
+                        {t('admin:proxyGroupUnassigned', { n: g.unassigned_keys })}
+                      </button>
                     )}
                   </span>
                 </Td>

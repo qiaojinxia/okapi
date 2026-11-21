@@ -224,8 +224,45 @@ export function ChannelTimelineDrawer({
                     <YAxis fontSize={10} allowDecimals={false} domain={[0, (max: number) => Math.max(2, Math.ceil(max * 1.15))]} tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} />
                     <Tooltip
                       cursor={{ fill: 'var(--color-primary)', fillOpacity: 0.08 }}
-                      contentStyle={{ fontSize: 12 }}
-                      formatter={(v) => formatCount(Number(v), locale)}
+                      content={({ active, payload, label: bucket }) => {
+                        if (!active || !payload?.length) return null
+                        const ok = Number(payload.find((p) => p.dataKey === 'ok')?.value ?? 0)
+                        const errs = Number(payload.find((p) => p.dataKey === 'errors')?.value ?? 0)
+                        const total = ok + errs
+                        return (
+                          <div className="note-body min-w-40 px-3 py-2 text-xs tabular-nums">
+                            <p className="mb-1.5 border-b border-border/60 pb-1 font-mono text-[11px] font-medium text-muted-foreground">
+                              {String(bucket)}
+                            </p>
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                                  <span className="h-2 w-2 rounded-full bg-primary" />
+                                  {t('admin:timelineOk')}
+                                  <span className="sr-only"> : </span>
+                                </span>
+                                <span className="font-medium text-foreground">{formatCount(ok, locale)}</span>
+                              </div>
+                              <div className="flex items-center justify-between gap-4">
+                                <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                                  <span className="h-2 w-2 rounded-full bg-destructive" />
+                                  {t('logs:failed')}
+                                  <span className="sr-only"> : </span>
+                                </span>
+                                <span className={errs > 0 ? 'font-semibold text-destructive' : 'font-medium text-foreground'}>
+                                  {formatCount(errs, locale)}
+                                </span>
+                              </div>
+                              {total > 0 && errs > 0 && (
+                                <div className="flex items-center justify-between gap-4 border-t border-border/50 pt-1 text-[11px]">
+                                  <span className="text-muted-foreground">{t('admin:errorRate')}</span>
+                                  <span className="font-medium text-destructive">{((errs / total) * 100).toFixed(1)}%</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      }}
                     />
                     <Legend itemSorter={null} />
                     <Bar dataKey="ok" name={t('admin:timelineOk')} stackId="r" fill="var(--color-primary)" stroke="var(--color-primary)" strokeWidth={0.75} isAnimationActive={false} />
@@ -242,7 +279,32 @@ export function ChannelTimelineDrawer({
                     <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
                     <XAxis dataKey="bucket" fontSize={10} minTickGap={32} tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
                     <YAxis fontSize={10} unit=" ms" tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => `${formatCount(Number(v), locale)} ms`} />
+                    <Tooltip
+                      cursor={{ stroke: 'var(--color-border)', strokeDasharray: '3 3' }}
+                      content={({ active, payload, label: bucket }) => {
+                        if (!active || !payload?.length) return null
+                        return (
+                          <div className="note-body min-w-36 px-3 py-2 text-xs tabular-nums">
+                            <p className="mb-1.5 border-b border-border/60 pb-1 font-mono text-[11px] font-medium text-muted-foreground">
+                              {String(bucket)}
+                            </p>
+                            <div className="space-y-1">
+                              {payload.map((entry) => (
+                                <div key={String(entry.dataKey)} className="flex items-center justify-between gap-4">
+                                  <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} />
+                                    {entry.name}
+                                  </span>
+                                  <span className="font-medium text-foreground">
+                                    {entry.value == null ? '—' : `${formatCount(Number(entry.value), locale)} ms`}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      }}
+                    />
                     <Legend itemSorter={null} />
                     <Line type="monotone" dataKey="p50" name="p50" stroke="var(--color-chart-1)" strokeWidth={1.75} dot={false} isAnimationActive={false} />
                     <Line type="monotone" dataKey="p95" name="p95" stroke="var(--color-chart-2)" strokeWidth={1.75} dot={false} isAnimationActive={false} />

@@ -147,7 +147,7 @@ export function Menu({ trigger, align = 'end', strategy = 'absolute', className,
             }}
             style={strategy === 'fixed' ? place : undefined}
             className={cn(
-              'z-50 flex min-w-48 flex-col gap-0.5 rounded-lg border border-border bg-popover p-1 shadow-popover animate-zoom-in',
+              'z-50 flex min-w-48 flex-col gap-0.5 rounded-xl border border-border/85 bg-popover p-1.5 shadow-popover animate-zoom-in',
               strategy === 'fixed' ? 'fixed' : cn('absolute top-full mt-1.5', align === 'end' ? 'right-0' : 'left-0'),
               strategy === 'fixed' && place.bottom !== undefined
                 ? align === 'end' ? 'origin-bottom-right' : 'origin-bottom-left'
@@ -191,12 +191,12 @@ export function MenuItem({
         onSelect?.()
       }}
       className={cn(
-        'flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors md:min-h-8',
+        'flex min-h-11 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] outline-none transition-colors md:min-h-8',
         'focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-50',
         destructive ? 'text-destructive hover:bg-destructive/10' : 'hover:bg-accent',
       )}
     >
-      {Icon && <Icon className="h-4 w-4 shrink-0 opacity-80" />}
+      {Icon && <Icon className="h-3.5 w-3.5 shrink-0 opacity-75" />}
       <span className="flex-1 truncate">{children}</span>
       {trailing !== undefined && (
         <span className="text-xs text-muted-foreground">{trailing}</span>
@@ -207,12 +207,12 @@ export function MenuItem({
 
 export function MenuLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-2 pt-1.5 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+    <div className="px-2.5 pt-1.5 pb-1 text-[10.5px] font-semibold tracking-[0.06em] text-muted-foreground/75 uppercase">
       {children}
     </div>
   )
 }
 
 export function MenuSeparator() {
-  return <div role="separator" className="my-1 h-px bg-border" />
+  return <div role="separator" className="my-1 h-px bg-border/70" />
 }

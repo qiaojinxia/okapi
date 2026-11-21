@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import { useState } from 'react'
-import { ArrowUpRight, CircleHelp } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, CircleHelp } from 'lucide-react'
 import { Stat } from '@/components/ui/stat'
 import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -28,18 +28,61 @@ export function LogSummary({ data, loading, error, onRetry, layout = 'page', onO
     errors: valid.errors, settled: valid.settled, failed: valid.failed, refunded: valid.refunded,
   }) : '—'
   if (layout === 'strip') {
+    const recordsHint = valid ? (
+      <div className="w-[216px] max-w-full space-y-2 text-left">
+        <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-1.5">
+          <span className="text-[11px] font-medium text-muted-foreground">{t('logs:records')}</span>
+          <span className="text-xs font-semibold tabular-nums text-foreground">{count(valid.records)}</span>
+        </div>
+        <div className="space-y-1 text-xs">
+          <div className="flex items-center justify-between gap-4">
+            <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+              <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-success" />
+              {t('logs:settled')}
+            </span>
+            <span className="font-medium tabular-nums text-foreground">{count(valid.settled)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+              <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${valid.failed > 0 ? 'bg-destructive' : 'bg-muted-foreground/35'}`} />
+              {t('logs:failed')}
+            </span>
+            <span className={`font-medium tabular-nums ${valid.failed > 0 ? 'text-destructive' : 'text-muted-foreground'}`}>{count(valid.failed)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+              <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${valid.refunded > 0 ? 'bg-warning' : 'bg-muted-foreground/35'}`} />
+              {t('logs:refunded')}
+            </span>
+            <span className={`font-medium tabular-nums ${valid.refunded > 0 ? 'text-warning' : 'text-muted-foreground'}`}>{count(valid.refunded)}</span>
+          </div>
+          {valid.errors != null && (
+            <div className="flex items-center justify-between gap-4 border-t border-border/50 pt-1">
+              <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                <span aria-hidden className={`size-1.5 shrink-0 rounded-full ${valid.errors > 0 ? 'bg-destructive' : 'bg-muted-foreground/35'}`} />
+                {t('profile:errors')}
+              </span>
+              <span className={`font-medium tabular-nums ${valid.errors > 0 ? 'text-destructive' : 'text-muted-foreground'}`}>{count(valid.errors)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    ) : statusHint
     const metrics = [
       { label: t('logs:netSpend'), value: valid ? logMoney(valid.amount_micro, locale) : '—', hint: valid?.refunded ? t('logs:refundExcluded', { amount: logMoney(valid.refunded_amount_micro, locale) }) : t('logs:netSpendHint') },
-      { label: t('logs:records'), value: count(valid?.records), hint: statusHint },
+      { label: t('logs:records'), value: count(valid?.records), hint: recordsHint },
       { label: t('logs:input'), value: count(valid?.prompt_tokens), hint: t('logs:inputHint') },
       { label: t('logs:output'), value: count(valid?.completion_tokens), hint: t('logs:outputHint') },
       { label: t('logs:cacheRead'), value: valid && valid.cache_read_samples > 0 ? count(valid.cached_tokens) : '—', hint: valid ? t('logs:cacheCoverage', { n: valid.cache_read_samples, total: valid.records }) : t('logs:unreported') },
       { label: t('logs:avgTtft'), value: duration(valid?.avg_ttft_ms, locale), hint: valid && valid.ttft_samples > 0 ? t('logs:timingSamples', { n: valid.ttft_samples, latency: duration(valid.avg_latency_ms, locale) }) : t('logs:noTtftSamples') },
     ]
     return <section aria-label={t('logs:summary')} aria-busy={loading} className="shrink-0 overflow-hidden rounded-xl border border-border bg-card shadow-card">
-      <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-3 border-b border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
-        <Tooltip content={t('logs:summaryHint')}><button type="button" className="inline-flex items-center gap-1.5 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{t('logs:summary')}<CircleHelp aria-hidden className="h-3 w-3" /></button></Tooltip>
-        <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="ml-auto rounded text-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{t('logs:moreMetrics')}</button>
+      <div className="flex min-h-7 flex-wrap items-center justify-between gap-x-3 border-b border-border/60 bg-muted/20 px-3 py-1 text-[11px] text-muted-foreground">
+        <Tooltip content={t('logs:summaryHint')}><button type="button" className="inline-flex cursor-pointer items-center gap-1.5 rounded outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40">{t('logs:summary')}<CircleHelp aria-hidden className="h-3 w-3" /></button></Tooltip>
+        <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded text-primary outline-none transition-colors hover:text-primary/80 focus-visible:ring-2 focus-visible:ring-primary/40">
+          {t('logs:moreMetrics')}
+          <ChevronDown aria-hidden className={`h-3 w-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        </button>
         {error && <span role="status">{t('logs:summaryError')} <Button size="sm" variant="ghost" className="h-6 px-1" onClick={onRetry}>{t('common:retry')}</Button></span>}
       </div>
       <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
@@ -106,7 +149,32 @@ export function ExtraMetrics({ data, expanded }: { data?: Partial<LogStats>; exp
   // 实报为 0 的项收成一行（悬停看名单）；未上报的不出现，与真实零仍区分开
   const zeros = rest.filter(([key, n]) => n === 0 && key !== 'cacheWrite')
   const shown = rest.filter((metric) => !zeros.includes(metric))
-  const help = [t('logs:tokenHint'), ttl.length > 0 || visibleMetrics.some(([key]) => CACHE_SUBSET_FIELDS.has(key)) ? t('logs:cacheSubsetsHint') : '', t('logs:coverageHint')].filter(Boolean).join(' ')
+  const helpItems = [
+    t('logs:tokenHint'),
+    ttl.length > 0 || visibleMetrics.some(([key]) => CACHE_SUBSET_FIELDS.has(key)) ? t('logs:cacheSubsetsHint') : '',
+    t('logs:coverageHint'),
+  ].filter(Boolean)
+  const zerosCard = (
+    <div className="flex max-w-[260px] flex-wrap gap-1.5 text-left">
+      {zeros.map(([key], i) => (
+        <span key={key} className="inline-flex items-center">
+          {i > 0 && <span className="sr-only">、</span>}
+          <span className="rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5 text-[11px] text-foreground">
+            {t(`logs:${key}`)}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+  const helpCard = (
+    <div className="w-[276px] max-w-full space-y-2 text-left text-[11.5px] leading-relaxed text-muted-foreground">
+      {helpItems.map((item, i) => (
+        <p key={i} className={i > 0 ? 'border-t border-border/60 pt-2' : 'text-foreground/90'}>
+          {item}
+        </p>
+      ))}
+    </div>
+  )
   const content = <div className="@container space-y-3 py-3">
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 @2xl:grid-cols-4">
         {shown.map(([key, n, samples]) => <div key={key} className="min-w-0">
@@ -120,10 +188,10 @@ export function ExtraMetrics({ data, expanded }: { data?: Partial<LogStats>; exp
         </div>)}
       </dl>
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-        {zeros.length > 0 && <Tooltip content={zeros.map(([key]) => t(`logs:${key}`)).join('、')}>
+        {zeros.length > 0 && <Tooltip content={zerosCard}>
           <button type="button" className="rounded underline decoration-dotted underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{t('logs:zeroMetrics', { count: zeros.length })}</button>
         </Tooltip>}
-        <Tooltip content={help}>
+        <Tooltip content={helpCard}>
           <button type="button" className="ml-auto inline-flex items-center gap-1 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40"><CircleHelp aria-hidden className="h-3 w-3" />{t('logs:metricsHelp')}</button>
         </Tooltip>
       </div>

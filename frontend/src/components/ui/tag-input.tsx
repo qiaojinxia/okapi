@@ -109,7 +109,10 @@ export function TagInput({ value, onChange, placeholder, id, className, suggesti
             return (
               <span
                 key={tag}
-                className={cn('inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border py-0 pr-1 pl-2 font-mono text-xs md:py-1', isPending ? 'border-dashed border-primary/40 bg-primary/5' : 'border-border bg-muted/60')}
+                className={cn(
+                  'inline-flex min-w-0 max-w-full items-center gap-1 rounded-lg border py-0 pr-1 pl-2.5 font-mono text-xs transition-colors md:py-0.5',
+                  isPending ? 'border-dashed border-primary/45 bg-primary/5 text-primary' : 'border-border/85 bg-card text-foreground shadow-xs',
+                )}
               >
                 <span className="min-w-0 break-all">{tag}</span>
                 <button

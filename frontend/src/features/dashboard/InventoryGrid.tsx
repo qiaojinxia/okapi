@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { TriangleAlert } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -9,17 +10,19 @@ import { formatCount } from '@/lib/money'
 import { cn } from '@/lib/utils'
 import { useDashboardInventory } from './data'
 
-function Cell({ label, value, sub, summary, to, tone }: {
+function Cell({ label, value, sub, tooltip, summary, to, tone }: {
   label: string
   value: string
   /// 完整说明：悬停提示和读屏名称用。
   sub: string
+  /// 可选结构化悬停卡片；省略时回退为纯文本 `sub`。
+  tooltip?: ReactNode
   /// 单元格里的一句话。
   summary: string
   to: string
   tone?: 'warn' | 'bad'
 }) {
-  return <Tooltip content={sub} className="min-w-0">
+  return <Tooltip content={tooltip ?? sub} className="min-w-0">
     <Link to={to} aria-label={`${label} ${value} · ${sub}`} className="flex min-w-0 flex-1 flex-col bg-card px-2.5 py-1.5 outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="flex flex-wrap items-baseline gap-x-1.5 text-[15px] font-semibold tabular-nums">
@@ -50,11 +53,27 @@ export function InventoryGrid() {
   const d = q.data
   const n = (v: number) => formatCount(v, locale)
   const channelTone = d.channels.auto_disabled > 0 ? 'bad' : d.channels.no_key > 0 ? 'warn' : undefined
-  const channelIssues = [
-    d.channels.auto_disabled > 0 ? t('admin:invChannelsAutoDisabled', { n: n(d.channels.auto_disabled) }) : '',
-    d.channels.no_key > 0 ? t('admin:invChannelsNoKey', { n: n(d.channels.no_key) }) : '',
-  ].filter(Boolean)
-  const channelSub = channelIssues.join(' · ') || t('admin:invChannelsHealthy', { n: n(d.channels.healthy), total: n(d.channels.total) })
+  const channelHealthyLabel = t('admin:invChannelsHealthy', { n: n(d.channels.healthy), total: n(d.channels.total) })
+  const channelIssueItems: { text: string; tone: 'bad' | 'warn' }[] = [
+    ...(d.channels.auto_disabled > 0 ? [{ text: t('admin:invChannelsAutoDisabled', { n: n(d.channels.auto_disabled) }), tone: 'bad' as const }] : []),
+    ...(d.channels.no_key > 0 ? [{ text: t('admin:invChannelsNoKey', { n: n(d.channels.no_key) }), tone: 'warn' as const }] : []),
+  ]
+  const channelSub = channelIssueItems.map((i) => i.text).join(' · ') || channelHealthyLabel
+  const channelTooltip = channelTone ? (
+    <div className="space-y-1 text-left text-[11.5px] tabular-nums">
+      <div className="flex items-center gap-1.5 font-medium text-foreground">
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-success" />
+        <span>{channelHealthyLabel}</span>
+      </div>
+      {channelIssueItems.map((issue) => (
+        <div key={issue.text} className={cn('flex items-center gap-1.5', issue.tone === 'bad' ? 'text-destructive' : 'text-warning')}>
+          <span className="sr-only"> · </span>
+          <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', issue.tone === 'bad' ? 'bg-destructive' : 'bg-warning')} />
+          <span>{issue.text}</span>
+        </div>
+      ))}
+    </div>
+  ) : undefined
   const channelSummary = [
     d.channels.auto_disabled > 0 ? t('admin:dashboardDisabledCount', { n: n(d.channels.auto_disabled) }) : '',
     d.channels.no_key > 0 ? t('admin:dashboardNoKeyCount', { n: n(d.channels.no_key) }) : '',
@@ -67,7 +86,7 @@ export function InventoryGrid() {
     <Cell label={t('admin:invKeys')} value={n(d.api_keys.active)} to="/admin/keys"
       sub={t('admin:invKeysUsed7d', { n: n(d.api_keys.used_7d) })} summary={t('admin:dashboardKeysUsed', { n: n(d.api_keys.used_7d) })} />
     <Cell label={t('admin:dashboardAvailableChannels')} value={`${n(d.channels.healthy)} / ${n(d.channels.total)}`} to="/admin/channels" tone={channelTone}
-      sub={channelTone ? `${t('admin:invChannelsHealthy', { n: n(d.channels.healthy), total: n(d.channels.total) })} · ${channelSub}` : channelSub} summary={channelSummary} />
+      sub={channelTone ? `${channelHealthyLabel} · ${channelSub}` : channelSub} tooltip={channelTooltip} summary={channelSummary} />
     <Cell label={t('admin:invModels')} value={n(d.models.total)} to="/admin/pricing" tone={unpriced > 0 ? 'warn' : undefined}
       sub={unpriced > 0 ? t('admin:invModelsUnpriced', { n: n(unpriced) }) : t('admin:invModelsServed', { n: n(d.models.served) })}
       summary={unpriced > 0 ? t('admin:dashboardUnpricedCount', { n: n(unpriced) }) : t('admin:dashboardServedCount', { n: n(d.models.served) })} />

@@ -180,7 +180,7 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
 
         {workspace && (workspace.permission === undefined || can(workspace.permission)) && (
           <div className={cn('shrink-0 border-t border-sidebar-border py-2', rail ? 'px-2.5' : 'px-3')}>
-            {!rail && <p className="px-3 pb-1 text-[11px] text-muted-foreground">{t('common:switchWorkspace')}</p>}
+            {!rail && <p className="px-3 pb-1 text-[10.5px] font-semibold tracking-[0.07em] text-muted-foreground/70 uppercase">{t('common:switchWorkspace')}</p>}
             <NavLink item={workspace} rail={rail} onClick={() => setOpen(false)} />
           </div>
         )}
@@ -229,7 +229,7 @@ function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => 
           aria-label={t('profile:title')}
           onClick={onNavigate}
           activeProps={{ className: 'bg-primary/10 text-primary', 'aria-current': 'page' }}
-          className={cn('flex min-h-12 w-full items-center gap-3 rounded-lg outline-none transition-colors hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-primary/40', rail ? 'justify-center' : 'px-2 py-2')}
+          className={cn('group flex min-h-12 w-full items-center gap-3 rounded-lg outline-none transition-colors hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-primary/40', rail ? 'justify-center' : 'px-2 py-2')}
         >
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary/18 to-chart-4/18 text-xs font-semibold text-primary ring-1 ring-inset ring-primary/15">
             {initial}
@@ -242,7 +242,7 @@ function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => 
               </span>
             </div>
           )}
-          {!rail && <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />}
+          {!rail && <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground/75 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-foreground" />}
         </Link>
       </Tooltip>
     </div>
@@ -300,7 +300,7 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
       <Button
         variant="ghost"
         size="icon"
-        className="-ml-2 hidden h-9 w-9 md:inline-flex"
+        className="-ml-2 hidden h-9 w-9 text-muted-foreground hover:text-foreground md:inline-flex"
         aria-label={collapsed ? t('common:expandNav') : t('common:collapseNav')}
         aria-controls="app-navigation"
         onClick={onToggleNav}
@@ -330,7 +330,7 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
       {/* 新手引导常驻顶栏：总览卡关掉之后，"Base URL 填什么"这类问题仍要有地方查 */}
       {onHelp && (
         <Tooltip content={t('common:guide')} side="bottom">
-          <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" onClick={onHelp} aria-label={t('common:guide')}>
+          <Button variant="ghost" size="icon" className="h-11 w-11 text-muted-foreground hover:text-foreground md:h-9 md:w-9" onClick={onHelp} aria-label={t('common:guide')}>
             <CircleHelp className="h-4 w-4" />
           </Button>
         </Tooltip>
@@ -340,7 +340,7 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
         align="end"
         className="min-w-44"
         trigger={
-          <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" aria-label={t('common:language')}>
+          <Button variant="ghost" size="icon" className="h-11 w-11 text-muted-foreground hover:text-foreground md:h-9 md:w-9" aria-label={t('common:language')}>
             <Languages className="h-4 w-4" />
           </Button>
         }
@@ -358,7 +358,7 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
         align="end"
         className="min-w-44"
         trigger={
-          <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" aria-label={t('common:theme')}>
+          <Button variant="ghost" size="icon" className="h-11 w-11 text-muted-foreground hover:text-foreground md:h-9 md:w-9" aria-label={t('common:theme')}>
             <ThemeIcon className="h-4 w-4" />
           </Button>
         }
@@ -376,7 +376,7 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
       </Menu>
 
       <Tooltip content={t('common:logout')} side="bottom">
-        <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" onClick={logout} aria-label={t('common:logout')}>
+        <Button variant="ghost" size="icon" className="h-11 w-11 text-muted-foreground hover:text-foreground md:h-9 md:w-9" onClick={logout} aria-label={t('common:logout')}>
           <LogOut className="h-4 w-4" />
         </Button>
       </Tooltip>

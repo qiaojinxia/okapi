@@ -134,7 +134,7 @@ test('全局默认出口在系统设置：代理页页头直达「出口代理�
   await prepare(page, '/admin/proxies')
   await page.getByRole('link', { name: '默认出口与探测' }).click()
   await expect(page).toHaveURL(/\/admin\/settings\?tab=egress$/)
-  await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('tab', { name: '代理', exact: true })).toHaveAttribute('aria-selected', 'true')
   let saved: Json | undefined
   await page.route('**/admin/egress/default', async (route) => {
     if (route.request().method() !== 'PUT') return route.fallback()
@@ -278,8 +278,8 @@ test('高级设置里的出口配置键给「前往设置」，跳到「出口�
   const probe = traffic.getByRole('article', { name: '后台探测' })
   await expect(probe.getByRole('button')).toHaveText('前往设置')
   await probe.getByRole('button').click()
-  await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toHaveAttribute('aria-selected', 'true')
-  await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toBeFocused()
+  await expect(page.getByRole('tab', { name: '代理', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('tab', { name: '代理', exact: true })).toBeFocused()
   await expect(page.getByRole('switch', { name: '开启后台探测' })).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })

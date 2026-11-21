@@ -24,6 +24,28 @@ import { useChannelForm } from './drawer/use-channel-form'
 
 const EDIT_TABS = ['conn', 'models', 'sched', 'behavior'] as const
 type EditTab = (typeof EDIT_TABS)[number]
+export type ChannelEditFocus = 'conn' | 'egress' | 'models' | 'pools' | 'schedule' | 'keys' | 'limits'
+
+function initialTabFor(focus: ChannelEditFocus | undefined): EditTab {
+  switch (focus) {
+    case 'models':
+    case 'pools':
+      return 'models'
+    case 'schedule':
+    case 'keys':
+    case 'limits':
+      return 'sched'
+    default:
+      return 'conn'
+  }
+}
+
+const FOCUS_SECTION_ID: Partial<Record<ChannelEditFocus, string>> = {
+  egress: 'channel-egress-edit',
+  pools: 'channel-pools',
+  schedule: 'channel-schedule-options',
+  limits: 'channel-quota-limits',
+}
 /// 新建是一条引导：接入 → 模型与调度 →（订阅账号浏览器登录时）登录授权。
 /// 订阅账号的渠道是「换取凭证」那一下建出来的，没有另外的保存——所以它是最后一步的主按钮，
 /// 而不是埋在表单中段的一个按钮外加底部一个永远点不了的「新建」。
@@ -36,8 +58,8 @@ export function ChannelDrawer({
   onDone,
 }: {
   channel: ChannelRow | undefined
-  /** 打开时直接到某一段：`limits` = 调度页里展开的「额度上限」（列表行菜单的入口）。 */
-  focus?: 'limits'
+  /** 打开时直接落到对应页签与折叠段：点列表中任一字段即可直达对应配置。 */
+  focus?: ChannelEditFocus
   onClose: () => void
   onDone: () => void
 }) {
@@ -46,7 +68,7 @@ export function ChannelDrawer({
   const isEdit = channel !== undefined
   const f = useChannelForm(channel)
   const { canManagePools, form, account, authorization, accountReady, costMilli, models, setModels, credential, setCredential, oauthInput, rotationKeyId, settings, controlValid, concurrency, concurrencyValid, priority, newPools, egressBinding, oauth, importToken, endpointValid, setUnknownModels } = f
-  const [tab, setTab] = useState<EditTab>(focus === 'limits' ? 'sched' : 'conn')
+  const [tab, setTab] = useState<EditTab>(() => initialTabFor(focus))
   const [step, setStep] = useState<CreateStep>('conn')
   const loginFlow = !isEdit && oauth && !importToken
   const login = useOAuthLogin({
@@ -186,6 +208,17 @@ export function ChannelDrawer({
   const last = index === steps.length - 1
   const busy = create.isPending || save.isPending || login.exchange.isPending
   const body = useRef<HTMLDivElement>(null)
+  // 从列表直达某个配置块时，打开抽屉后自动把它滚进视野，免得还要在抽屉里手动往下找。
+  useEffect(() => {
+    if (!isEdit || !focus) return
+    const targetId = FOCUS_SECTION_ID[focus]
+    if (!targetId) return
+    const frame = requestAnimationFrame(() => {
+      body.current?.querySelector<HTMLElement>(`#${targetId}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [isEdit, focus])
+
   // 换步后回到这一步的开头，焦点进第一个可填的控件（触屏不抢焦点，免得弹键盘）
   useEffect(() => {
     if (isEdit) return
@@ -277,8 +310,8 @@ export function ChannelDrawer({
       {isEdit ? (
         <div className="channel-editor">
           {tab === 'conn' && <ConnectionSection f={f} channel={channel} rotate={rotate} onDone={onDone} />}
-          {tab === 'models' && <ModelsSection f={f} channel={channel} discover={discover} onDone={onDone} />}
-          {tab === 'sched' && <ScheduleSection f={f} channel={channel} limitsOpen={focus === 'limits'} onDone={onDone} />}
+          {tab === 'models' && <ModelsSection f={f} channel={channel} poolsOpen={focus === 'pools'} discover={discover} onDone={onDone} />}
+          {tab === 'sched' && <ScheduleSection f={f} channel={channel} limitsOpen={focus === 'limits'} scheduleOpen={focus === 'schedule'} onDone={onDone} />}
           {tab === 'behavior' && <BehaviorSection f={f} channel={channel} />}
         </div>
       ) : (

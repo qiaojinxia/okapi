@@ -47,7 +47,15 @@ function push(input: ToastInput): number {
     // 错误多停 2s：读错误码比读"已保存"慢
     duration: input.duration ?? (tone === 'error' ? 6_000 : 3_600),
   }
-  items = [...items, item].slice(-MAX_VISIBLE)
+  items = [
+    ...items.filter(
+      (existing) =>
+        existing.tone !== item.tone ||
+        existing.title !== item.title ||
+        existing.description !== item.description,
+    ),
+    item,
+  ].slice(-MAX_VISIBLE)
   emit()
   return id
 }

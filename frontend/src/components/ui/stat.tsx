@@ -27,11 +27,11 @@ interface StatProps {
 }
 
 const TONE_ICON: Record<StatTone, string> = {
-  default: 'bg-primary/10 text-primary',
-  good: 'bg-success/12 text-success',
-  warn: 'bg-warning/14 text-warning',
-  bad: 'bg-destructive/12 text-destructive',
-  info: 'bg-info/12 text-info',
+  default: 'bg-primary/10 text-primary ring-1 ring-inset ring-primary/15',
+  good: 'bg-success/12 text-success ring-1 ring-inset ring-success/20',
+  warn: 'bg-warning/14 text-warning ring-1 ring-inset ring-warning/25',
+  bad: 'bg-destructive/12 text-destructive ring-1 ring-inset ring-destructive/20',
+  info: 'bg-info/12 text-info ring-1 ring-inset ring-info/20',
 }
 
 const TONE_VALUE: Record<StatTone, string> = {
@@ -70,12 +70,12 @@ export function Stat({
       className={cn(
         'relative flex items-start gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-card',
         compact && 'p-3',
-        onClick && 'transition-colors hover:border-primary/40 hover:bg-accent/40',
+        onClick && 'cursor-pointer outline-none transition-[color,background-color,border-color,box-shadow] hover:border-primary/40 hover:bg-accent/35 focus-visible:ring-2 focus-visible:ring-primary/40',
         className,
       )}
     >
       {Icon && (
-        <span className={cn('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md', layout === 'stacked' && 'absolute right-4 top-3 h-7 w-7', iconClassName ?? TONE_ICON[tone])}>
+        <span className={cn('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg', layout === 'stacked' && 'absolute right-4 top-3 h-7 w-7', iconClassName ?? TONE_ICON[tone])}>
           <Icon className="h-4 w-4" />
         </span>
       )}
@@ -85,7 +85,7 @@ export function Stat({
           {value}
         </span>
         {sub !== undefined && sub !== '' && (
-          <span className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-muted-foreground">{sub}</span>
+          <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">{sub}</span>
         )}
       </div>
       {aside}

@@ -289,24 +289,25 @@
   }
 
   ::selection {
-    background-color: color-mix(in oklch, var(--primary) 22%, transparent);
+    background-color: color-mix(in oklch, var(--primary) 20%, transparent);
   }
-
   /* 细滚动条：数据面板里的宽表格与长抽屉滚起来不该被 16px 系统滚动条抢空间 */
   * {
     scrollbar-width: thin;
-    scrollbar-color: color-mix(in oklch, var(--muted-fg) 35%, transparent) transparent;
+    scrollbar-color: color-mix(in oklch, var(--muted-fg) 26%, transparent) transparent;
   }
   *::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   *::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
     border-radius: 999px;
-    background-color: color-mix(in oklch, var(--muted-fg) 30%, transparent);
+    background-color: color-mix(in oklch, var(--muted-fg) 28%, transparent);
+    background-clip: content-box;
   }
   *::-webkit-scrollbar-thumb:hover {
-    background-color: color-mix(in oklch, var(--muted-fg) 50%, transparent);
+    background-color: color-mix(in oklch, var(--muted-fg) 48%, transparent);
   }
   *::-webkit-scrollbar-track {
     background: transparent;
@@ -354,6 +355,15 @@
     font-size: 0.6875rem;
     font-weight: 500;
     color: var(--muted-fg);
+  }
+  .recharts-default-tooltip .recharts-tooltip-item-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+  }
+  .recharts-default-tooltip .recharts-tooltip-item {
+    padding: 0 !important;
+    font-variant-numeric: tabular-nums;
   }
 
   /* 信纸：公告的弹窗、列表里的每一封、后台的预览。一张象牙色的纸：极淡的纸纹、暖褐细边、两层很浅的投影；

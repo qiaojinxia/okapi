@@ -64,7 +64,7 @@ export function GroupsPage() {
 
       <ListState
         query={groups}
-        skeleton={{ rows: 6, cols: 6 }}
+        skeleton={{ rows: 6, cols: 8 }}
         empty={
           <EmptyState
             hint={t('admin:groupsDesc')}
@@ -114,10 +114,15 @@ export function GroupsPage() {
               return (
                 <Tr key={g.group_code}>
                   <Td>
-                    <div className="flex min-w-0 flex-col gap-0.5">
-                      <span className="truncate font-mono font-medium" title={g.group_code}>
+                    <div className="flex min-w-0 flex-col items-start gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setDrawer({ group: g })}
+                        className="max-w-full cursor-pointer truncate rounded-sm text-left font-mono font-medium outline-none transition-colors hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                        title={g.group_code}
+                      >
                         {g.group_code}
-                      </span>
+                      </button>
                       {(g.is_default || g.self_select || g.published === false) && (
                         <div className="flex flex-wrap items-center gap-1">
                           {g.published === false && (
@@ -139,12 +144,16 @@ export function GroupsPage() {
                       )}
                     </div>
                   </Td>
-                  <Td numeric>×{formatRatio(g.group_ratio ?? '1')}</Td>
+                  <Td numeric className="font-medium">×{formatRatio(g.group_ratio ?? '1')}</Td>
                   <Td className="truncate text-xs text-muted-foreground" title={g.description ?? undefined}>
                     {g.description ?? '—'}
                   </Td>
                   <Td numeric>{g.user_count}</Td>
-                  <Td className="truncate font-mono text-xs" title={g.pool_code}>{g.pool_code}</Td>
+                  <Td title={g.pool_code}>
+                    <span className="inline-flex max-w-full items-center truncate rounded bg-muted/85 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60 dark:bg-white/[0.06]">
+                      {g.pool_code}
+                    </span>
+                  </Td>
                   <Td numeric>
                     {/* 池里零渠道 = 这个分组的用户什么都打不到，与"未定价"同类的配了一半 */}
                     {g.channel_count === 0 ? (

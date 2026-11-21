@@ -15,7 +15,7 @@ export function FilterChip({ label, value, removeLabel, onRemove, className }: {
   className?: string
 }) {
   return (
-    <span data-slot="filter-chip" className={cn('inline-flex h-7 max-w-full items-center gap-1 rounded-full bg-primary/10 pr-0.5 pl-2.5 text-xs text-primary', className)}>
+    <span data-slot="filter-chip" className={cn('inline-flex h-7 max-w-full items-center gap-1 rounded-full bg-primary/10 pr-0.5 pl-2.5 text-xs text-primary ring-1 ring-inset ring-primary/20', className)}>
       <span className="shrink-0 text-primary/70">{label}</span>
       <span className="min-w-0 max-w-64 truncate font-medium" title={value}>{value}</span>
       <button

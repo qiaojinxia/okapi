@@ -623,7 +623,7 @@ test('渠道列表：深色主题下状态点与额度条仍用语义色', async
   await prepare(page)
   await expect(page.locator('html')).toHaveClass(/dark/)
   const carol = rowOf(page, CAROL_MASKED)
-  await expect(carol.locator('[data-slot="channel-status"] span').first()).toHaveClass(/text-warning/)
+  await expect(carol.locator('[data-slot="key-state-summary"]')).toHaveClass(/text-warning/)
   await expect(carol.getByRole('progressbar', { name: '5小时额度用量' }).locator('div')).toHaveClass(/bg-destructive/)
 })
 
@@ -754,4 +754,70 @@ test('渠道列表：渠道名只有被识别为账号名才遮中间——邮�
   const html = await table.innerHTML()
   for (const raw of ['dave-claude-pro', 'erin@hot-shot.com', 'frank@gmail.com']) expect(html, raw).not.toContain(raw)
 })
+
+test('渠道列表：所见即可点——未入池/模型/优先级/额度直达对应配置段，测活与余额原地触发，30天消费直达日志，异常一键筛选', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await prepare(page)
+  const calls: { method: string; path: string }[] = []
+  await page.route('**/admin/channels/*/test', async (route) => {
+    calls.push({ method: route.request().method(), path: new URL(route.request().url()).pathname })
+    await route.fulfill({ json: { ok: true, latency_ms: 210 } })
+  })
+  await page.route('**/admin/channels/*/balance', async (route) => {
+    calls.push({ method: route.request().method(), path: new URL(route.request().url()).pathname })
+    await route.fulfill({ json: { probe: 'openai', currency: 'USD', balance_micro: 15_000_000, total_micro: null, used_micro: null, at: '2026-10-23T21:00:00Z' } })
+  })
+
+  // 1. 一键「仅看异常」过滤出异常渠道（Carol 与未入池的 OpenAI）
+  const attention = page.locator('[data-slot="channel-attention-filter"]')
+  await expect(attention).toBeVisible()
+  await expect(attention).toContainText('2')
+  await attention.click()
+  await expect(attention).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('tbody tr')).toHaveCount(2)
+  await attention.click()
+  await expect(page.locator('tbody tr')).toHaveCount(5)
+
+  // 2. 点击「未入池」直达「模型与渠道池」且渠道池段已展开
+  const openai = rowOf(page, 'openai-main')
+  await openai.getByRole('button', { name: '未入池', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.getByRole('tab', { name: '模型与渠道池', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(drawer.locator('#channel-pools')).toHaveAttribute('open', '')
+  await page.keyboard.press('Escape')
+  await expect(drawer).toHaveCount(0)
+
+  // 3. 悬停模型数即时显示实际模型名，点击直达模型编辑
+  const modelsBtn = openai.getByRole('button', { name: '3 个模型', exact: true })
+  await modelsBtn.hover()
+  await expect(page.getByRole('tooltip')).toContainText('gpt-5, gpt-5-mini, o4-mini')
+  await modelsBtn.click()
+  await expect(drawer.getByRole('tab', { name: '模型与渠道池', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('Escape')
+
+  // 4. 点击优先级直达「调度」且「调度与成本设置」已展开
+  await openai.getByRole('button', { name: /优先级 5/ }).click()
+  await expect(drawer.getByRole('tab', { name: '调度', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(drawer.locator('#channel-schedule-options')).toHaveAttribute('open', '')
+  await page.keyboard.press('Escape')
+
+  // 5. 点击订阅额度区直达「调度」且「额度上限」已展开
+  const bob = rowOf(page, 'bob-team')
+  await bob.locator('[data-slot="quota-meter"]').first().click()
+  await expect(drawer.getByRole('tab', { name: '调度', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(drawer.locator('#channel-quota-limits')).toHaveAttribute('open', '')
+  await page.keyboard.press('Escape')
+
+  // 6. 点击失败的测活结果原地重测；点击余额查询时间原地刷新余额
+  const carol = rowOf(page, CAROL_MASKED)
+  await carol.locator('[data-slot="last-probe"]').click()
+  await expect.poll(() => calls.some((c) => c.method === 'POST' && c.path === '/admin/channels/3/test')).toBe(true)
+  await openai.getByRole('button', { name: '20:45 查询' }).click()
+  await expect.poll(() => calls.some((c) => c.method === 'GET' && c.path === '/admin/channels/4/balance')).toBe(true)
+
+  // 7. 近 30 天消费直链该渠道请求日志
+  const aliceUsage = rowOf(page, ALICE_MASKED).locator('[data-slot="channel-usage"]')
+  await expect(aliceUsage).toHaveAttribute('href', '/admin/logs?channel_id=1')
+})
+
 

@@ -120,7 +120,7 @@ export function SidebarNav({ nav, rail, pathname, onExpand, onNavigate }: {
       </div>
       <nav
         aria-label={t('common:navigation')}
-        className={cn('flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain py-3', rail ? 'px-2.5' : 'px-3')}
+        className={cn('flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto overscroll-contain pt-3 pb-4', rail ? 'px-2.5' : 'px-3')}
       >
         {filtered.map((group, gi) => (
           <div key={group.title ?? `g${gi}`} className="flex flex-col gap-0.5">

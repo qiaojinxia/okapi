@@ -173,7 +173,7 @@ export function AdminKeysPage() {
       {dialog}
       <ListState
         query={keys}
-        skeleton={{ rows: 8, cols: 9 }}
+        skeleton={{ rows: 8, cols: 10 }}
         empty={
           <EmptyState title={query !== '' || uid !== null ? t('common:noResults') : undefined}
             hint={query !== '' || uid !== null ? t('common:noResultsHint') : undefined}
@@ -226,7 +226,11 @@ export function AdminKeysPage() {
                     )}
                   </div>
                 </Td>
-                <Td className="whitespace-nowrap font-mono text-xs">{k.key_prefix}…</Td>
+                <Td className="whitespace-nowrap">
+                  <code className="inline-block rounded bg-muted/75 px-1.5 py-0.5 font-mono text-xs text-muted-foreground ring-1 ring-inset ring-border/50">
+                    {k.key_prefix}…
+                  </code>
+                </Td>
                 <Td>
                   <Badge dot variant={k.status === 1 ? 'success' : 'muted'}>
                     {k.status === 1 ? t('common:enabled') : t('common:disabled')}
