@@ -10,6 +10,7 @@ pub mod auth;
 pub mod bridge;
 pub mod candidates;
 pub mod channel_balance;
+pub mod channel_permit;
 pub mod channel_probe;
 pub mod channel_test;
 pub mod credentials;

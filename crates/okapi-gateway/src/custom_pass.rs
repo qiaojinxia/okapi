@@ -187,7 +187,7 @@ async fn handle(
         use okapi_providers::response_lifetime::ResponseLifetime;
         super::account_control::admit(state, channel_id, Some(channel.key_id)).await?;
         // 按渠道 id 直达、不走池的排序，不登记只计数的在途
-        let mut permit = okapi_kernel::sched_redis::channel_permit::ChannelPermit::acquire_parts(
+        let mut permit = crate::channel_permit::ChannelPermit::acquire_parts(
             &state.sched,
             channel.key_id,
             channel.max_concurrency,
@@ -195,10 +195,10 @@ async fn handle(
             false,
         )
         .await?
-        .ok_or_else(|| okapi_kernel::sched_redis::channel_permit::blocked("concurrency"))?;
+        .ok_or_else(|| crate::channel_permit::blocked("concurrency"))?;
         let response = tokio::select! {
             result = state.upstreams.pass.forward(pass_req) => result,
-            () = permit.expired() => Err(okapi_kernel::sched_redis::channel_permit::blocked("concurrency_lease_lost")),
+            () = permit.expired() => Err(crate::channel_permit::blocked("concurrency_lease_lost")),
         }?;
         Ok(response.with_guard(permit))
     }

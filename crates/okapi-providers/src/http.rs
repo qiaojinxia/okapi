@@ -445,7 +445,7 @@ fn client_builder(
     Ok(builder)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mimic-tls"))]
 #[path = "http_tls_tests.rs"]
 mod tls_tests;
 

@@ -360,7 +360,7 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
     // 会话接手收尾：此后每条路径都显式结算或 fail_session
     prep.admission.disarm();
     let request_id = prep.request_id;
-    let permit = okapi_kernel::sched_redis::channel_permit::ChannelPermit::acquire_parts(
+    let permit = crate::channel_permit::ChannelPermit::acquire_parts(
         &state.sched,
         prep.channel.1,
         prep.channel_concurrency,

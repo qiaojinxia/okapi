@@ -755,7 +755,7 @@ async fn all_chat_ingresses_authenticate_before_parsing_or_estimating_body() -> 
 
 #[tokio::test]
 async fn media_routers_share_the_channel_concurrency_fence_and_refund_denied_admission() -> Result {
-    use okapi::kernel::sched_redis::channel_permit::ChannelPermit;
+    use okapi::engine::channel_permit::ChannelPermit;
     let state = state().await?;
     let uid = user(&state.pg).await?;
     let (_, token, _) = token(&state.pg, uid).await?;

@@ -1,5 +1,6 @@
 //! Responses 计数预检：鉴权/选路/限流与生成分开，不调用定价、reserve 或 settle。
 use super::state::AppState;
+use crate::channel_permit::ChannelPermit;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -7,7 +8,7 @@ use bytes::Bytes;
 use okapi_api::codes;
 use okapi_kernel::error::{AppError, with_request_id};
 use okapi_kernel::sched_redis::response_affinity::{self, ResponseParent};
-use okapi_kernel::sched_redis::token_count::{ChannelPermit, CountPermit};
+use okapi_kernel::sched_redis::token_count::CountPermit;
 use okapi_providers::UpstreamError;
 use okapi_store::ChannelCandidate;
 use serde_json::{Value, json};

@@ -8,7 +8,7 @@ use super::{
     scheduler::{CandidateSet, Strategy},
     state::AppState,
 };
-use okapi_kernel::sched_redis::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
+use crate::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
 use okapi_providers::UpstreamError;
 use okapi_store::{ChannelCandidate, channel_usage::LocalUsage};
 use policy::{ForecastMode, LocalPeriod, Policy};
@@ -464,12 +464,9 @@ pub fn execute<'a, T: okapi_providers::response_lifetime::ResponseLifetime + 'a>
             candidate.warm_affinity,
         )
         .await?;
-        let mut permit = okapi_kernel::sched_redis::channel_permit::ChannelPermit::acquire(
-            &state.sched,
-            candidate,
-        )
-        .await?
-        .ok_or_else(|| blocked("concurrency"))?;
+        let mut permit = crate::channel_permit::ChannelPermit::acquire(&state.sched, candidate)
+            .await?
+            .ok_or_else(|| blocked("concurrency"))?;
         let result = tokio::select! {
             result = diagnostics::upstream(candidate, model, endpoint, future) => result,
             () = permit.expired() => Err(blocked("concurrency_lease_lost")),

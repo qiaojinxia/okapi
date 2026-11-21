@@ -732,7 +732,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
         .execute(&env.state.pg)
         .await
         .unwrap();
-    let occupied = okapi_kernel::sched_redis::channel_permit::ChannelPermit::acquire_key(
+    let occupied = okapi_gateway::channel_permit::ChannelPermit::acquire_key(
         &env.state.sched,
         env.channel_key,
         Some(1),

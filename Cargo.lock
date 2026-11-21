@@ -2378,7 +2378,6 @@ dependencies = [
  "okapi-domain",
  "okapi-ledger",
  "okapi-pricing",
- "okapi-providers",
  "okapi-store",
  "reqwest",
  "rustix",

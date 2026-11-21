@@ -88,7 +88,7 @@ impl ProbePolicy {
     pub fn target(&self) -> &str {
         self.target
             .as_deref()
-            .unwrap_or(okapi_providers::egress_probe::DEFAULT_TARGET)
+            .unwrap_or(okapi_domain::net::DEFAULT_EGRESS_PROBE_TARGET)
     }
 }
 

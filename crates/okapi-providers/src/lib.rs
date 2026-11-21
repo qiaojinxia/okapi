@@ -23,6 +23,10 @@ pub mod azure;
 pub mod batch;
 pub mod bedrock;
 mod beta_latch;
+#[cfg(feature = "mimic-tls")]
+mod client_tls;
+#[cfg(not(feature = "mimic-tls"))]
+#[path = "client_tls_stub.rs"]
 mod client_tls;
 pub mod convert;
 pub mod custom_pass;

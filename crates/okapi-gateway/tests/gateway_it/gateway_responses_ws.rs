@@ -9,8 +9,8 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use okapi_domain::Money;
 use okapi_gateway as gateway;
+use okapi_gateway::channel_permit::ChannelPermit;
 use okapi_gateway::state::AppState;
-use okapi_kernel::sched_redis::channel_permit::ChannelPermit;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{

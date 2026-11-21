@@ -199,12 +199,9 @@ pub(super) async fn route(
         if !slot(bill, &cand).await {
             continue;
         }
-        let permit = okapi_kernel::sched_redis::channel_permit::ChannelPermit::acquire(
-            &bill.state.sched,
-            &cand,
-        )
-        .await
-        .map_err(|error| failure(error, bill, &cand, attempted))?;
+        let permit = crate::channel_permit::ChannelPermit::acquire(&bill.state.sched, &cand)
+            .await
+            .map_err(|error| failure(error, bill, &cand, attempted))?;
         let Some(permit) = permit else {
             continue;
         };
@@ -376,7 +373,7 @@ async fn create_turn(
     cand: &ChannelCandidate,
     sticky: Option<i64>,
     failover: i16,
-    permit: okapi_kernel::sched_redis::channel_permit::ChannelPermit,
+    permit: crate::channel_permit::ChannelPermit,
 ) -> Result<Routed, ForwardFailure> {
     // create may already have sent a frame when it fails. Never replay or switch accounts here.
     let result = match crate::account_control::admit(

@@ -100,5 +100,3 @@ impl Drop for CountPermit {
         self.spawn_release();
     }
 }
-
-pub use super::channel_permit::ChannelPermit;

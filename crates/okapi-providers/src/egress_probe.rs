@@ -11,7 +11,7 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 /// 缺省探测地址。
-pub const DEFAULT_TARGET: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+pub const DEFAULT_TARGET: &str = okapi_domain::net::DEFAULT_EGRESS_PROBE_TARGET;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: usize = 8 * 1024;
 

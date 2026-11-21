@@ -18,11 +18,12 @@ pub mod token_count;
 
 pub use okapi_engine::{
     SETTLE_DRAIN_CAP, account_control, auth, bridge, build_ch_optional, channel_balance,
-    channel_probe, channel_test, connect_nats_optional, credentials, diagnostics, dialect,
-    flow_control_for_pool, images, ingress, oauth_cred, openai_dialect, refresh_pricebook_if_newer,
-    request_policy, rule_inputs, scheduler, settlement_retry, spawn_epoch_poller,
-    spawn_epoch_subscriber, spawn_routing_invalidate_subscriber, spawn_ssrf_policy_sync,
-    spawn_state_sync, state, stream_policy, sync_ssrf_policy, user_turns, videos,
+    channel_permit, channel_probe, channel_test, connect_nats_optional, credentials, diagnostics,
+    dialect, flow_control_for_pool, images, ingress, oauth_cred, openai_dialect,
+    refresh_pricebook_if_newer, request_policy, rule_inputs, scheduler, settlement_retry,
+    spawn_epoch_poller, spawn_epoch_subscriber, spawn_routing_invalidate_subscriber,
+    spawn_ssrf_policy_sync, spawn_state_sync, state, stream_policy, sync_ssrf_policy, user_turns,
+    videos,
 };
 pub(crate) use okapi_engine::{
     admission, candidates, execution_plan, extensions, failure, key_gate, key_health, server_tools,

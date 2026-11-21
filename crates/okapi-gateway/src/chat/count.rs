@@ -111,10 +111,9 @@ pub(super) async fn count_tokens_inner(
             limited = Some(super::super::key_gate::Closed::Rpm.param());
             continue;
         }
-        let Some(_slot) =
-            okapi_kernel::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
-                .await
-                .map_err(|error| super::super::account_control::attempt_error(&error))?
+        let Some(_slot) = crate::channel_permit::ChannelPermit::acquire(&state.sched, &cand)
+            .await
+            .map_err(|error| super::super::account_control::attempt_error(&error))?
         else {
             limited = Some("channel_concurrency");
             continue;

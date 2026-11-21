@@ -2,6 +2,12 @@
 use super::SchedulerRedis;
 use fred::interfaces::{KeysInterface, SortedSetsInterface};
 
+/// key 的并发租约集合：成员是一次在途尝试，分数是租约到期的毫秒时刻。
+#[must_use]
+pub fn channel_lease_key(key: i64) -> String {
+    format!("conc:ck:{{{key}}}:v2")
+}
+
 impl SchedulerRedis {
     /// 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。
     ///
@@ -90,7 +96,7 @@ impl SchedulerRedis {
         let pipe = self.client.pipeline();
         for id in &ids {
             if pipe
-                .zcount::<(), _>(super::channel_permit::key_leases(*id), now, f64::MAX)
+                .zcount::<(), _>(channel_lease_key(*id), now, f64::MAX)
                 .await
                 .is_err()
             {

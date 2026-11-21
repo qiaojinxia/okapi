@@ -564,6 +564,7 @@ mod tests {
     }
 
     /// 收一个请求，把原始请求（头 + 体）当响应体回过去。
+    #[cfg(feature = "mimic-tls")]
     async fn echo_once() -> std::net::SocketAddr {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -591,6 +592,7 @@ mod tests {
     }
 
     /// 依次用 `replies` 应答，每条连接一个请求；把收到的请求体按序交回。
+    #[cfg(feature = "mimic-tls")]
     async fn token_endpoint(
         replies: Vec<(u16, &'static str)>,
     ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
@@ -624,6 +626,7 @@ mod tests {
 
     /// 字段与顺序照 CLI 源码（`grant_type, refresh_token, client_id, scope`，无 `expires_in`）；
     /// 旧 token 申请不到 `user:plugins` 时退回原授权 scope 再试一次。
+    #[cfg(feature = "mimic-tls")]
     #[tokio::test]
     async fn refresh_asks_for_the_cli_scope_and_falls_back_on_invalid_scope() {
         let http = crate::http::HttpPool::new().unwrap();
@@ -679,6 +682,7 @@ mod tests {
     }
 
     /// 已授过 `user:plugins` 的 token 被拒 invalid_scope 是上游误报：不降级重试，免得新 token 永久丢掉 plugins。
+    #[cfg(feature = "mimic-tls")]
     #[tokio::test]
     async fn refresh_never_downgrades_a_token_that_already_holds_plugins() {
         let http = crate::http::HttpPool::new().unwrap();
@@ -700,6 +704,7 @@ mod tests {
         assert_eq!(tokens.scope.as_deref(), Some("user:inference user:plugins"));
     }
 
+    #[cfg(feature = "mimic-tls")]
     #[tokio::test]
     async fn exchange_body_keeps_the_cli_field_order() {
         let http = crate::http::HttpPool::new().unwrap();
@@ -715,6 +720,7 @@ mod tests {
     }
 
     /// 与 2.1.293 第一方抓包逐行对照。
+    #[cfg(feature = "mimic-tls")]
     #[tokio::test]
     async fn account_requests_go_out_like_the_cli_axios_calls() {
         let http = crate::http::HttpPool::new().unwrap();

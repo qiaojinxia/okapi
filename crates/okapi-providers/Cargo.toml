@@ -7,6 +7,12 @@ license.workspace = true
 publish = false
 description = "Okapi 上游适配：Provider trait + 按方向拆的协议转换（M1+）"
 
+[features]
+default = ["mimic-tls"]
+# Claude Code 外形的 BoringSSL 出站握手（需 C++/CMake 构建 boring-sys）；
+# 关闭后改用轻量 stub，本地迭代非 TLS 路径时可跳过 C++ 编译。
+mimic-tls = ["dep:boring", "dep:tokio-boring"]
+
 [dependencies]
 # 请求体里找 reasoning 相关键名（SIMD 子串查找；已在依赖树里）
 memchr = "2.8"
@@ -26,8 +32,8 @@ hex = { workspace = true }
 hmac = { workspace = true }
 reqwest = { workspace = true }
 # Claude Code 外形的出站连接（client_tls.rs）：BoringSSL 握手 + hyper HTTP/1.1；https 出口代理那一跳用 rustls
-boring = { workspace = true }
-tokio-boring = { workspace = true }
+boring = { workspace = true, optional = true }
+tokio-boring = { workspace = true, optional = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http = { workspace = true }

@@ -5,7 +5,7 @@
 //! 粘性键带版本号，L1 的 v2 哈希原始响应 ID，L2 沿用 v1。
 //!
 //! 本文件只放连接与共用原语（多键读、固定窗 / TTL 计数）；方法按领域分在子模块里：
-//! 数据面选路（channel_keys、channel_permit、cluster_inflight、media）、鉴权与限流
+//! 数据面选路（channel_keys、cluster_inflight、media）、鉴权与限流
 //! （auth_cache、user_limits、abuse_counters）、控制面（web_sessions、verification、
 //! channel_notes、kpi）、后台租约（background_leases）。
 
@@ -21,7 +21,6 @@ mod background_leases;
 mod batch_statistics;
 mod channel_keys;
 mod channel_notes;
-pub mod channel_permit;
 mod cluster_inflight;
 mod kpi;
 mod media;
@@ -33,6 +32,7 @@ mod user_limits;
 mod verification;
 mod web_sessions;
 
+pub use self::channel_keys::channel_lease_key;
 use self::kpi::KPI_TTL_SECS;
 pub use self::kpi::{KPI_WINDOW_MAX, KpiSecond};
 pub use self::session_affinity::StickyHit;

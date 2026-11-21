@@ -2,9 +2,10 @@
 //!
 //! 出口代理（IMPLEMENTATION §11.41）的并发上限用同一种租约（`conc:px:{proxy}`）：一次准入同时占
 //! key 与代理两份，任一份满了就当「渠道忙」放弃并退回已占的那份；任一份续租失败即整体失效。
-use super::SchedulerRedis;
-use fred::interfaces::{LuaInterface, SortedSetsInterface};
+use fred::interfaces::SortedSetsInterface;
+use okapi_kernel::sched_redis::{SchedulerRedis, channel_lease_key};
 use okapi_providers::{UpstreamError, response_lifetime::ResponseGuard};
+use okapi_store::CachedScript;
 use std::{
     future::Future,
     pin::Pin,
@@ -22,27 +23,26 @@ pub fn blocked(reason: &str) -> UpstreamError {
 }
 
 const LEASE_MS: u64 = 90_000;
-const ACQUIRE: &str = r"
+static ACQUIRE: CachedScript = CachedScript::new(
+    r"
  local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
  redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',now)
  if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[1]) then return 0 end
  redis.call('ZADD',KEYS[1],now+tonumber(ARGV[3]),ARGV[2])
  redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[3])*2)
  return 1
-";
-const RENEW: &str = r"
+",
+);
+static RENEW: CachedScript = CachedScript::new(
+    r"
  local score=redis.call('ZSCORE',KEYS[1],ARGV[1])
  local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
  if not score or tonumber(score)<=now then return 0 end
  redis.call('ZADD',KEYS[1],now+tonumber(ARGV[2]),ARGV[1])
  redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[2])*2)
  return 1
-";
-
-/// key 的并发租约集合：成员是一次在途尝试，分数是租约到期的毫秒时刻。
-pub(super) fn key_leases(key: i64) -> String {
-    format!("conc:ck:{{{key}}}:v2")
-}
+",
+);
 
 pub struct ChannelPermit {
     sched: SchedulerRedis,
@@ -99,8 +99,8 @@ impl ChannelPermit {
         // (租约集合, 上限, 是否拦截)。只计数的租约上限放到最大：登记不上、续不上都不影响请求
         let mut wanted = Vec::new();
         match cap.filter(|cap| *cap > 0) {
-            Some(cap) => wanted.push((key_leases(key), cap, true)),
-            None if count => wanted.push((key_leases(key), i32::MAX, false)),
+            Some(cap) => wanted.push((channel_lease_key(key), cap, true)),
+            None if count => wanted.push((channel_lease_key(key), i32::MAX, false)),
             None => {}
         }
         if let Some((proxy, cap)) = proxy.filter(|(_, cap)| *cap > 0) {
@@ -116,10 +116,9 @@ impl ChannelPermit {
         let id = Uuid::new_v4().to_string();
         let mut renewal = Vec::new();
         for (name, cap, enforced) in wanted {
-            let admitted = sched
-                .client
-                .eval::<i64, _, _, _>(
-                    ACQUIRE,
+            let admitted = ACQUIRE
+                .eval::<i64, _, _>(
+                    sched.client(),
                     vec![name.clone()],
                     vec![cap.to_string(), id.clone(), ttl.to_string()],
                 )
@@ -147,7 +146,7 @@ impl ChannelPermit {
             return Ok(Some(permit));
         }
         let (lost_tx, lost_rx) = tokio::sync::oneshot::channel();
-        let client = sched.client.clone();
+        let client = sched.client().clone();
         let heartbeat = tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_millis((ttl / 3).max(1)));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -158,8 +157,8 @@ impl ChannelPermit {
                 for (name, id, enforced) in renewal {
                     let renewed = tokio::time::timeout(
                         Duration::from_millis((ttl / 3).max(1)),
-                        client.eval::<i64, _, _, _>(
-                            RENEW,
+                        RENEW.eval::<i64, _, _>(
+                            &client,
                             vec![name.clone()],
                             vec![id.clone(), ttl.to_string()],
                         ),
@@ -202,7 +201,7 @@ impl ChannelPermit {
         let sched = self.sched.clone();
         Some(runtime.spawn(async move {
             for (name, id) in leases {
-                let _: Result<i64, _> = sched.client.zrem(name, id).await;
+                let _: Result<i64, _> = sched.client().zrem(name, id).await;
             }
         }))
     }
@@ -301,7 +300,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let _: i64 = sched
-            .client
+            .client()
             .del(format!("conc:ck:{{{key}}}:v2"))
             .await
             .unwrap();
@@ -382,7 +381,7 @@ mod tests {
             unreachable!()
         };
         let _: i64 = sched
-            .client
+            .client()
             .del(format!("conc:ck:{{{key}}}:v2"))
             .await
             .unwrap();
@@ -449,7 +448,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let _: i64 = sched.client.del(key_leases(key)).await.unwrap();
+        let _: i64 = sched.client().del(channel_lease_key(key)).await.unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(600), permit.expired())
                 .await

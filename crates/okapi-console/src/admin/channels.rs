@@ -153,7 +153,7 @@ pub async fn create_channel(
         super::super::channel_creation::endpoint(&state, &req.provider, Some(&req.api_base))
             .await?;
     ensure_azure_api_base(&req.provider, Some(api_base))?;
-    okapi_kernel::ssrf::validate_credential(&state.pg, &req.credential).await?;
+    okapi_engine::credentials::validate_credential(&state.pg, &req.credential).await?;
     let prepared =
         super::super::channel_creation::prepare(&state, &req.provider, req.options, scope).await?;
     super::super::egress::validate_binding(&state, &prepared.egress, &actor, scope).await?;
@@ -691,7 +691,7 @@ pub async fn rotate_channel_credential(
     if req.credential.trim().is_empty() {
         return Err(AppError::bad_request().with_param("credential"));
     }
-    okapi_kernel::ssrf::validate_credential(&state.pg, &req.credential).await?;
+    okapi_engine::credentials::validate_credential(&state.pg, &req.credential).await?;
     let provider: String =
         sqlx::query_scalar("SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)

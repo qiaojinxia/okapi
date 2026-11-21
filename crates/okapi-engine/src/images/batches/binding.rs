@@ -104,7 +104,7 @@ impl Binding {
     }
     async fn validate(&self, state: &AppState) -> Result<(), AppError> {
         okapi_kernel::ssrf::validate_upstream_base(&state.pg, &self.api_base).await?;
-        okapi_kernel::ssrf::validate_credential(&state.pg, &self.credential).await?;
+        crate::credentials::validate_credential(&state.pg, &self.credential).await?;
         if let Some(gcs) = &self.gcs {
             okapi_kernel::ssrf::validate_api_base(&state.pg, &gcs.api_base).await?;
         }
