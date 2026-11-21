@@ -201,6 +201,7 @@ pub async fn set_balance_expiry(
     if updated.rows_affected() == 0 {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
+    let _ = state.ledger.invalidate_admission_fast_path(user_id).await;
     audit(
         &state,
         &actor,

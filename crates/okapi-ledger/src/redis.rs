@@ -52,6 +52,11 @@ static SUB_SET_SCRIPT: CachedScript = CachedScript::new(concat!(
     "\n",
     include_str!("lua/sub_set.lua")
 ));
+static KEY_RESERVED_SUM_SCRIPT: CachedScript = CachedScript::new(concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/key_reserved_sum.lua")
+));
 static TIME_SCRIPT: CachedScript = CachedScript::new("return redis.call('TIME')");
 
 /// 预扣悬置时限：超时未结算的预扣由对账任务懒清理（M2 reconciler）。
@@ -188,6 +193,13 @@ pub struct RepairOutcome {
     pub inflight: Money,
 }
 
+#[derive(Clone, Copy)]
+enum ReserveMode {
+    Standard,
+    Fast,
+    Stamp { until_unix: i64, ttl_secs: i64 },
+}
+
 #[derive(Clone)]
 pub struct BalanceLedger {
     client: Client,
@@ -206,9 +218,74 @@ impl BalanceLedger {
         format!("bal:{{{user_id}}}")
     }
 
+    /// 零 PG 准入快路径租约键（与 `bal:{uid}` 同 `{uid}` hash-tag，Cluster 单槽原子）。
+    fn clean_key(user_id: i64) -> String {
+        format!("clean:{{{user_id}}}")
+    }
+
     /// key 级并发槽（限额配置在 api_keys 行 → 键按 key 维度，docs/database.md §2.1）。
     fn conc_key(user_id: i64, api_key_id: i64) -> String {
         format!("conc:{{{user_id}}}:k:{api_key_id}")
+    }
+
+    /// 失效该用户的零 PG 准入快路径租约（`clean:{uid}`）。
+    /// 任何在 `UserGuard` 下改变余额 / 订阅窗口 / 有效期 / 恢复队列的写操作在动 PG 前调用，
+    /// 使并发请求立即回退慢路径排队等 `UserGuard`。
+    pub async fn invalidate_admission_fast_path(&self, user_id: i64) -> Result<(), LedgerError> {
+        let _: i64 = self.client.del(Self::clean_key(user_id)).await?;
+        Ok(())
+    }
+
+    /// 在 Redis 侧汇总指定 `api_key_id` 的普通在途预扣总额，避免全量拉取 `bal:{uid}`。
+    pub async fn reserved_for_key(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+    ) -> Result<Money, LedgerError> {
+        let reply: Value = KEY_RESERVED_SUM_SCRIPT
+            .eval(
+                &self.client,
+                vec![Self::bal_key(user_id)],
+                vec![api_key_id.to_string()],
+            )
+            .await?;
+        let items = as_array(&reply)?;
+        match (first_i64(items), second_str(items)) {
+            (Some(1), _) => money_at(items, 1),
+            (Some(0), Some("INVALID_RESERVATION")) => Err(LedgerError::InvalidReservation),
+            (Some(0), Some("ADMISSION_STATE_INVALID")) => Err(LedgerError::AdmissionStateInvalid),
+            _ => Err(LedgerError::UnexpectedReply("key_reserved_sum")),
+        }
+    }
+
+    /// 零 PG 准入快路径：仅当同槽 `clean:{uid}` 有效、热余额键存在且未越过订阅截止时，
+    /// 单次 Redis Lua 原子完成预扣；否则不动任何状态返回 `Ok(None)` 交回慢路径。
+    pub async fn try_reserve_fast(
+        &self,
+        req: ReserveRequest,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ReserveOutcome>, LedgerError> {
+        self.reserve_with_mode(req, now, ReserveMode::Fast).await
+    }
+
+    /// 慢路径持 `UserGuard` 同步完成后调用：预扣成功时在同一条 Lua 脚本内原子写入 `clean:{uid}`。
+    pub(crate) async fn reserve_and_stamp_clean(
+        &self,
+        req: ReserveRequest,
+        now: DateTime<Utc>,
+        clean_until_unix: Option<i64>,
+    ) -> Result<ReserveOutcome, LedgerError> {
+        let mode = match clean_until_unix {
+            Some(until) if until > now.timestamp() => ReserveMode::Stamp {
+                until_unix: until,
+                ttl_secs: until.saturating_sub(now.timestamp()).max(1),
+            },
+            _ => ReserveMode::Standard,
+        };
+        match self.reserve_with_mode(req, now, mode).await? {
+            Some(outcome) => Ok(outcome),
+            None => Err(LedgerError::UnexpectedReply("reserve")),
+        }
     }
 
     /// 预扣 + 限速/并发准入（单 Lua 原子）。限额四件套均为 key 级
@@ -222,6 +299,21 @@ impl BalanceLedger {
         req: ReserveRequest,
         now: DateTime<Utc>,
     ) -> Result<ReserveOutcome, LedgerError> {
+        match self
+            .reserve_with_mode(req, now, ReserveMode::Standard)
+            .await?
+        {
+            Some(outcome) => Ok(outcome),
+            None => Err(LedgerError::UnexpectedReply("reserve")),
+        }
+    }
+
+    async fn reserve_with_mode(
+        &self,
+        req: ReserveRequest,
+        now: DateTime<Utc>,
+        mode: ReserveMode,
+    ) -> Result<Option<ReserveOutcome>, LedgerError> {
         let ReserveRequest {
             user_id,
             api_key_id,
@@ -233,14 +325,14 @@ impl BalanceLedger {
         let minute_bucket = now.timestamp().div_euclid(60);
         let day_bucket = now.format("%Y%m%d").to_string();
 
-        let keys = vec![
+        let mut keys = vec![
             Self::bal_key(user_id),
             format!("rl:{{{user_id}}}:k:{api_key_id}:rpm:{minute_bucket}"),
             format!("rl:{{{user_id}}}:k:{api_key_id}:tpm:{minute_bucket}"),
             format!("rl:{{{user_id}}}:k:{api_key_id}:rpd:{day_bucket}"),
             Self::conc_key(user_id, api_key_id),
         ];
-        let args = vec![
+        let mut args = vec![
             request_id.to_string(),
             est.as_micros().to_string(),
             // 截止时间由脚本按 Redis TIME 计算（与 sweep 同一时钟），这里只传时长
@@ -253,11 +345,27 @@ impl BalanceLedger {
             api_key_id.to_string(),
             now.timestamp().to_string(),
         ];
+        match mode {
+            ReserveMode::Standard => {}
+            ReserveMode::Fast => {
+                keys.push(Self::clean_key(user_id));
+                args.push("fast".to_owned());
+            }
+            ReserveMode::Stamp {
+                until_unix,
+                ttl_secs,
+            } => {
+                keys.push(Self::clean_key(user_id));
+                args.push("stamp".to_owned());
+                args.push(until_unix.to_string());
+                args.push(ttl_secs.to_string());
+            }
+        }
 
         let reply: Value = RESERVE_SCRIPT.eval(&self.client, keys, args).await?;
         let items = as_array(&reply)?;
         match (first_i64(items), second_str(items)) {
-            (Some(1), _) => Ok(ReserveOutcome::Reserved {
+            (Some(1), _) => Ok(Some(ReserveOutcome::Reserved {
                 balance_after: money_at(items, 1)?,
                 pool: pool_at(items, 2)?,
                 source_window: items
@@ -265,13 +373,14 @@ impl BalanceLedger {
                     .and_then(value_str)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned),
-            }),
-            (Some(0), Some("INSUFFICIENT")) => Ok(ReserveOutcome::Insufficient {
+            })),
+            (Some(0), Some("SLOW_PATH")) => Ok(None),
+            (Some(0), Some("INSUFFICIENT")) => Ok(Some(ReserveOutcome::Insufficient {
                 balance: money_at(items, 2)?,
-            }),
-            (Some(0), Some("RATE_LIMITED")) => Ok(ReserveOutcome::RateLimited {
+            })),
+            (Some(0), Some("RATE_LIMITED")) => Ok(Some(ReserveOutcome::RateLimited {
                 which: str_at(items, 2)?.to_owned(),
-            }),
+            })),
             (Some(0), Some("RESERVATION_EXISTS")) => Err(LedgerError::ReservationExists),
             (Some(0), Some("INVALID_RESERVATION")) => Err(LedgerError::InvalidReservation),
             (Some(0), Some("ADMISSION_STATE_INVALID")) => Err(LedgerError::AdmissionStateInvalid),

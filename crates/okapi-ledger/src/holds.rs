@@ -219,20 +219,36 @@ impl UserGuard {
         }
         Ok(total)
     }
-    /// Before changing a subscription window, finish every already-committed settlement.
+    /// Before changing a subscription window or mutating balance state, invalidate
+    /// the user's zero-PG admission fast path and finish every already-committed recovery item.
     pub async fn synchronize(&mut self, ledger: &BalanceLedger) -> Result<(), LedgerError> {
-        // Every admission and settlement runs this inside the user's lock. One probe
-        // covers the four recovery queues, so an idle fence costs a single round trip.
-        let (has_billing, has_holds, has_transfers, has_subs): (bool, bool, bool, bool) =
-            sqlx::query_as(
-                "SELECT EXISTS(SELECT 1 FROM billing_sync WHERE user_id = $1),
-                        EXISTS(SELECT 1 FROM balance_holds WHERE user_id = $1 AND state = 'closing'),
-                        EXISTS(SELECT 1 FROM fund_transfers WHERE user_id = $1 AND cleaned_at IS NULL),
-                        EXISTS(SELECT 1 FROM subscription_sync WHERE user_id = $1)",
-            )
-            .bind(self.user_id)
-            .fetch_one(self.connection()?)
-            .await?;
+        ledger.invalidate_admission_fast_path(self.user_id).await?;
+        let _ = self.synchronize_for_admission(ledger).await?;
+        Ok(())
+    }
+
+    /// Synchronize all four recovery queues and return the user's `balance_expires_at`
+    /// in one PG round trip so slow-path unlimited admission can stamp a bounded Redis lease.
+    pub(crate) async fn synchronize_for_admission(
+        &mut self,
+        ledger: &BalanceLedger,
+    ) -> Result<Option<DateTime<Utc>>, LedgerError> {
+        let (has_billing, has_holds, has_transfers, has_subs, balance_expires_at): (
+            bool,
+            bool,
+            bool,
+            bool,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM billing_sync WHERE user_id = $1),
+                    EXISTS(SELECT 1 FROM balance_holds WHERE user_id = $1 AND state = 'closing'),
+                    EXISTS(SELECT 1 FROM fund_transfers WHERE user_id = $1 AND cleaned_at IS NULL),
+                    EXISTS(SELECT 1 FROM subscription_sync WHERE user_id = $1),
+                    (SELECT balance_expires_at FROM users WHERE id = $1 AND deleted_at IS NULL)",
+        )
+        .bind(self.user_id)
+        .fetch_one(self.connection()?)
+        .await?;
         if has_billing {
             crate::sync::synchronize(self, ledger, self.user_id).await?;
         }
@@ -249,7 +265,7 @@ impl UserGuard {
         if has_subs {
             crate::subscriptions::effects::synchronize(self, ledger, self.user_id).await?;
         }
-        Ok(())
+        Ok(balance_expires_at)
     }
 }
 

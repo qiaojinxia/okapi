@@ -38,15 +38,11 @@ pub(crate) async fn check(
     if amount.as_micros() < 0 || spent < 0 {
         return Err(LedgerError::AdmissionStateInvalid);
     }
-    let mut total = i128::from(spent) + i128::from(held) + i128::from(amount.as_micros());
-    for reservation in ledger.list_reservations(user_id).await? {
-        if reservation.api_key_id == 0 || reservation.amount.as_micros() < 0 {
-            return Err(LedgerError::AdmissionStateInvalid);
-        }
-        if reservation.api_key_id == key_id {
-            total += i128::from(reservation.amount.as_micros());
-        }
-    }
+    let reserved = ledger.reserved_for_key(user_id, key_id).await?;
+    let total = i128::from(spent)
+        + i128::from(held)
+        + i128::from(amount.as_micros())
+        + i128::from(reserved.as_micros());
     // 所有写入口都让 quota_mode = 1 与 quota_micro 非空同生同灭；到这里是空的说明行被改坏了。
     // 当成限额 0 会让这把 key 静默地永远 429，运维看不出原因——按状态非法拒绝并留错误日志。
     let Some(limit) = limit else {
@@ -59,9 +55,14 @@ pub(crate) async fn check(
     Ok(())
 }
 
+/// 零 PG 准入快路径租约最长有效期（秒）：到期自动回慢路径核对 PG 恢复队列与余额有效期。
+const ADMISSION_FAST_PATH_TTL_SECS: i64 = 60;
+
 impl BalanceLedger {
-    /// All admissions share the settlement/expiry fence. Limited keys additionally
-    /// check fresh spend; unlimited keys must not bypass the balance expiry lock.
+    /// All admissions share the settlement/expiry fence. Unlimited keys take a
+    /// fail-closed zero-PG Redis fast path while their per-user `clean:{uid}` lease
+    /// is valid (invalidated before every balance/expiry/subscription mutation);
+    /// limited keys always check fresh PG key budget under `UserGuard`.
     pub async fn reserve_for_key(
         &self,
         pg: &PgPool,
@@ -69,8 +70,11 @@ impl BalanceLedger {
         request: ReserveRequest,
         now: DateTime<Utc>,
     ) -> Result<ReserveOutcome, LedgerError> {
+        if !limited && let Some(outcome) = self.try_reserve_fast(request, now).await? {
+            return Ok(outcome);
+        }
         let mut guard = UserGuard::acquire(pg, request.user_id).await?;
-        guard.synchronize(self).await?;
+        let balance_expires_at = guard.synchronize_for_admission(self).await?;
         if limited {
             check(
                 &mut guard,
@@ -81,9 +85,20 @@ impl BalanceLedger {
                 None,
             )
             .await?;
+            // Keep the guard through Redis admission so concurrent calls cannot both
+            // spend the same remaining key budget. Refunds only make this conservative.
+            return self.reserve(request, now).await;
         }
-        // Keep the guard through Redis admission so concurrent calls cannot both
-        // spend the same remaining key budget. Refunds only make this conservative.
-        self.reserve(request, now).await
+        let now_unix = now.timestamp();
+        let max_until = now_unix.saturating_add(ADMISSION_FAST_PATH_TTL_SECS);
+        let clean_until = match balance_expires_at {
+            Some(exp) => {
+                let exp_unix = exp.timestamp();
+                (exp_unix > now_unix).then_some(exp_unix.min(max_until))
+            }
+            None => Some(max_until),
+        };
+        self.reserve_and_stamp_clean(request, now, clean_until)
+            .await
     }
 }

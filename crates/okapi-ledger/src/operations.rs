@@ -42,6 +42,7 @@ pub async fn credit(
         return Err(LedgerError::InvalidAmount);
     }
     let mut guard = UserGuard::acquire(db, user_id).await?;
+    ledger.invalidate_admission_fast_path(user_id).await?;
     if replayed(&mut guard, user_id, &payload).await? {
         return Err(LedgerError::Replayed);
     }
@@ -73,6 +74,7 @@ pub async fn debit(
         return Err(LedgerError::InvalidAmount);
     }
     let mut guard = UserGuard::acquire(db, user_id).await?;
+    ledger.invalidate_admission_fast_path(user_id).await?;
     if replayed(&mut guard, user_id, &payload).await? {
         return Err(LedgerError::Replayed);
     }

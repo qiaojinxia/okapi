@@ -204,7 +204,8 @@ impl AppState {
         Ok(())
     }
 
-    /// 预扣准入：先在进程内按用户排队，轮到了才拿 PG 连接与用户锁（见 `user_turns`）。
+    /// 预扣准入：无限额 key 优先走零 PG Redis 快路径（无进程内锁排队、无 PG 连接占用）；
+    /// 快路径租约缺失/过期或限额 key 再在进程内按用户排队，轮到了才拿 PG 连接与用户锁（见 `user_turns`）。
     /// 所有计费端点都经这里，单个高并发用户不能把全站连接池耗在等锁上。
     pub async fn reserve_for_key(
         &self,
@@ -212,15 +213,19 @@ impl AppState {
         request: okapi_ledger::ReserveRequest,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<okapi_ledger::ReserveOutcome, okapi_ledger::LedgerError> {
-        let _turn = self
-            .flow
-            .admission_turns
-            .wait(request.user_id, super::user_turns::ADMISSION_WAIT)
-            .await?;
-        let outcome = self
-            .ledger
-            .reserve_for_key(&self.pg, limited, request, now)
-            .await?;
+        let outcome =
+            if !limited && let Some(outcome) = self.ledger.try_reserve_fast(request, now).await? {
+                outcome
+            } else {
+                let _turn = self
+                    .flow
+                    .admission_turns
+                    .wait(request.user_id, super::user_turns::ADMISSION_WAIT)
+                    .await?;
+                self.ledger
+                    .reserve_for_key(&self.pg, limited, request, now)
+                    .await?
+            };
         // 热账本丢失自愈：余额不足且这个用户的余额键根本不存在，说明 Redis 丢了数据
         // （重启未持久化 / 淘汰 / FLUSHDB），不是用户没钱。按 PG 账本重建一次再准入，
         // 不必等每日全量对账和人工修复。重建总会写回余额字段，同一用户最多触发一次。

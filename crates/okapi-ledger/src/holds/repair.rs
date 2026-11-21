@@ -33,6 +33,7 @@ impl UserGuard {
         wallet: Money,
         subscription: Money,
     ) -> Result<Repaired, LedgerError> {
+        ledger.invalidate_admission_fast_path(self.user_id).await?;
         let expected = hot::eval(
             ledger,
             &BALANCE_STATE_SCRIPT,

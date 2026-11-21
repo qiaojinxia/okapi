@@ -72,6 +72,7 @@ pub async fn request(
     actor: &str,
 ) -> Result<Receipt, LedgerError> {
     let mut guard = UserGuard::acquire(pg, uid).await?;
+    ledger.invalidate_admission_fast_path(uid).await?;
     let mut tx = guard.connection()?.begin().await?;
     let id = enqueue(&mut tx, uid, plan, source, actor, false).await?;
     tx.commit().await?;

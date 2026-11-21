@@ -14,7 +14,7 @@ pub async fn record(
 ) -> Result<bool, LedgerError> {
     let mut guard = UserGuard::acquire(pg, input.user_id).await?;
     let mut tx = guard.connection()?.begin().await?;
-    let write = record_in_tx_detailed(&mut tx, input.clone()).await?;
+    let (write, expired) = record_in_tx_detailed(&mut tx, input.clone()).await?;
     tx.commit().await?;
     let sync_result = if write.inserted && !write.has_other_pending {
         // Fast path: this settlement is the sole pending recovery entry for this user,
@@ -24,6 +24,9 @@ pub async fn record(
     } else {
         guard.synchronize(ledger).await
     };
+    if sync_result.is_err() || write.has_other_pending || expired {
+        let _ = ledger.invalidate_admission_fast_path(input.user_id).await;
+    }
     if let Err(error) = sync_result {
         tracing::error!(request_id=%input.request_id, %error, "durable bill awaiting Redis recovery");
     }
@@ -65,13 +68,13 @@ pub async fn record_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: SettlementInput<'_>,
 ) -> Result<bool, LedgerError> {
-    Ok(record_in_tx_detailed(tx, input).await?.inserted)
+    Ok(record_in_tx_detailed(tx, input).await?.0.inserted)
 }
 
 async fn record_in_tx_detailed(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     mut input: SettlementInput<'_>,
-) -> Result<crate::pg::SettlementWrite, LedgerError> {
+) -> Result<(crate::pg::SettlementWrite, bool), LedgerError> {
     if input.state != BillingState::Committed
         || input.log_type != 2
         || input.event_type != "commit"
@@ -117,7 +120,7 @@ async fn record_in_tx_detailed(
             return Err(LedgerError::ReservationConflict);
         }
     }
-    Ok(write)
+    Ok((write, expired))
 }
 
 /// Finish pending Redis changes before reading totals for repair or changing a

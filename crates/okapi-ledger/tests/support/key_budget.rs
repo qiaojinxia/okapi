@@ -151,3 +151,61 @@ async fn fresh_spending_and_limit_changes_are_used_and_other_keys_stay_independe
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn unlimited_admission_uses_zero_pg_fast_path_until_expiry_or_invalidation() -> TestResult {
+    let bed = Bed::new().await?;
+    let expiry = bed.now + chrono::Duration::seconds(20);
+    sqlx::query("UPDATE users SET balance_expires_at=$2 WHERE id=$1")
+        .bind(bed.uid)
+        .bind(expiry)
+        .execute(&bed.pg)
+        .await?;
+
+    // Cold user hits slow path, synchronizes PG, and stamps clean:{uid} bounded by balance_expires_at.
+    assert!(matches!(
+        bed.ledger
+            .reserve_for_key(&bed.pg, false, bed.regular(Uuid::new_v4()), bed.now)
+            .await?,
+        ReserveOutcome::Reserved { .. }
+    ));
+
+    // Hold UserGuard in PG: a warm unlimited admission must complete purely in Redis without touching PG.
+    let guard = holds::UserGuard::acquire(&bed.pg, bed.uid).await?;
+    let fast = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        bed.ledger.reserve_for_key(
+            &bed.pg,
+            false,
+            bed.regular(Uuid::new_v4()),
+            bed.now + chrono::Duration::seconds(10),
+        ),
+    )
+    .await
+    .expect("warm fast path must not block on PG UserGuard")?;
+    assert!(matches!(fast, ReserveOutcome::Reserved { .. }));
+
+    // Once `now` reaches `balance_expires_at`, the fast path fails closed back to SLOW_PATH.
+    assert!(
+        bed.ledger
+            .try_reserve_fast(bed.regular(Uuid::new_v4()), expiry)
+            .await?
+            .is_none(),
+        "must fall back to slow path at balance_expires_at"
+    );
+
+    // Explicit invalidation (as performed before expire/debit/credit/subscriptions) drops the lease.
+    bed.ledger.invalidate_admission_fast_path(bed.uid).await?;
+    assert!(
+        bed.ledger
+            .try_reserve_fast(
+                bed.regular(Uuid::new_v4()),
+                bed.now + chrono::Duration::seconds(11),
+            )
+            .await?
+            .is_none(),
+        "invalidated lease must fall back to slow path"
+    );
+    drop(guard);
+    Ok(())
+}

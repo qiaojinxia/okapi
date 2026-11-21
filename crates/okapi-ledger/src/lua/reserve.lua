@@ -2,9 +2,12 @@
 -- KEYS[1] bal:{uid}
 -- KEYS[2] rl:{uid}:k:<kid>:rpm:<bucket>  KEYS[3] rl:{uid}:k:<kid>:tpm:<bucket>
 -- KEYS[4] rl:{uid}:k:<kid>:rpd:<day>     KEYS[5] conc:{uid}:k:<kid>
+-- KEYS[6] clean:{uid}（可选：零 PG 快路径租约键，同 {uid} hash-tag）
 -- ARGV[1] request_id  ARGV[2] est_micro  ARGV[3] ttl_ms（截止时间在脚本里按 Redis TIME 算）
 -- ARGV[4] rpm_cap  ARGV[5] tpm_cap  ARGV[6] rpd_cap  ARGV[7] conc_cap
 -- ARGV[8] est_tokens  ARGV[9] api_key_id  ARGV[10] now_unix_s
+-- ARGV[11] mode（可选：'fast' 仅在 clean:{uid} 有效时放行，否则返回 SLOW_PATH；'stamp' 成功后写入 clean:{uid}）
+-- ARGV[12] clean_until_unix（mode='stamp'）  ARGV[13] clean_ttl_secs（mode='stamp'）
 -- 全部 KEYS 同 {uid} hash-tag（Cluster 单槽原子）。cap<=0 = 不限。
 -- 预扣字段值 = "<est_micro>|<deadline_ms>|<api_key_id>|<pool>"（pool 0 钱包 / 1 订阅池；
 -- 释放时按 kid 归还并发槽、按 pool 回到同一个池）。
@@ -33,6 +36,22 @@ local est = integer(ARGV[2], false)
 local est_tokens = integer(ARGV[8], false)
 local ttl = integer(ARGV[3], false)
 if not est or not est_tokens or not ttl then return {0, 'INVALID_RESERVATION'} end
+
+local mode = ARGV[11] or ''
+if mode == 'fast' then
+    local clean_until = integer(redis.call('GET', KEYS[6]) or '', false)
+    local now_fast = integer(ARGV[10] or '', false)
+    if not clean_until or not now_fast or clean_until <= now_fast then
+        return {0, 'SLOW_PATH'}
+    end
+    if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {0, 'SLOW_PATH'}
+    end
+    local sub_until_fast = integer(redis.call('HGET', KEYS[1], 'sub_until') or '0', true)
+    if not sub_until_fast or (sub_until_fast > 0 and now_fast >= sub_until_fast) then
+        return {0, 'SLOW_PATH'}
+    end
+end
 
 -- A script is isolated, but Redis does not roll back writes on runtime errors.
 -- Validate ALL counters, including unlimited ones, before changing any state.
@@ -100,4 +119,11 @@ redis.call('INCR', KEYS[2]); redis.call('EXPIRE', KEYS[2], 120)
 redis.call('INCRBY', KEYS[3], ARGV[8]); redis.call('EXPIRE', KEYS[3], 120)
 redis.call('INCR', KEYS[4]); redis.call('EXPIRE', KEYS[4], 172800)
 redis.call('INCR', KEYS[5]); redis.call('EXPIRE', KEYS[5], 3600)
+if mode == 'stamp' and not (sub_until > 0 and now >= sub_until) then
+    local clean_until = integer(ARGV[12] or '', false)
+    local clean_ttl = integer(ARGV[13] or '', false)
+    if clean_until and clean_ttl and clean_ttl > 0 then
+        redis.call('SET', KEYS[6], ARGV[12], 'EX', clean_ttl)
+    end
+end
 return {1, redis.call('HGET', KEYS[1], field), pool, epoch}
