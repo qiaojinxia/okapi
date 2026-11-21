@@ -113,7 +113,7 @@ export function THead({ className, ...props }: React.HTMLAttributes<HTMLTableSec
 }
 
 export function TBody({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <tbody className={cn('divide-y divide-border [&_tr:last-child]:border-0', className)} {...props} />
+  return <tbody className={cn('divide-y divide-border/65 [&_tr:last-child]:border-0', className)} {...props} />
 }
 
 interface TrProps extends React.HTMLAttributes<HTMLTableRowElement> {
@@ -126,7 +126,7 @@ export function Tr({ className, selected = false, ...props }: TrProps) {
     <tr
       data-selected={selected || undefined}
       className={cn(
-        'group/row transition-colors hover:bg-accent/40 data-[selected]:bg-primary/5 data-[selected]:shadow-[inset_2px_0_0_var(--primary)] data-[selected]:hover:bg-primary/8',
+        'group/row transition-[background-color,box-shadow] duration-150 hover:bg-accent/50 data-[selected]:bg-primary/[0.045] data-[selected]:shadow-[inset_3px_0_0_var(--primary)] data-[selected]:hover:bg-primary/[0.075]',
         className,
       )}
       {...props}
@@ -143,7 +143,7 @@ export function Th({ className, numeric = false, ...props }: ThProps) {
   return (
     <th
       className={cn(
-        'h-[var(--table-header-height)] px-3 py-2 text-left text-xs leading-4 font-medium align-middle whitespace-nowrap text-muted-foreground',
+        'h-[var(--table-header-height)] px-3 py-2 text-left text-xs leading-4 font-medium tracking-[0.015em] align-middle whitespace-nowrap text-muted-foreground/85',
         numeric && 'text-right',
         className,
       )}

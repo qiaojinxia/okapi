@@ -2,9 +2,10 @@ import {
   Activity,
   Copy,
   Ellipsis,
-  Gauge,
   ExternalLink,
+  Gauge,
   Globe,
+  KeyRound,
   MessageSquareText,
   Pencil,
   Plus,
@@ -34,6 +35,7 @@ import {
   KeyStateSummary,
   LastBalance,
   LastProbe,
+  channelRowHealth,
   useChannelHealth24h,
   useChannelUsage,
 } from '@/features/channels/ChannelHealthCell'
@@ -44,7 +46,14 @@ import { proxyGroupOptions, proxyOptions } from '@/features/proxies/options'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Menu, MenuItem, MenuSeparator } from '@/components/ui/menu'
-import { CHANNEL_STATUS_FILTERS, CHANNEL_STATUS_VALUE, PROVIDERS, balanceSupported, providerConsoleUrl } from '@/features/channels/types'
+import {
+  CHANNEL_STATUS_FILTERS,
+  CHANNEL_STATUS_VALUE,
+  PROVIDERS,
+  balanceSupported,
+  costMilliToRatio,
+  providerConsoleUrl,
+} from '@/features/channels/types'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
@@ -52,7 +61,6 @@ import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { SelectionBar } from '@/components/ui/selection-bar'
 import { TableSkeleton } from '@/components/ui/skeleton'
-import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
 import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
@@ -80,17 +88,15 @@ interface ChannelPage {
 
 /// 渠道列表页。
 ///
-/// 只负责"找到渠道并对其批量处理"：新建与编辑都在抽屉里完成，页面本身不放表单。
-/// 此前建表单、列表、展开式编辑器堆在同一屏，用户要滚过整片表单才看到数据。
-///
-/// 操作反馈全部走 toast：测活结果、批量结果、失败原因此前都是工具栏下一行 12px 灰字，
-/// 测活成功与失败长得一样，看完也不会消失。
+/// 采用「双层结构化渠道卡片行」：
+/// - 上层（身份与操作）：勾选框 + 品牌徽章 + 名称 / 协议档位 / 账号或主机 / 出口 / 路由信息（池、模型数、优先级、成本系数、多 key），
+///   右侧是实时健康胶囊、最近测试、调度开关与快捷动作组；若存在冷却或异常 key，下方直接展开诊断告警条。
+/// - 下层（遥测仪表盘）：三栏定比网格（额度与余额 / 近 24h 健康与 TTFT / 近 30 天消费与流量），
+///   每个额度窗口独占一行满宽展开，各卡片同一列严格纵向对齐，窄屏自动流式堆叠、告别横向滚动。
 export function ChannelsPage() {
   const { i18n, t } = useTranslation()
   const queryClient = useQueryClient()
   const [picked, setPicked] = useState<Set<number>>(new Set())
-  // 关键词 / 协议筛选 / 页码都在地址里（刷新 / 分享 / 后退不丢）。
-  // 搜索：草稿 → 回车 / 点搜索才提交（服务端 ILIKE，与用户 / 令牌列表同一形态）
   const search = routeApi.useSearch()
   const navigate = routeApi.useNavigate()
   const query = search.q ?? ''
@@ -103,14 +109,13 @@ export function ChannelsPage() {
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
   const [batchEgress, setBatchEgress] = useState(false)
-  // 行内出口只显示图标与目标名称；目录整表缓存，列表翻页不重拉。
   const proxies = useQuery(proxyOptions())
   const proxyGroups = useQuery(proxyGroupOptions())
   const [testingId, setTestingId] = useState<number | null>(null)
   const [balancingId, setBalancingId] = useState<number | null>(null)
   const { confirm, dialog } = useConfirm()
   const pager = usePagination()
-  // 过滤器与页码同一次导航更新：只按"新条件 + 第一页"请求一次
+
   const setFilters = (next: { q?: string; provider?: string; status?: string }) =>
     void navigate({
       search: (prev) => ({
@@ -122,11 +127,8 @@ export function ChannelsPage() {
       }),
     })
 
-  // 近 24h 健康：一次整表查询按 channel_id 分发到各行（CH 未启用则各行显示 —）
   const health = useChannelHealth24h()
   const usage = useChannelUsage()
-  // 过滤与切片都在服务端：几百条渠道每条带 keys / pools，整表拉回来再筛既慢又占内存。
-  // 列表接口不传 limit 才回全量——那是给"测活全部"和模型页的渠道计数用的。
   const channels = useQuery({
     queryKey: [...qk.adminChannels, query, providerFilter, statusFilter, pager.offset, pager.limit],
     queryFn: () => {
@@ -189,13 +191,10 @@ export function ChannelsPage() {
   const test = useMutation({
     mutationFn: (c: ChannelRow) => {
       setTestingId(c.id)
-      // 单条测活直接验第一个模型：只探 /models 只能说明"凭证认、网络通"，
-      // 聚合型上游按套餐授权模型，那种 ok 会对一个实际 403 的模型报成功
       return probeOne(c.id, c.models[0])
     },
     onSuccess: (r, c) => {
       if (r.ok) toast.success(shownName(c), t('admin:testOk', { ms: r.latency_ms ?? 0 }))
-      // 2xx 却是网页：地址缺版本段（/v1）或指到了站点首页，网关已不再把它当成功
       else if (r.error_code === 'upstream_not_json') toast.error(shownName(c), t('admin:testNotJson'))
       else if (r.scope === 'model')
         toast.error(
@@ -207,14 +206,12 @@ export function ChannelsPage() {
           }),
         )
       else toast.error(shownName(c), t('admin:testFail', { code: r.error_code ?? 'unknown' }))
-      // 结果已在服务端留痕，刷新列表让"最近测试"列跟上
       invalidate()
     },
     onError: fail,
     onSettled: () => setTestingId(null),
   })
 
-  // 上游余额（§11.33）：结果留痕在服务端，刷新列表让"余额"回填跟上
   const balance = useMutation({
     mutationFn: (c: ChannelRow) => {
       setBalancingId(c.id)
@@ -234,11 +231,8 @@ export function ChannelsPage() {
     onSettled: () => setBalancingId(null),
   })
 
-  // 测试全部启用渠道（new-api 同有）：并发 3 路——太多会让一批上游同时看到探测，
-  // 太少几十条渠道要等很久；逐条失败不中断，最后汇总成功/失败数
   const testAll = useMutation({
     mutationFn: async () => {
-      // 测的是全站所有启用渠道，不受当前页 / 筛选影响：逐页拿整表（不传 limit 后端只回第一页 20 条）
       const rows = await loadAll<ChannelPage['data'][number]>('/admin/channels?status=1', (c) => c.id)
       const ids = rows.map((c) => c.id)
       let ok = 0
@@ -283,9 +277,7 @@ export function ChannelsPage() {
 
   const rows = channels.data?.data ?? []
   const total = channels.data?.total ?? 0
-  // 过滤集内的启用数（未筛选时即全站）：页头徽章据此显示
   const enabledCount = channels.data?.enabled ?? 0
-  // 表头勾选只管本页；别页勾下的仍留在 picked 里，底部 SelectionBar 的计数会把它们算上
   const allPicked = rows.length > 0 && rows.every((c) => picked.has(c.id))
   const somePicked = rows.some((c) => picked.has(c.id))
   const filtered = query !== '' || providerFilter !== '' || statusFilter !== ''
@@ -310,9 +302,6 @@ export function ChannelsPage() {
       return next
     })
 
-  // 编辑态优先取列表里的最新行（加 key / 改池后 invalidate 会刷新它）；改了优先级或名字后
-  // 这一行可能翻到别页或被搜索词筛掉，此时退回打开抽屉时的快照——find 落空会让抽屉当场
-  // 变成一张空白的"新建"表单。
   const editingChannel =
     drawer?.mode === 'edit'
       ? (rows.find((c) => c.id === drawer.channel.id) ?? drawer.channel)
@@ -329,7 +318,6 @@ export function ChannelsPage() {
             <Button
               variant="outline"
               loading={testAll.isPending}
-              // 筛选中的"0 启用"不代表全站没有可测的
               disabled={enabledCount === 0 && !filtered}
               onClick={() => testAll.mutate()}
             >
@@ -346,7 +334,6 @@ export function ChannelsPage() {
         }
       />
 
-      {/* 搜索回车提交；状态是互斥短选项，用分段控件 */}
       <Toolbar
         filters={
           <>
@@ -392,7 +379,7 @@ export function ChannelsPage() {
       {channels.isError ? (
         <ErrorState message={describeError(channels.error)} onRetry={() => void channels.refetch()} />
       ) : channels.isPending ? (
-        <TableSkeleton rows={8} cols={5} />
+        <TableSkeleton rows={6} cols={4} />
       ) : rows.length === 0 ? (
         filtered ? (
           <EmptyState
@@ -417,199 +404,268 @@ export function ChannelsPage() {
           />
         )
       ) : (
-        // 一行两层、六块各成一列：渠道（是谁）/ 状态（现在能不能打）/ 额度（还剩多少）/ 近 30 天（走了多少量）/
-        // 调度（路由怎么看它）/ 操作。此前是四格里各堆四五行，行高一百多、每行还不一样高；现在每一格都是两行文字高，
-        // 同一类数字落在同一竖列上，扫一眼就能上下比。定宽布局（table-fixed）：列宽由表头说了算，内容放不下就截断，
-        // 不会因为某一行名字长就把别的列挤走；窗口再窄就整表横向滚动。
-        <Table stickyHeader className="min-w-[58rem] table-fixed">
-          <THead>
-            <Tr>
-              <Th className="w-11 pr-0 pl-5">
-                <Checkbox
-                  srLabel={t('admin:batchPickAll')}
-                  checked={allPicked}
-                  indeterminate={somePicked && !allPicked}
-                  onChange={(on) =>
-                    setPicked((prev) => {
-                      const next = new Set(prev)
-                      for (const c of rows) {
-                        if (on) next.add(c.id)
-                        else next.delete(c.id)
-                      }
-                      return next
-                    })
-                  }
-                />
-              </Th>
-              {/* 渠道列不设宽度，吃掉其余各列定宽之后剩下的。三档窗口宽度（表格约 960 / 1100 / 1240 起）各给一组列宽；
-                  超宽屏把富余按比例分给状态与额度（条长一点好读），不让渠道列一家独宽 */}
-              <Th>{t('admin:channelsTitle')}</Th>
-              <Th className="w-[10.5rem] min-[1420px]:w-[13rem] min-[1560px]:w-[13.75rem] min-[1800px]:w-[16%]">{t('common:status')}</Th>
-              <Th className="w-[15rem] min-[1420px]:w-[17rem] min-[1560px]:w-[17.5rem] min-[1800px]:w-[24%]">{t('admin:channelColQuota')}</Th>
-              <Th numeric className="w-[6.5rem] min-[1420px]:w-[8.5rem] min-[1560px]:w-[8.5rem] min-[1800px]:w-[9rem]">{t('admin:channelColUsage30')}</Th>
-              {/* 调度：开关常在；优先级 / 模型数 / 所在池是三级信息，窗口够宽（1560 起）才展开成文字 */}
-              <Th className="w-[3.75rem] min-[1560px]:w-[9.25rem] min-[1800px]:w-[11rem]">{t('admin:channelColSchedule')}</Th>
-              <Th className="w-[8.25rem] pr-4 text-right">{t('admin:channelColOps')}</Th>
-            </Tr>
-          </THead>
-          <TBody>
-            {rows.map((c) => {
-              const enabled = c.status === 1
-              const pools = c.pools ?? []
-              return (
-              <Tr key={c.id} selected={picked.has(c.id)} data-enabled={enabled || undefined}>
-                <Td className="py-3 pr-0 pl-5 align-top">
-                  {/* 与名称首行同高居中：直接放行内框，勾选框会落在基线上、比名字高出两三像素 */}
-                  <div className="flex h-5 items-center">
-                    <Checkbox
-                      srLabel={t('admin:batchPick', { name: shownName(c) })}
-                      checked={picked.has(c.id)}
-                      onChange={() => togglePick(c.id)}
-                    />
-                  </div>
-                </Td>
-                <Td className="py-3 align-top">
-                  <ChannelNameCell
-                    channel={c}
-                    egress={c.egress !== undefined && c.egress.mode !== 'inherit'
-                      ? { label: egressLabel(c), title: describeEgress(t, c.egress, proxies.data, proxyGroups.data), mono: c.egress.mode === 'proxy' }
-                      : undefined}
-                  />
-                </Td>
-                {/* 第一行回答「现在能不能打」：状态胶囊 + 最近一次测试；第二行是近 24h 的错误率与请求数（点开是健康时间线）。
-                    部分 key 不可用时中间多一行原因与恢复时间。凭证到期属于编辑详情，不占列表的扫读空间。 */}
-                <Td className="py-3 align-top">
-                  <div data-slot="channel-status" className="flex min-w-0 flex-col gap-0.5">
-                    <div className="flex h-5 min-w-0 items-center gap-2 overflow-hidden">
-                      <KeyStateSummary keys={c.keys} enabled={enabled} />
-                      <LastProbe probe={c.last_test} />
-                    </div>
-                    {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见。
-                        和「部分 key 不可用」一样占异常才有的那一行 */}
-                    {enabled && pools.length === 0 && (
-                      <div className="flex leading-5">
-                        <Badge variant="destructive" className="min-h-[18px] shrink-0 rounded-[5px] px-1.5 py-0 text-[11px]" title={t('admin:poolOrphanWarning')}>
-                          {t('admin:channelOrphan')}
-                        </Badge>
-                      </div>
-                    )}
-                    <KeyStateDetail keys={c.keys} enabled={enabled} />
-                    <div className="flex h-5 min-w-0 items-center">
-                      <Health24h
-                        stat={health.data?.data.find((s) => s.channel_id === c.id)}
-                        channel={{ id: c.id, name: c.name, provider: c.provider }}
-                      />
-                    </div>
-                  </div>
-                </Td>
-                {/* 额度：订阅账号是各窗口的用量仪表，设了成本 / Token 上限的渠道是「已用 / 上限」，API 渠道还有上游余额；都没有就是一个破折号 */}
-                <Td className="py-3 align-top">
-                  <div data-slot="channel-quota" className="flex min-w-0 flex-col gap-1.5">
-                    <ChannelQuotaCell
-                      channelId={c.id}
-                      provider={c.provider}
-                      control={c.settings?.account_control}
-                      enabled={enabled}
-                      fallback={c.last_balance ? null : <span aria-hidden className="leading-5 text-muted-foreground/70">—</span>}
-                    />
-                    <LastBalance balance={c.last_balance} />
-                  </div>
-                </Td>
-                <Td className="py-3 align-top">
-                  <ChannelUsage
-                    usage={usage.data?.data.find((u) => u.channel_id === c.id)}
-                    settled={usage.data !== undefined}
-                  />
-                </Td>
-                {/* 调度：是否参与调度的开关 + 路由怎么看这条渠道（优先级、服务几个模型、在哪些池）。
-                    开关与名称首行同高；文字部分窗口够宽才出现 */}
-                <Td className="py-3 align-top">
-                  <div data-slot="channel-schedule" className="flex min-w-0 flex-col gap-0.5">
-                    <div className="flex h-5 items-center gap-2.5">
-                      <Switch
-                        hideLabel
-                        className="[&>span:last-child]:mt-0"
-                        label={t('admin:channelScheduleToggle', { name: shownName(c) })}
-                        checked={enabled}
-                        disabled={setStatus.isPending}
-                        onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
-                      />
-                      <span className="hidden whitespace-nowrap min-[1560px]:inline">
-                        <span className="text-xs text-muted-foreground">{t('admin:priority')}</span>{' '}
-                        <span className="text-[13px] font-medium tabular-nums">{c.priority}</span>
-                      </span>
-                    </div>
-                    <span className="hidden truncate text-xs leading-5 text-muted-foreground min-[1560px]:block" title={pools.join(', ') || undefined}>
-                      {t('admin:channelModelCount', { n: c.models.length })}
-                      {pools.length > 0 && <> · {pools.join(', ')}</>}
-                    </span>
-                  </div>
-                </Td>
-                {/* 常用动作（测试 / 编辑）是图标按钮，其余收进「···」菜单；与两行内容垂直居中。
-                    图标平时淡一档，悬停整行变深，悬停自己才有底色；名字在悬停提示（便签）与读屏名里。
-                    「更多」菜单的触发器不套悬停提示：提示常驻时 Esc 会先关提示，菜单得按两次才关 */}
-                <Td className="py-3 pr-4 align-top">
-                  <div className="flex h-[42px] items-center justify-end">
-                    <ActionGroup label={t('common:actions')}>
-                      <IconButton
-                        icon={Activity}
-                        label={t('admin:testChannel')}
-                        loading={testingId === c.id}
-                        onClick={() => test.mutate(c)}
-                      />
-                      <IconButton
-                        icon={Pencil}
-                        label={t('common:edit')}
-                        onClick={() => setDrawer({ mode: 'edit', channel: c })}
-                      />
-                      <Menu
-                        strategy="fixed"
-                        className="min-w-44"
-                        trigger={
-                          <Button size="icon" variant="ghost" aria-label={t('admin:channelMoreActions')} className={ICON_BUTTON_CLASS}>
-                            <Ellipsis />
-                          </Button>
+        <div data-slot="table-frame" className="relative flex min-w-0 w-full flex-col">
+          <div
+            data-slot="table-viewport"
+            className="min-h-0 min-w-0 w-full flex-1 overflow-y-auto overscroll-contain px-0.5 pb-1"
+          >
+            <table
+              aria-label={t('admin:channelsTitle')}
+              className="-mt-2 w-full border-separate border-spacing-x-0 border-spacing-y-2"
+            >
+              <thead>
+                <tr>
+                  <th className="sticky top-0 z-10 bg-background/95 p-0 text-left font-normal backdrop-blur-sm">
+                    <div className="flex items-center justify-between gap-3 px-4 py-1 sm:px-5">
+                      <Checkbox
+                        checked={allPicked}
+                        indeterminate={somePicked && !allPicked}
+                        label={t('admin:batchPickAll')}
+                        className="text-muted-foreground [&_span.text-sm]:text-xs [&_span.text-sm]:font-medium [&_span.text-sm]:text-muted-foreground"
+                        onChange={(on) =>
+                          setPicked((prev) => {
+                            const next = new Set(prev)
+                            for (const c of rows) {
+                              if (on) next.add(c.id)
+                              else next.delete(c.id)
+                            }
+                            return next
+                          })
                         }
-                      >
-                        <MenuItem icon={MessageSquareText} onSelect={() => setTrying(c)}>
-                          {t('admin:channelTryAction')}
-                        </MenuItem>
-                        {balanceSupported(c.provider) && (
-                          <MenuItem icon={Wallet} disabled={balancingId === c.id} onSelect={() => balance.mutate(c)}>
-                            {t('admin:balanceQuery')}
-                          </MenuItem>
-                        )}
-                        <MenuItem icon={Gauge} onSelect={() => setDrawer({ mode: 'edit', channel: c, focus: 'limits' })}>
-                          {t('admin:channelLimitsTitle')}
-                        </MenuItem>
-                        <MenuItem icon={Copy} onSelect={() => duplicate.mutate(c)}>
-                          {t('admin:duplicate')}
-                        </MenuItem>
-                        <MenuSeparator />
-                        <MenuItem
-                          icon={Trash2}
-                          destructive
-                          onSelect={() =>
-                            confirm({
-                              title: t('common:confirmDeleteTitle', { name: shownName(c) }),
-                              description: t('common:confirmChannelDelete'),
-                              // 对话框里显示的是遮过的名字，要输入的也是它：看到什么就输入什么
-                              requireText: shownName(c),
-                              onConfirm: () => remove.mutate(c.id),
-                            })
-                          }
+                      />
+                    </div>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((c) => {
+                  const enabled = c.status === 1
+                  const selected = picked.has(c.id)
+                  const pools = c.pools ?? []
+                  const orphan = enabled && pools.length === 0
+                  const rowStat = health.data?.data.find((s) => s.channel_id === c.id)
+                  const rowUsage = usage.data?.data.find((u) => u.channel_id === c.id)
+                  const rowHealth = channelRowHealth(c.keys, enabled, orphan, rowStat)
+                  const hasKeyAlert = enabled && c.keys.length > 0 && c.keys.some((k) => k.status !== 1)
+                  const egress =
+                    c.egress !== undefined && c.egress.mode !== 'inherit'
+                      ? {
+                          label: egressLabel(c),
+                          title: describeEgress(t, c.egress, proxies.data, proxyGroups.data),
+                          mono: c.egress.mode === 'proxy',
+                        }
+                      : undefined
+
+                  return (
+                    <tr
+                      key={c.id}
+                      data-selected={selected || undefined}
+                      data-enabled={enabled || undefined}
+                      data-health={rowHealth}
+                      className="group/row"
+                    >
+                      <td className="p-0 align-top">
+                        <div
+                          data-slot="channel-card"
+                          className={cn(
+                            'relative overflow-hidden rounded-2xl border bg-card shadow-card transition-[border-color,box-shadow,background-color] duration-150',
+                            selected
+                              ? 'border-primary/55 bg-primary/[0.025] ring-1 ring-primary/25 dark:bg-primary/[0.06]'
+                              : rowHealth === 'destructive'
+                                ? 'border-destructive/30 hover:border-destructive/50'
+                                : rowHealth === 'warning'
+                                  ? 'border-warning/35 hover:border-warning/55'
+                                  : enabled
+                                    ? 'border-border/80 hover:border-border hover:shadow-[0_4px_14px_-4px_oklch(0.24_0.015_70/0.09),0_1px_2px_oklch(0.24_0.015_70/0.04)] dark:hover:shadow-[inset_0_1px_0_oklch(1_0_0/0.07),0_8px_22px_-6px_oklch(0_0_0/0.55)]'
+                                    : 'border-border/65 bg-card/70 hover:border-border/90 hover:bg-card/90',
+                          )}
                         >
-                          {t('common:delete')}
-                        </MenuItem>
-                      </Menu>
-                    </ActionGroup>
-                  </div>
-                </Td>
-              </Tr>
-              )
-            })}
-          </TBody>
-        </Table>
+                          {/* 左侧 3.5px 语义状态条：异常与选中常亮，健康态悬停轻亮 */}
+                          <span
+                            aria-hidden
+                            className={cn(
+                              'pointer-events-none absolute inset-y-0 left-0 w-[3.5px] transition-colors',
+                              selected
+                                ? 'bg-primary'
+                                : rowHealth === 'destructive'
+                                  ? 'bg-destructive'
+                                  : rowHealth === 'warning'
+                                    ? 'bg-warning'
+                                    : enabled
+                                      ? 'bg-transparent group-hover/row:bg-primary/45'
+                                      : 'bg-transparent',
+                            )}
+                          />
+
+                          {/* 上层：身份与路由 + 实时状态与快捷控制 */}
+                          <div className="px-4 pt-3 pb-2.5 sm:px-5">
+                            <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2.5">
+                              {/* 左侧：勾选 + 品牌徽章 + 名称 / 协议档位 / 出口与路由 */}
+                              <div className="flex min-w-0 flex-1 items-start gap-3">
+                                <div className="flex h-10 items-center">
+                                  <Checkbox
+                                    srLabel={t('admin:batchPick', { name: shownName(c) })}
+                                    checked={selected}
+                                    onChange={() => togglePick(c.id)}
+                                  />
+                                </div>
+                                <ChannelIdentity channel={c} egress={egress} />
+                              </div>
+
+                              {/* 右侧：状态胶囊 + 未入池 + 最近测活 | 调度开关 + 动作组 */}
+                              <div className="flex w-full shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 pl-7 sm:w-auto sm:justify-end sm:pl-2">
+                                <div data-slot="channel-status" className="flex items-center gap-2">
+                                  <KeyStateSummary keys={c.keys} enabled={enabled} />
+                                  {orphan && (
+                                    <Badge
+                                      variant="destructive"
+                                      className="min-h-[22px] shrink-0 rounded-md px-2 py-0 text-[11px]"
+                                      title={t('admin:poolOrphanWarning')}
+                                    >
+                                      {t('admin:channelOrphan')}
+                                    </Badge>
+                                  )}
+                                  <LastProbe probe={c.last_test} />
+                                </div>
+
+                                <span aria-hidden className="hidden h-5 w-px bg-border/70 sm:inline-block" />
+
+                                <div className="flex items-center gap-2.5">
+                                  <Switch
+                                    hideLabel
+                                    className="[&>span:last-child]:mt-0"
+                                    label={t('admin:channelScheduleToggle', { name: shownName(c) })}
+                                    checked={enabled}
+                                    disabled={setStatus.isPending}
+                                    onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
+                                  />
+                                  <ActionGroup label={t('common:actions')}>
+                                    <IconButton
+                                      icon={Activity}
+                                      label={t('admin:testChannel')}
+                                      loading={testingId === c.id}
+                                      onClick={() => test.mutate(c)}
+                                    />
+                                    <IconButton
+                                      icon={Pencil}
+                                      label={t('common:edit')}
+                                      onClick={() => setDrawer({ mode: 'edit', channel: c })}
+                                    />
+                                    <Menu
+                                      strategy="fixed"
+                                      className="min-w-44"
+                                      trigger={
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          aria-label={t('admin:channelMoreActions')}
+                                          className={ICON_BUTTON_CLASS}
+                                        >
+                                          <Ellipsis />
+                                        </Button>
+                                      }
+                                    >
+                                      <MenuItem icon={MessageSquareText} onSelect={() => setTrying(c)}>
+                                        {t('admin:channelTryAction')}
+                                      </MenuItem>
+                                      {balanceSupported(c.provider) && (
+                                        <MenuItem
+                                          icon={Wallet}
+                                          disabled={balancingId === c.id}
+                                          onSelect={() => balance.mutate(c)}
+                                        >
+                                          {t('admin:balanceQuery')}
+                                        </MenuItem>
+                                      )}
+                                      <MenuItem
+                                        icon={Gauge}
+                                        onSelect={() => setDrawer({ mode: 'edit', channel: c, focus: 'limits' })}
+                                      >
+                                        {t('admin:channelLimitsTitle')}
+                                      </MenuItem>
+                                      <MenuItem icon={Copy} onSelect={() => duplicate.mutate(c)}>
+                                        {t('admin:duplicate')}
+                                      </MenuItem>
+                                      <MenuSeparator />
+                                      <MenuItem
+                                        icon={Trash2}
+                                        destructive
+                                        onSelect={() =>
+                                          confirm({
+                                            title: t('common:confirmDeleteTitle', { name: shownName(c) }),
+                                            description: t('common:confirmChannelDelete'),
+                                            requireText: shownName(c),
+                                            onConfirm: () => remove.mutate(c.id),
+                                          })
+                                        }
+                                      >
+                                        {t('common:delete')}
+                                      </MenuItem>
+                                    </Menu>
+                                  </ActionGroup>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* 异常凭证诊断条：仅当有冷却 / 限流 / 失效 key 时展开，不打扰健康渠道 */}
+                            {hasKeyAlert && (
+                              <div className="mt-2 pl-7 sm:pl-[4.75rem]">
+                                <KeyStateDetail keys={c.keys} enabled={enabled} />
+                              </div>
+                            )}
+                          </div>
+
+                          {/* 下层遥测仪表盘：三栏定比对齐——额度与余额 / 近 24h 健康与 TTFT / 近 30 天用量 */}
+                          <div className="border-t border-border/55 bg-muted/[0.22] px-4 py-2 sm:px-5 dark:bg-white/[0.018]">
+                            <div className="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)_minmax(11.5rem,0.72fr)] md:items-center md:gap-0 md:divide-x md:divide-border/55">
+                              {/* 区域一：额度仪表与上游余额 */}
+                              <div
+                                data-slot="channel-quota"
+                                className="flex min-w-0 flex-col justify-center gap-2 md:pr-5"
+                              >
+                                <ChannelQuotaCell
+                                  channelId={c.id}
+                                  provider={c.provider}
+                                  control={c.settings?.account_control}
+                                  enabled={enabled}
+                                  fallback={
+                                    c.last_balance ? null : (
+                                      <div className="flex items-center gap-2 text-xs text-muted-foreground/65">
+                                        <span className="text-[11px]">{t('admin:channelColQuota')}</span>
+                                        <span aria-hidden>—</span>
+                                      </div>
+                                    )
+                                  }
+                                />
+                                <LastBalance balance={c.last_balance} />
+                              </div>
+
+                              {/* 区域二：近 24h 健康度与首字延迟 */}
+                              <div
+                                data-slot="channel-health"
+                                className="flex min-w-0 flex-col justify-center border-t border-border/45 pt-2.5 md:border-t-0 md:px-5 md:pt-0"
+                              >
+                                <Health24h
+                                  stat={rowStat}
+                                  channel={{ id: c.id, name: c.name, provider: c.provider }}
+                                />
+                              </div>
+
+                              {/* 区域三：近 30 天花费与流量 */}
+                              <div className="flex min-w-0 flex-col justify-center border-t border-border/45 pt-2.5 md:border-t-0 md:pl-5 md:pt-0">
+                                <ChannelUsage usage={rowUsage} settled={usage.data !== undefined} />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       <Pagination {...pager} total={channels.data?.total} />
@@ -668,7 +724,7 @@ export function ChannelsPage() {
   )
 }
 
-/// 上游地址只留主机名（列表里要认的是「哪家站」，完整地址在悬停提示与编辑抽屉里）；写不成地址的原样显示。
+/// 上游地址只留主机名（完整地址在悬停提示与编辑抽屉里）；写不成地址的原样显示。
 function hostOf(base: string): string {
   try {
     return new URL(base).host
@@ -679,40 +735,50 @@ function hostOf(base: string): string {
 
 const SUBSCRIPTION_PROVIDERS = new Set(['anthropic_max', 'codex'])
 
-/// 渠道格：两行。第一行是名字（这一行唯一的粗体）+ 编号；第二行是「它是什么」——平台 / 档位胶囊，
-/// 后面跟账号（与名字不同时）或上游主机名（API 渠道），再后面是显式指定的出口。
-///
-/// 名字与第二行都按列宽截断（hover 见全文）：长名字不该决定整表宽度。订阅账号的邮箱通常就是渠道名，
-/// 只在与名称不同时才补出（多个账号时显示首个并标出其余数量，悬停看全部）。
-/// 订阅账号（包括被当作渠道名的）一律遮住中间部分再显示；渠道名不是账号就原样，见 `lib/mask.ts`。
-/// 订阅渠道不显示地址：它们都打官方地址，逐行重复一遍只是噪音。
-/// 供应商控制台直达（new-api #7146）：查余额 / 状态时不必再去搜网址；平时不抢眼，
-/// 悬停整行或键盘聚焦时才现身，触屏设备常显。
-function ChannelNameCell({ channel: c, egress }: {
+/// 渠道身份与路由摘要块：
+/// 第一行是名称 + #ID + 平台/档位胶囊 + 供应商控制台直达；
+/// 第二行是账号或主机名 + 显式出口 + 调度路由信息（所属池、模型数、优先级、非默认成本系数、多 key 计数）。
+function ChannelIdentity({
+  channel: c,
+  egress,
+}: {
   channel: ChannelRow
   egress?: { label: string; title: string; mono: boolean }
 }) {
   const { t } = useTranslation()
-  // 档位按 key 去重；多把 key 档位不同时都列出（Pro · Max 20x）
   const plans = [...new Set(c.keys.map((k) => k.account_plan).filter((v): v is string => Boolean(v)))]
   const accounts = [...new Set(c.keys.map((k) => k.account_label).filter((v): v is string => Boolean(v)))]
   const extra = accounts.filter((label) => label !== c.name)
   const consoleUrl = providerConsoleUrl(c.provider, c.api_base)
   const host = !SUBSCRIPTION_PROVIDERS.has(c.provider) && c.api_base ? hostOf(c.api_base) : null
   const enabled = c.status === 1
+  const pools = c.pools ?? []
+  const hasConnectionMeta = extra.length > 0 || host !== null || egress !== undefined
+
   return (
-    <div className="flex min-w-0 items-center gap-3">
-      {/* 停用的渠道整体退后一档：标志褪色、名字变灰，扫一眼就分得出哪些在跑 */}
-      <ProviderMark provider={c.provider} size="sm" className={cn('max-[1419px]:h-8 max-[1419px]:w-8', !enabled && 'opacity-50 grayscale')} />
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex h-5 min-w-0 items-center gap-1.5">
-          <span data-slot="channel-name" className={cn('truncate text-sm font-semibold tracking-[-0.006em]', !enabled && 'text-muted-foreground')} title={shownName(c)}>
+    <div className="flex min-w-0 flex-1 items-start gap-3">
+      <ProviderMark
+        provider={c.provider}
+        size="md"
+        className={cn(enabled ? 'group-hover/row:scale-[1.03]' : 'opacity-45 grayscale')}
+      />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        {/* 第一行：主标题 + 编号 + 平台档位 + 控制台外链 */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span
+            data-slot="channel-name"
+            className={cn(
+              'max-w-full truncate text-[15px] leading-5 font-semibold tracking-[-0.012em]',
+              !enabled && 'text-muted-foreground',
+            )}
+            title={shownName(c)}
+          >
             {shownName(c)}
           </span>
-          {/* 编号是给对日志用的三级信息，窄窗口先让给名字 */}
-          <span className="hidden shrink-0 font-mono text-[11px] font-normal text-muted-foreground/60 tabular-nums min-[1420px]:inline">
+          <span className="shrink-0 font-mono text-[11px] font-normal text-muted-foreground/55 tabular-nums">
             #{c.id}
           </span>
+          <ProviderChip provider={c.provider} plans={plans} compact className={cn(!enabled && 'opacity-75')} />
           {consoleUrl !== null && (
             <a
               href={consoleUrl}
@@ -725,32 +791,98 @@ function ChannelNameCell({ channel: c, egress }: {
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
-        </span>
-        <span data-slot="channel-meta" className="flex h-5 min-w-0 items-center gap-2 overflow-hidden text-xs text-muted-foreground">
-          <ProviderChip provider={c.provider} plans={plans} compact />
-          {/* 标签留给读屏（「账号」「出口」）；可见的只有值，悬停提示挂在值上 */}
+        </div>
+
+        {/* 第二行：账号/主机 · 出口 · 所属池 · 模型数 · 优先级 · 非 1.0 相对成本 · 多 key 数 */}
+        <div
+          data-slot="channel-meta"
+          className={cn(
+            'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs leading-5 text-muted-foreground',
+            !enabled && 'opacity-80',
+          )}
+        >
           {extra.length > 0 ? (
-            <>
+            <span className="inline-flex min-w-0 items-center gap-1">
               <span className="sr-only">{t('admin:channelAccount')}</span>
-              <span data-slot="channel-account" className="min-w-[2.5rem] truncate" title={accounts.map(maskAccount).join('\n')}>
+              <span
+                data-slot="channel-account"
+                className="max-w-[14rem] truncate text-foreground/80"
+                title={accounts.map(maskAccount).join('\n')}
+              >
                 {maskAccount(extra[0])}
               </span>
-              {extra.length > 1 && <span className="-ml-1 shrink-0">+{extra.length - 1}</span>}
-            </>
-          ) : host !== null && (
-            // 窄窗口放不下「主机名 + 出口」两样：出口留着（账号从哪出去更要紧），主机名让位——名字多半已经说明是哪家站
-            <span data-slot="channel-host" className={cn('min-w-0 truncate', egress !== undefined && 'max-[1419px]:hidden')} title={c.api_base ?? undefined}>{host}</span>
+              {extra.length > 1 && <span className="shrink-0 text-[11px]">+{extra.length - 1}</span>}
+            </span>
+          ) : (
+            host !== null && (
+              <span
+                data-slot="channel-host"
+                className="max-w-[14rem] truncate font-mono text-[11.5px] text-muted-foreground/90"
+                title={c.api_base ?? undefined}
+              >
+                {host}
+              </span>
+            )
           )}
+
           {egress !== undefined && (
-            <span data-slot="channel-egress" className="inline-flex min-w-[3.25rem] shrink items-center gap-1">
+            <span data-slot="channel-egress" className="inline-flex min-w-0 items-center gap-1">
               <span className="inline-flex shrink-0 text-muted-foreground/70" title={t('admin:channelStatusEgress')}>
                 <Globe aria-hidden className="h-3 w-3" strokeWidth={1.8} />
                 <span className="sr-only">{t('admin:channelStatusEgress')}</span>
               </span>
-              <span className={cn('truncate', egress.mono && 'tabular-nums')} title={egress.title}>{egress.label}</span>
+              <span className={cn('max-w-[11rem] truncate text-[11.5px]', egress.mono && 'tabular-nums')} title={egress.title}>
+                {egress.label}
+              </span>
             </span>
           )}
-        </span>
+
+          {hasConnectionMeta && (
+            <span aria-hidden className="hidden text-border sm:inline">·</span>
+          )}
+
+          <span
+            data-slot="channel-schedule"
+            className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
+          >
+            <span className="sr-only">{t('admin:channelColSchedule')}</span>
+            {pools.length > 0 && (
+              <span
+                className="inline-flex h-[18px] max-w-[9rem] shrink-0 items-center truncate rounded bg-muted/85 px-1.5 font-mono text-[10.5px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60 dark:bg-white/[0.06]"
+                title={pools.join(', ')}
+              >
+                {pools.length <= 2 ? pools.join(', ') : `${pools[0]} +${pools.length - 1}`}
+              </span>
+            )}
+            <span
+              className="shrink-0 whitespace-nowrap"
+              title={c.models.length > 0 ? c.models.join(', ') : undefined}
+            >
+              {t('admin:channelModelCount', { n: c.models.length })}
+            </span>
+            <span className="shrink-0 whitespace-nowrap tabular-nums">
+              {t('admin:priority')}{' '}
+              <span className={cn(c.priority > 0 && 'font-medium text-foreground/85')}>{c.priority}</span>
+            </span>
+            {c.cost_milli !== 1000 && (
+              <span
+                className="shrink-0 font-mono text-[11px] font-medium text-primary tabular-nums"
+                title={t('admin:channelCostMilli')}
+              >
+                ×{costMilliToRatio(c.cost_milli)}
+              </span>
+            )}
+            {c.keys.length > 1 && (
+              <span
+                className="inline-flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground/90 tabular-nums"
+                title={t('admin:keyStateAllActive', { n: c.keys.length })}
+              >
+                <KeyRound aria-hidden className="h-3 w-3 opacity-75" />
+                {c.keys.length}
+              </span>
+            )}
+          </span>
+        </div>
       </div>
     </div>
   )

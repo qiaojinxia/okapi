@@ -17,10 +17,24 @@ export function quotaTone(percent: number) {
   return { bar: 'bg-success', text: 'text-foreground' }
 }
 
-/// 列表行里的一个小仪表，三层：「名字 + 百分比 / 细条 / 一行说明」。
-/// 15 + 3 + 6 + 3 + 15 = 42px：正好是两行文字（20 + 2 + 20）的高度，有仪表的行不比别的行高。
+/// 列表卡片里的单条用量仪表，竖向堆叠排布（每个窗口独占一行，进度条充分舒展）：
+/// - `inline`（订阅窗口，短标签如 5h / 7d / Fable）：桌面端单行四列精密对齐「窗口名 | 宽进度条 | 百分比 | 距重置」，
+///   窄屏自动折成两行（标签 + 百分比 / 距重置 在上，满宽进度条在下）。
+/// - `stacked`（本地成本 / Token 上限，标签与金额较长）：固定两行「名称 + 百分比 · 已用/上限 / 满宽进度条」，绝不裁断。
 /// `percent` 为 null 表示读数已过期（不画条，百分比处是破折号）；`marker` 在条上画一道上限刻度。
-export function CompactMeter({ slot, label, title, meterLabel, percent, marker, markerTitle, footer, footerTitle }: {
+export function CompactMeter({
+  slot,
+  label,
+  title,
+  meterLabel,
+  percent,
+  marker,
+  markerTitle,
+  footer,
+  footerTitle,
+  layout = 'inline',
+  wideLabel = false,
+}: {
   slot: string
   label: string
   title: string
@@ -30,26 +44,105 @@ export function CompactMeter({ slot, label, title, meterLabel, percent, marker, 
   markerTitle?: string
   footer: ReactNode
   footerTitle?: string
+  layout?: 'inline' | 'stacked'
+  wideLabel?: boolean
 }) {
   const tone = quotaTone(percent ?? 0)
+  const idle = percent === null || percent === 0
+
+  const track = (
+    <div
+      className="relative h-2 w-full overflow-hidden rounded-full bg-muted/90 ring-1 ring-inset ring-border/70 dark:bg-white/[0.07] dark:ring-white/[0.07]"
+      role="progressbar"
+      aria-label={meterLabel}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percent ?? undefined}
+    >
+      {percent !== null && (
+        <div
+          className={cn(
+            'h-full rounded-full shadow-[inset_0_1px_0_oklch(1_0_0/0.3)] transition-[width] duration-300',
+            tone.bar,
+          )}
+          style={{ width: `${percent}%` }}
+        />
+      )}
+      {typeof marker === 'number' && marker > 0 && marker < 100 && (
+        <div
+          data-slot="quota-limit-marker"
+          className="absolute inset-y-0 w-[2px] bg-foreground/85 shadow-[0_0_0_1px_var(--card)]"
+          style={{ left: `${marker}%` }}
+          title={markerTitle}
+        />
+      )}
+    </div>
+  )
+
+  if (layout === 'stacked') {
+    return (
+      <div data-slot={slot} className="flex min-w-0 flex-col gap-1.5">
+        <div className="flex min-w-0 items-baseline justify-between gap-2 leading-4">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="truncate text-xs font-medium text-muted-foreground" title={title}>
+              {label}
+            </span>
+            <span
+              className={cn(
+                'shrink-0 text-xs tabular-nums',
+                idle ? 'font-medium text-muted-foreground/80' : cn('font-semibold', tone.text),
+              )}
+            >
+              {percent === null ? '—' : `${percent}%`}
+            </span>
+          </div>
+          <span
+            data-slot="quota-reset"
+            className="flex min-w-0 shrink items-center justify-end gap-1 text-[11px] leading-4 text-muted-foreground tabular-nums"
+            title={footerTitle}
+          >
+            {footer}
+          </span>
+        </div>
+        {track}
+      </div>
+    )
+  }
+
   return (
-    <div data-slot={slot} className="flex min-w-0 flex-col gap-[3px]">
-      <div className="flex h-[15px] items-end justify-between gap-1.5 leading-[15px]">
-        <span className="truncate text-[11px] text-muted-foreground" title={title}>{label}</span>
-        <span className={cn('shrink-0 text-xs font-semibold tabular-nums', percent === null ? 'text-muted-foreground' : tone.text)}>
+    <div
+      data-slot={slot}
+      className={cn(
+        'grid min-w-0 grid-cols-[auto_1fr] items-center gap-x-2.5 gap-y-1 sm:gap-y-0',
+        wideLabel
+          ? 'sm:grid-cols-[4rem_minmax(0,1fr)_2.5rem_5.5rem]'
+          : 'sm:grid-cols-[2.25rem_minmax(0,1fr)_2.5rem_5.5rem]',
+      )}
+    >
+      <div className="flex min-w-0 items-baseline gap-1.5 sm:contents">
+        <span
+          className="truncate font-mono text-[11px] font-medium tracking-tight text-muted-foreground"
+          title={title}
+        >
+          {label}
+        </span>
+        <span
+          className={cn(
+            'shrink-0 text-xs tabular-nums sm:order-3 sm:text-right',
+            idle ? 'font-medium text-muted-foreground/75' : cn('font-semibold', tone.text),
+          )}
+        >
           {percent === null ? '—' : `${percent}%`}
         </span>
       </div>
-      <div className="relative h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={meterLabel}
-        aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}>
-        {percent !== null && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
-        {typeof marker === 'number' && marker > 0 && marker < 100 && (
-          <div data-slot="quota-limit-marker" className="absolute inset-y-0 w-0.5 bg-foreground/60" style={{ left: `${marker}%` }} title={markerTitle} />
-        )}
-      </div>
-      <span data-slot="quota-reset" className="flex h-[15px] min-w-0 items-center gap-1 text-[11px] leading-[15px] text-muted-foreground/80 tabular-nums" title={footerTitle}>
+      <span
+        data-slot="quota-reset"
+        className="flex min-w-0 items-center justify-end gap-1 text-[11px] leading-4 text-muted-foreground/80 tabular-nums sm:order-4"
+        title={footerTitle}
+      >
         {footer}
       </span>
+      <div className="col-span-2 sm:order-2 sm:col-span-1">{track}</div>
     </div>
   )
 }
@@ -71,7 +164,7 @@ export function useResetSpan() {
 }
 
 /// 订阅额度各窗口的用量条。`limits` 是渠道配置的百分比上限（窗口秒数 → 百分比），
-/// 画成一条竖线，站长能一眼看出离自动停用还有多远。`compact` 用于列表行。
+/// 画成一条竖线，站长能一眼看出离自动停用还有多远。`compact` 用于列表卡片。
 export function QuotaMeters({ quota, limits, compact = false }: {
   quota: Quota
   limits?: Record<string, number | null | undefined>
@@ -94,32 +187,40 @@ export function QuotaMeters({ quota, limits, compact = false }: {
         : format.format(minutes, 'minute')
   }
   if (compact) {
-    // 列表行：各窗口横排成一组小仪表，每个三层——「窗口名 + 百分比 / 细条 / 距重置」。
-    // 竖着排一个窗口占一行，订阅账号有三个窗口（5 小时 / 7 天 / 按模型的周限额）就把行撑成三四行高；
-    // 横排后整组正好是两行文字的高度，和这一行其余各格同高，各渠道的同一个窗口也在同一竖列上，能上下比着看。
+    const hasScoped = rows.some((window) => Boolean(window.scope))
+    // 列表卡片：每个窗口独占一行竖向排开，进度条获得充裕宽度，各行同一列精确上下对齐。
     return (
-      <div className="flex w-full min-w-0 flex-col gap-1">
-        {quota.allowed === false && <p className="text-[11px] leading-4 font-medium text-destructive">{t('admin:channelQuotaBlocked')}</p>}
-        <div data-slot="quota-meters" className="grid w-full max-w-[26rem] auto-cols-fr grid-flow-col gap-x-3 min-[1420px]:gap-x-4">
+      <div className="flex w-full min-w-0 flex-col gap-1.5">
+        {quota.allowed === false && (
+          <p className="text-[11px] leading-4 font-medium text-destructive">{t('admin:channelQuotaBlocked')}</p>
+        )}
+        <div data-slot="quota-meters" className="flex w-full min-w-0 flex-col gap-1.5">
           {rows.map((window) => {
             const stale = window.resets_at !== null && window.resets_at * 1000 <= now
             const percent = Math.min(100, Math.max(0, window.used_percent))
-            // 仪表上的窗口名用短写（5h / 7d），和状态列的「近 24h」同一种写法；全称在悬停提示与读屏名里
             const fullLabel = windowLabel(window.window_secs)
             const meterName = window.scope ? `${window.scope} · ${fullLabel}` : fullLabel
             const reset = !stale && window.resets_at !== null ? resetSpan(window.resets_at, now) : null
-            // 渠道配的百分比上限管的是账号窗口，按模型分的周限额不带。仪表最下一行只放剩余时长，具体重置时刻进悬停提示
             const limit = window.window_secs !== null && !window.scope ? limits?.[String(window.window_secs)] : undefined
             return (
-              <CompactMeter key={window.name} slot="quota-meter" label={window.scope ?? shortWindowLabel(window.window_secs)} title={meterName}
-                meterLabel={t('admin:channelQuotaMeterLabel', { window: meterName })} percent={stale ? null : percent}
+              <CompactMeter
+                key={window.name}
+                slot="quota-meter"
+                wideLabel={hasScoped}
+                label={window.scope ?? shortWindowLabel(window.window_secs)}
+                title={meterName}
+                meterLabel={t('admin:channelQuotaMeterLabel', { window: meterName })}
+                percent={stale ? null : percent}
                 marker={typeof limit === 'number' ? limit : undefined}
                 markerTitle={typeof limit === 'number' ? t('admin:channelQuotaLimitMarker', { percent: limit }) : undefined}
                 footerTitle={reset?.full}
-                footer={stale ? t('admin:channelQuotaRefreshing') : reset ? <>
-                  <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-2.5 w-2.5 shrink-0 opacity-80" />
-                  <span className="truncate">{reset.span}</span>
-                </> : '\u00a0'} />
+                footer={stale ? t('admin:channelQuotaRefreshing') : reset ? (
+                  <>
+                    <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-2.5 w-2.5 shrink-0 opacity-70" />
+                    <span className="truncate">{reset.span}</span>
+                  </>
+                ) : '\u00a0'}
+              />
             )
           })}
         </div>
@@ -144,16 +245,16 @@ export function QuotaMeters({ quota, limits, compact = false }: {
               </span>
             </div>
             <div
-              className="relative h-2 w-full overflow-hidden rounded-full bg-muted"
+              className="relative h-2 w-full overflow-hidden rounded-full bg-muted/85 ring-1 ring-inset ring-border/75 dark:bg-white/[0.07] dark:ring-white/[0.07]"
               role="progressbar"
               aria-label={t('admin:channelQuotaMeterLabel', { window: label })}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={stale ? undefined : percent}
             >
-              {!stale && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
+              {!stale && <div className={cn('h-full rounded-full shadow-[inset_0_1px_0_oklch(1_0_0/0.28)] transition-[width] duration-300', tone.bar)} style={{ width: `${percent}%` }} />}
               {typeof limit === 'number' && limit > 0 && limit < 100 && (
-                <div className="absolute inset-y-0 w-0.5 bg-foreground/60" style={{ left: `${limit}%` }}
+                <div className="absolute inset-y-0 w-[2px] bg-foreground/80 shadow-[0_0_0_1px_var(--card)]" style={{ left: `${limit}%` }}
                   title={t('admin:channelQuotaLimitMarker', { percent: limit })} />
               )}
             </div>

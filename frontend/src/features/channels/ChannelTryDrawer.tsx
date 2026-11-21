@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer } from '@/components/ui/drawer'
 import { Label, Textarea } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
-import { ProviderChip } from '@/features/channels/ProviderChip'
+import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import type { ChannelRow } from '@/features/channels/types'
 import { type ChatUsage, streamSse } from '@/features/playground/chat-stream'
 import { ApiError, getKey } from '@/lib/api'
@@ -86,11 +86,12 @@ export function ChannelTryDrawer({ channel, onClose }: { channel: ChannelRow; on
       open
       onClose={onClose}
       size="lg"
+      icon={<ProviderMark provider={channel.provider} />}
       title={t('admin:channelTryTitle', { name: shownName })}
       description={t('admin:channelTryDescription')}
       footer={
         <>
-          <Button variant="outline" onClick={onClose}>{t('common:close')}</Button>
+          <Button variant="ghost" onClick={onClose}>{t('common:close')}</Button>
           {phase === 'running' ? (
             <Button variant="outline" onClick={cancel}><Square className="h-4 w-4" />{t('admin:channelTryStop')}</Button>
           ) : (
@@ -99,50 +100,52 @@ export function ChannelTryDrawer({ channel, onClose }: { channel: ChannelRow; on
         </>
       }
     >
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <ProviderChip provider={channel.provider} />
-          <span className="text-muted-foreground tabular-nums">#{channel.id}</span>
-          <span className="font-medium">{shownName}</span>
+      <div className="form-sections">
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/80 bg-muted/25 px-3.5 py-2.5 text-sm">
+          <ProviderChip provider={channel.provider} compact />
+          <span className="font-mono text-xs text-muted-foreground tabular-nums">#{channel.id}</span>
+          <span className="font-semibold">{shownName}</span>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="try-model">{t('admin:channelTryModel')}</Label>
-            <Select id="try-model" value={model} onChange={setModel}
-              options={channel.models.map((m) => ({ value: m, label: m }))} />
-          </div>
-          {channel.keys.length > 1 && (
+        <div className="flex flex-col gap-3 rounded-[0.875rem] border border-border/80 bg-muted/25 p-4">
+          <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="try-key">{t('admin:channelTryAccount')}</Label>
-              <Select id="try-key" value={keyId} onChange={setKeyId} options={[
-                { value: '', label: t('admin:channelTryAnyAccount') },
-                ...channel.keys.map((k) => ({ value: String(k.id), label: k.account_label ? `#${k.id} · ${maskAccount(k.account_label)}` : `#${k.id}` })),
-              ]} />
+              <Label htmlFor="try-model">{t('admin:channelTryModel')}</Label>
+              <Select id="try-model" value={model} onChange={setModel}
+                options={channel.models.map((m) => ({ value: m, label: m }))} />
             </div>
-          )}
+            {channel.keys.length > 1 && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="try-key">{t('admin:channelTryAccount')}</Label>
+                <Select id="try-key" value={keyId} onChange={setKeyId} options={[
+                  { value: '', label: t('admin:channelTryAnyAccount') },
+                  ...channel.keys.map((k) => ({ value: String(k.id), label: k.account_label ? `#${k.id} · ${maskAccount(k.account_label)}` : `#${k.id}` })),
+                ]} />
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="try-prompt">{t('admin:channelTryPrompt')}</Label>
+            <Textarea id="try-prompt" rows={3} value={prompt} maxLength={4000}
+              onChange={(e) => setPrompt(e.target.value)} />
+          </div>
         </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="try-prompt">{t('admin:channelTryPrompt')}</Label>
-          <Textarea id="try-prompt" rows={3} value={prompt} maxLength={4000}
-            onChange={(e) => setPrompt(e.target.value)} />
-        </div>
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2.5 rounded-[0.875rem] border border-border/80 bg-muted/25 p-4">
           <div className="flex min-h-6 flex-wrap items-center gap-2 text-xs text-muted-foreground tabular-nums">
-            <span className="text-sm font-medium text-foreground">{t('admin:channelTryOutput')}</span>
+            <span className="text-[13px] font-semibold text-foreground">{t('admin:channelTryOutput')}</span>
             {status}
-            {timing.first !== null && <span>{t('admin:channelTryFirst', { ms: timing.first })}</span>}
-            {timing.total !== null && <span>{t('admin:channelTryTotal', { ms: timing.total })}</span>}
-            {usage !== null && <span>{t('admin:channelTryTokens', { input: usage.prompt_tokens, output: usage.completion_tokens })}</span>}
+            {timing.first !== null && <Badge variant="muted">{t('admin:channelTryFirst', { ms: timing.first })}</Badge>}
+            {timing.total !== null && <Badge variant="muted">{t('admin:channelTryTotal', { ms: timing.total })}</Badge>}
+            {usage !== null && <Badge variant="muted">{t('admin:channelTryTokens', { input: usage.prompt_tokens, output: usage.completion_tokens })}</Badge>}
           </div>
           <div
             role="log"
             aria-live="polite"
             aria-label={t('admin:channelTryOutput')}
-            className="min-h-40 max-h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted/40 p-3 text-sm leading-6"
+            className="min-h-40 max-h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border/85 bg-card p-3.5 text-sm leading-6 shadow-xs"
           >
-            {reasoning !== '' && <div className="mb-2 border-l-2 border-border pl-2 text-xs italic text-muted-foreground">{reasoning}</div>}
+            {reasoning !== '' && <div className="mb-2.5 rounded-md border-l-2 border-primary/40 bg-muted/40 px-2.5 py-1.5 text-xs italic text-muted-foreground">{reasoning}</div>}
             {output}
-            {phase === 'running' && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-primary/70 align-middle" aria-hidden />}
+            {phase === 'running' && <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse rounded-xs bg-primary/80 align-middle" aria-hidden />}
             {phase === 'idle' && output === '' && <span className="text-muted-foreground">{t('admin:channelTryIdle')}</span>}
             {error !== null && <p className="text-destructive">{error}</p>}
           </div>

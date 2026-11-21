@@ -72,7 +72,7 @@ export function Drawer({
           SIZE[size],
         )}
       >
-        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-6">
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border/85 bg-card/95 px-4 py-4 backdrop-blur-sm sm:px-6">
           <div className="flex min-w-0 flex-1 items-start gap-3">
             {icon}
             <div className="flex min-w-0 flex-col gap-1 pt-0.5">
@@ -82,7 +82,7 @@ export function Drawer({
               )}
             </div>
           </div>
-          <Button size="icon" variant="ghost" className="-mt-1 -mr-2 h-10 w-10 shrink-0" aria-label={t('common:close')} onClick={onClose}>
+          <Button size="icon" variant="ghost" className="-mt-1 -mr-2 h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground" aria-label={t('common:close')} onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </header>
@@ -90,7 +90,7 @@ export function Drawer({
         <div data-slot="drawer-body" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-gutter:stable] sm:px-6">{children}</div>
 
         {footer !== undefined && (
-          <footer className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border bg-card px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_16px_-12px_var(--muted-fg)] sm:px-6 [&>button]:min-h-11 [&>button]:flex-1 sm:[&>button]:min-h-9 sm:[&>button]:flex-none">
+          <footer className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border/85 bg-card/95 px-4 pt-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] shadow-[0_-4px_16px_-12px_var(--muted-fg)] backdrop-blur-sm sm:px-6 [&>button]:min-h-11 [&>button]:flex-1 sm:[&>button]:min-h-9 sm:[&>button]:flex-none">
             {footer}
           </footer>
         )}

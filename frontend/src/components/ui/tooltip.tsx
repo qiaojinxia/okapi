@@ -19,9 +19,8 @@ interface TooltipProps {
 /// 表格容器 `overflow-auto` 会把上方弹出的提示裁掉。
 /// 长说明与触发控件关联；靠近视口边缘时换行、翻转并限制位置。
 ///
-/// 外观是一张便签（index.css 的 `.note` / `.note-body`）：奶油黄的纸、顶部粘条、右下折角、暖褐投影，
-/// 颜色取自 `--note*` 令牌，暗色下是一张暖调的深色纸。外层负责定位与投影，内层是纸（要被切角，
-/// 投影才不会被一起切掉）。
+/// 外观采用克制的浮层卡片（index.css 的 `.note` / `.note-body`）：
+/// 与弹窗 / 菜单共用纸白与暗板表面、细边与轻投影，清晰易读且不过度装饰。
 export function Tooltip({ content, side = 'top', children, className }: TooltipProps) {
   const anchor = useRef<HTMLSpanElement>(null)
   const popup = useRef<HTMLSpanElement>(null)
@@ -120,7 +119,7 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
             style={{ visibility: 'hidden', left: 0, top: 0 }}
           >
             {/* max-h-[inherit]：定位代码把可用高度写在外层上，内层照这个高度滚动 */}
-            <span className="note-body block max-h-[inherit] overflow-auto overscroll-contain px-3 py-2 text-xs leading-5 whitespace-normal [overflow-wrap:anywhere]">
+            <span className="note-body block max-h-[inherit] overflow-auto overscroll-contain px-2.5 py-1.5 text-xs leading-[1.35] whitespace-normal [overflow-wrap:anywhere]">
               {content}
             </span>
           </span>,

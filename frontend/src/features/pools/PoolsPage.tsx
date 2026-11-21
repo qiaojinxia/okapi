@@ -84,9 +84,9 @@ export function PoolsPage() {
               <Th>{t('admin:poolStrategy')}</Th>
               <Th>{t('admin:poolFallback')}</Th>
               <Th>{t('common:description')}</Th>
-              <Th>{t('admin:poolChannels')}</Th>
+              <Th numeric>{t('admin:poolChannels')}</Th>
               <Th>{t('admin:poolRefs')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
@@ -96,7 +96,7 @@ export function PoolsPage() {
                 <Tr key={p.pool_code}>
                   <Td>
                     <span className="inline-flex items-center gap-1.5">
-                      <span className="font-mono text-xs">{p.pool_code}</span>
+                      <span className="font-mono text-xs font-medium">{p.pool_code}</span>
                       {p.builtin && <Badge variant="muted">{t('admin:poolBuiltin')}</Badge>}
                     </span>
                   </Td>
@@ -111,7 +111,7 @@ export function PoolsPage() {
                   <Td className="max-w-64 truncate text-xs text-muted-foreground">
                     {p.description ?? '—'}
                   </Td>
-                  <Td>
+                  <Td numeric>
                     {p.channel_count === 0 ? (
                       <Badge variant="destructive">{t('admin:poolNoChannel')}</Badge>
                     ) : (
@@ -130,27 +130,29 @@ export function PoolsPage() {
                           : '')}
                   </Td>
                   <Td>
-                    <ActionGroup label={t('common:actions')}>
-                      {/* 抽屉早就支持 pool 回填（策略/说明），页面却一直没给编辑入口 */}
-                      <IconButton
-                        icon={Pencil}
-                        label={t('common:edit')}
-                        onClick={() => setDrawer({ pool: p })}
-                      />
-                      <IconButton
-                        icon={Trash2}
-                        label={t('common:delete')}
-                        variant="destructive"
-                        disabled={refs > 0 || p.builtin}
-                        onClick={() =>
-                          confirm({
-                            title: t('common:confirmDeleteTitle', { name: p.pool_code }),
-                            description: t('admin:confirmPoolDelete'),
-                            onConfirm: () => remove.mutate(p.pool_code),
-                          })
-                        }
-                      />
-                    </ActionGroup>
+                    <div className="flex items-center justify-end">
+                      <ActionGroup label={t('common:actions')}>
+                        {/* 抽屉早就支持 pool 回填（策略/说明），页面却一直没给编辑入口 */}
+                        <IconButton
+                          icon={Pencil}
+                          label={t('common:edit')}
+                          onClick={() => setDrawer({ pool: p })}
+                        />
+                        <IconButton
+                          icon={Trash2}
+                          label={t('common:delete')}
+                          variant="destructive"
+                          disabled={refs > 0 || p.builtin}
+                          onClick={() =>
+                            confirm({
+                              title: t('common:confirmDeleteTitle', { name: p.pool_code }),
+                              description: t('admin:confirmPoolDelete'),
+                              onConfirm: () => remove.mutate(p.pool_code),
+                            })
+                          }
+                        />
+                      </ActionGroup>
+                    </div>
                   </Td>
                 </Tr>
               )

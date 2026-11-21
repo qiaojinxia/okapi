@@ -74,7 +74,7 @@ export function CatalogSuggestionCard({ suggestion, snapshot, canApplyPrice, onA
     {!limits && <div className="flex justify-end">
       <Button size="sm" variant="ghost" onClick={onApplySpecs}>{t('admin:modelCatalog.applySpecs')}</Button>
     </div>}
-    {s.deprecated && <p role="status" className="text-xs leading-5 text-amber-600 dark:text-amber-400">
+    {s.deprecated && <p role="status" className="text-xs leading-5 text-warning">
       {t(s.deprecated <= today ? 'admin:modelCatalog.deprecatedPast' : 'admin:modelCatalog.deprecatedFuture', { date: s.deprecated })}</p>}
     {s.notes.filter((note) => NOTE_CODES.includes(note.code)).map((note) => <p key={`${note.code}-${note.params?.above_tokens ?? ''}`} className="text-xs leading-5 text-muted-foreground">
       {t(`admin:modelCatalog.notes.${note.code}`, Object.fromEntries(NOTE_PARAMS.map((name) => [name, note.params?.[name] ?? '—'])))}

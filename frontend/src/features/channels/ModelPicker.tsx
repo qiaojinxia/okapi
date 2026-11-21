@@ -72,19 +72,19 @@ export function ModelPicker({
     return <ErrorState message={describeError(models.error)} onRetry={() => void models.refetch()} />
   }
   return (
-    <div className="flex min-w-0 flex-col gap-3 rounded-xl border border-border bg-muted/20 p-3">
+    <div className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/90 bg-card p-3.5 shadow-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Label>{t('admin:pickModels')}</Label>
+        <Label className="text-foreground/85">{t('admin:pickModels')}</Label>
         <Badge variant="default" aria-live="polite">{t('common:selectedCount', { n: value.length })}</Badge>
       </div>
       <SearchInput value={search} onChange={setSearch} placeholder={t('admin:pickModelsSearch')} aria-label={t('admin:pickModels')} />
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
-        <Button size="sm" variant={selectedOnly ? 'default' : 'ghost'} aria-pressed={selectedOnly}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 pb-2.5">
+        <Button size="xs" variant={selectedOnly ? 'default' : 'outline'} aria-pressed={selectedOnly}
           onClick={() => setSelectedOnly(!selectedOnly)}>{t('admin:onlySelectedModels')}</Button>
         <div className="flex flex-wrap gap-1">
-          <Button size="sm" variant="ghost" disabled={matched.every((m) => picked.has(m.model_name))}
+          <Button size="xs" variant="ghost" disabled={matched.every((m) => picked.has(m.model_name))}
             onClick={() => onChange([...new Set([...value, ...matchedNames])])}>{t('admin:selectMatchedModels')}</Button>
-          <Button size="sm" variant="ghost" disabled={!matched.some((m) => picked.has(m.model_name))}
+          <Button size="xs" variant="ghost" disabled={!matched.some((m) => picked.has(m.model_name))}
             onClick={() => onChange(value.filter((name) => !matchedNames.has(name)))}>{t('admin:clearMatchedModels')}</Button>
         </div>
       </div>

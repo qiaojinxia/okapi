@@ -66,7 +66,7 @@ export function SpendTrendView({ rows, total, days, window, metric, onMetricChan
     </p>
   </>
   return (
-    <Card id="portal-trend" className={cn('flex min-w-0 scroll-mt-4 flex-col gap-4 rounded-xl border-border px-5 py-5 shadow-none', className)}>
+    <Card id="portal-trend" className={cn('flex min-w-0 scroll-mt-4 flex-col gap-4 rounded-xl border-border px-5 py-5', className)}>
       {rows.length === 0 ? <>{head()}<EmptyState hint={t('portal:emptyUsageHint')} /></>
         : <TimeChart compact fill minPlotHeight={260} resetKey={metric} header={head} {...chart} partialBucket={partial} percent={ratio} format={format} unit={money ? 'USD' : ratio ? '%' : metric === 'latency' ? 'ms' : t(`charts:metric_${metric}`)} label={title} />}
       {note && <p className="text-xs leading-5 text-muted-foreground">{note}</p>}

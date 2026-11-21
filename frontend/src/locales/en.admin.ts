@@ -792,7 +792,6 @@ export default {
   channelColQuota: 'Quota / balance',
   channelColUsage30: 'Last 30 days',
   channelColSchedule: 'Routing',
-  channelColOps: 'Actions',
   channelModelCount: '{{n}} models',
   channelBalanceAt: 'checked {{at}}',
   channelAllProviders: 'All protocols',

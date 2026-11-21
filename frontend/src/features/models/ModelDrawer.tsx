@@ -296,7 +296,7 @@ export function ModelDrawer({
           {!conversion && <p role="alert" className="text-xs leading-5 text-destructive">{t('admin:modelSimple.priceInvalid')}</p>}
           {conversion?.approximate && <p role="status" className="rounded-lg bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
             {t('admin:modelSimple.priceRounded', { input: conversion.effective.input, output: conversion.effective.output })}</p>}
-          {benchmark && deviations.length > 0 && <div role="status" className="space-y-0.5 text-xs leading-5 text-amber-600 dark:text-amber-400" data-testid="price-deviation">
+          {benchmark && deviations.length > 0 && <div role="status" className="space-y-0.5 text-xs leading-5 text-warning" data-testid="price-deviation">
             {deviations.map((row) => <p key={row.lane}>{t('admin:modelCatalog.deviation', {
               lane: t(`admin:modelPriceOverview.${row.lane}`),
               source: t(benchmark.source === 'preset' ? 'admin:modelCatalog.deviationSourcePreset' : 'admin:modelCatalog.deviationSourceCatalog'),

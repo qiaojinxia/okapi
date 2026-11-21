@@ -7,20 +7,60 @@ import { cn } from '@/lib/utils'
 type Platform = { name: string; tone: string; brand?: string; icon?: LucideIcon }
 
 const PLATFORMS: Record<string, Platform> = {
-  anthropic: { name: 'Anthropic', brand: 'anthropic', tone: 'bg-orange-500/12 text-orange-800 dark:text-orange-300' },
-  anthropic_max: { name: 'Claude', brand: 'claude', tone: 'bg-orange-500/12 text-orange-800 dark:text-orange-300' },
-  openai: { name: 'OpenAI', brand: 'openai', tone: 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300' },
-  codex: { name: 'Codex', brand: 'openai', tone: 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300' },
-  gemini: { name: 'Gemini', brand: 'gemini', tone: 'bg-blue-500/12 text-blue-800 dark:text-blue-300' },
-  vertex: { name: 'Vertex', brand: 'vertexai', tone: 'bg-indigo-500/12 text-indigo-800 dark:text-indigo-300' },
-  azure: { name: 'Azure', brand: 'azure', tone: 'bg-sky-500/12 text-sky-800 dark:text-sky-300' },
-  bedrock: { name: 'Bedrock', brand: 'bedrock', tone: 'bg-amber-500/14 text-amber-800 dark:text-amber-300' },
-  openai_compat: { name: 'Compatible', icon: Plug, tone: 'bg-slate-500/12 text-slate-800 dark:text-slate-300' },
-  custom_pass: { name: 'Pass-through', icon: Route, tone: 'bg-zinc-500/12 text-zinc-800 dark:text-zinc-300' },
+  anthropic: {
+    name: 'Anthropic',
+    brand: 'anthropic',
+    tone: 'bg-orange-500/11 text-orange-800 ring-orange-500/18 dark:bg-orange-400/14 dark:text-orange-300 dark:ring-orange-400/22',
+  },
+  anthropic_max: {
+    name: 'Claude',
+    brand: 'claude',
+    tone: 'bg-orange-500/11 text-orange-800 ring-orange-500/18 dark:bg-orange-400/14 dark:text-orange-300 dark:ring-orange-400/22',
+  },
+  openai: {
+    name: 'OpenAI',
+    brand: 'openai',
+    tone: 'bg-emerald-500/11 text-emerald-800 ring-emerald-500/18 dark:bg-emerald-400/14 dark:text-emerald-300 dark:ring-emerald-400/22',
+  },
+  codex: {
+    name: 'Codex',
+    brand: 'openai',
+    tone: 'bg-emerald-500/11 text-emerald-800 ring-emerald-500/18 dark:bg-emerald-400/14 dark:text-emerald-300 dark:ring-emerald-400/22',
+  },
+  gemini: {
+    name: 'Gemini',
+    brand: 'gemini',
+    tone: 'bg-blue-500/11 text-blue-800 ring-blue-500/18 dark:bg-blue-400/14 dark:text-blue-300 dark:ring-blue-400/22',
+  },
+  vertex: {
+    name: 'Vertex',
+    brand: 'vertexai',
+    tone: 'bg-indigo-500/11 text-indigo-800 ring-indigo-500/18 dark:bg-indigo-400/14 dark:text-indigo-300 dark:ring-indigo-400/22',
+  },
+  azure: {
+    name: 'Azure',
+    brand: 'azure',
+    tone: 'bg-sky-500/11 text-sky-800 ring-sky-500/18 dark:bg-sky-400/14 dark:text-sky-300 dark:ring-sky-400/22',
+  },
+  bedrock: {
+    name: 'Bedrock',
+    brand: 'bedrock',
+    tone: 'bg-amber-500/12 text-amber-800 ring-amber-500/20 dark:bg-amber-400/14 dark:text-amber-300 dark:ring-amber-400/22',
+  },
+  openai_compat: {
+    name: 'Compatible',
+    icon: Plug,
+    tone: 'bg-slate-500/10 text-slate-700 ring-slate-500/16 dark:bg-slate-400/12 dark:text-slate-300 dark:ring-slate-400/20',
+  },
+  custom_pass: {
+    name: 'Pass-through',
+    icon: Route,
+    tone: 'bg-zinc-500/10 text-zinc-700 ring-zinc-500/16 dark:bg-zinc-400/12 dark:text-zinc-300 dark:ring-zinc-400/20',
+  },
 }
 
 const platformOf = (provider: string): Platform =>
-  PLATFORMS[provider] ?? { name: provider, icon: Plug, tone: 'bg-muted text-muted-foreground' }
+  PLATFORMS[provider] ?? { name: provider, icon: Plug, tone: 'bg-muted text-muted-foreground ring-border/60' }
 
 /// 标志按形状遮罩并填当前文字色：品牌、胶囊和暗色主题始终使用同一组语义色。
 function BrandMark({ brand, className }: { brand: string; className?: string }) {
@@ -39,7 +79,9 @@ export function ProviderMark({ provider, size = 'md', className }: { provider: s
       aria-hidden
       data-provider={provider}
       className={cn(
-        'inline-flex shrink-0 items-center justify-center border border-current/10 shadow-[inset_0_1px_0_oklch(1_0_0/0.28)]',
+        'relative inline-flex shrink-0 items-center justify-center ring-1 ring-inset transition-transform duration-150',
+        'bg-gradient-to-b from-white/45 to-transparent shadow-[inset_0_1px_0_oklch(1_0_0/0.5),0_1px_2px_oklch(0.24_0.015_70/0.06)]',
+        'dark:from-white/[0.06] dark:shadow-[inset_0_1px_0_oklch(1_0_0/0.12),0_1px_2px_oklch(0_0_0/0.25)]',
         size === 'sm' ? 'h-9 w-9 rounded-[10px]' : 'h-10 w-10 rounded-xl',
         platform.tone,
         className,
@@ -94,7 +136,7 @@ export function ProviderChip({ provider, plans, compact = false, className }: { 
     <span
       data-slot="provider-chip"
       className={cn(
-        'inline-flex shrink-0 items-center whitespace-nowrap text-[11px] leading-4',
+        'inline-flex shrink-0 items-center whitespace-nowrap text-[11px] leading-4 ring-1 ring-inset',
         compact ? 'h-[18px] rounded-[5px] px-1.5 font-medium' : 'h-[22px] rounded-full px-2.5 font-semibold',
         platform.tone,
         className,

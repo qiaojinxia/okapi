@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { teamRoleLabel, type TeamRow } from '@/features/teams/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { Pagination } from '@/components/ui/pagination'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
@@ -70,13 +70,16 @@ export function TeamListCard({
               </Td>
               <Td numeric>{tm.member_count}</Td>
               <Td numeric>{formatMoney(tm.balance_micro, locale)}</Td>
-              <Td className="text-right">
-                <IconButton
-                  icon={Settings2}
-                  label={t('team:manage')}
-                  variant="outline"
-                  onClick={() => onPick(tm.team_id)}
-                />
+              <Td>
+                <div className="flex items-center justify-end">
+                  <ActionGroup label={t('common:actions')}>
+                    <IconButton
+                      icon={Settings2}
+                      label={t('team:manage')}
+                      onClick={() => onPick(tm.team_id)}
+                    />
+                  </ActionGroup>
+                </div>
               </Td>
             </Tr>
           ))}

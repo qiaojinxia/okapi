@@ -148,7 +148,7 @@ export function PublicPricingPage() {
             <label className="flex min-h-9 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-muted-foreground"><input type="checkbox" className="h-4 w-4 accent-primary" checked={!!search.available} onChange={(e) => patch({ available: e.target.checked || undefined })} />{t('catalog:onlyAvailable')}</label>
             {active && <Button size="sm" variant="ghost" onClick={clear}><X className="h-3.5 w-3.5" />{t('catalog:clearFilters')}</Button>}
           </div>
-          <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-border bg-card p-3 sm:p-4">
+          <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-border bg-card p-3 shadow-card sm:p-4">
             <div className="flex min-w-0 max-w-full flex-col gap-1.5"><Label htmlFor="catalog-group">{t('pricing:viewAsGroup')}</Label>
               <Select id="catalog-group" className="w-64 max-w-full" value={group} onChange={(group) => patch({ group: group || undefined })} placeholder={t('pricing:baseGroup')}
                 disabled={!pricing.isSuccess} options={groups.map((g) => ({ value: g.code, label: `${groupName(g)} ×${formatRatio(g.ratio)}` }))} /></div>
@@ -170,7 +170,7 @@ export function PublicPricingPage() {
               </TBody></Table> : <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {shown.map((model) => <ModelCard key={model.model} model={model} groups={groups} group={group} factor={factor} unit={unit} onOpen={() => patch({ model: model.model, tab: undefined }, false)} onExamples={() => patch({ model: model.model, tab: 'code' }, false)} {...compareProps(model)} />)}
               </div>}
-            {total > 0 && <div className="mt-6 flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
+            {total > 0 && <div className="mt-6 flex flex-col gap-3 rounded-xl border border-border bg-card p-4 shadow-card">
               <div className="flex items-center justify-between gap-2"><Label htmlFor="catalog-page-size">{t('catalog:pageSize')}</Label><Select id="catalog-page-size" value={String(pageSize)} onChange={(size) => patch({ pageSize: size === '24' ? undefined : Number(size) as 12 | 48 })} options={[12, 24, 48].map((n) => ({ value: String(n), label: t('catalog:perPage', { n }) }))} /></div>
               <Pagination total={total} limit={pageSize} offset={offset} onOffset={changePage} />
             </div>}

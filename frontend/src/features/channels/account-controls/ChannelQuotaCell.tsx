@@ -6,7 +6,7 @@ import { useAccountCapabilities, useAccountUsage } from './api'
 import type { UsageResponse } from './api'
 import { CompactMeter, QuotaMeters, useResetSpan } from './QuotaMeters'
 
-/// 列表行里的额度：订阅渠道是上游各窗口的用量条（配了百分比上限的窗口带一道刻度），
+/// 列表卡片里的额度区：订阅渠道是上游各窗口的用量条（配了百分比上限的窗口带一道刻度），
 /// 设了成本 / Token 上限的渠道再加「已用 / 上限」的仪表。只有这两种情况才查询，与编辑抽屉共用同一份查询缓存。
 /// 都没有、或还没有数据时显示 `fallback`（这一格别的内容，或一个占位符）。
 export function ChannelQuotaCell({ channelId, provider, control, enabled = true, fallback = null }: {
@@ -31,10 +31,16 @@ export function ChannelQuotaCell({ channelId, provider, control, enabled = true,
     ? <QuotaMeters quota={quota} limits={control?.quota_limits} compact /> : null
   const caps = enabled && capped && usage.data ? <LocalCapMeters control={control} usage={usage.data} /> : null
   if (!meters && !caps) return <>{fallback}</>
-  return <>{meters}{caps}</>
+  return (
+    <div className="flex w-full min-w-0 flex-col gap-2.5">
+      {meters}
+      {meters && caps && <div className="h-px bg-border/50" />}
+      {caps}
+    </div>
+  )
 }
 
-/// 成本 / Token 上限的仪表：已用占上限的百分比，下面一行是「已用 / 上限」；到了上限换成何时恢复。
+/// 成本 / Token 上限的仪表：每项独占一行竖向排列，避免「已用 / 上限」与恢复倒计时被裁断。
 function LocalCapMeters({ control, usage }: { control?: Partial<AccountControl>; usage: UsageResponse }) {
   const { t, i18n } = useTranslation()
   const resetSpan = useResetSpan()
@@ -43,7 +49,7 @@ function LocalCapMeters({ control, usage }: { control?: Partial<AccountControl>;
     control?.local_cost && usage.cost_usage ? {
       key: 'cost', name: t('admin:channelCapCost'), period: control.local_cost.period ?? 'total',
       used: usage.cost_usage.cost_micro, cap: control.local_cost.cap_micro, ends: usage.cost_usage.window_end,
-      // 和同一格里的上游余额一个写法：窄符号、两位小数，仪表下面那一行放得下
+      // 和同一格里的上游余额一个写法：窄符号、两位小数，仪表行里清晰易读
       text: (n: number) => formatUpstreamBalance(n, 'USD', i18n.language, true),
     } : null,
     control?.local_tokens && usage.token_usage ? {
@@ -54,19 +60,30 @@ function LocalCapMeters({ control, usage }: { control?: Partial<AccountControl>;
   ].filter((row) => row !== null)
   if (rows.length === 0) return null
   return (
-    <div data-slot="cap-meters" className="grid w-full max-w-[26rem] auto-cols-fr grid-flow-col gap-x-3 min-[1420px]:gap-x-4">
+    <div data-slot="cap-meters" className="flex w-full min-w-0 flex-col gap-2.5">
       {rows.map((row) => {
         const reached = row.used >= row.cap
         const percent = reached ? 100 : Math.max(0, Math.floor(row.used / row.cap * 100))
         const label = `${row.name} · ${t(`admin:channelPeriodShort_${row.period}`)}`
         const amount = `${row.text(row.used)} / ${row.text(row.cap)}`
         const reset = reached && row.ends ? resetSpan(Date.parse(row.ends) / 1000) : null
-        return <CompactMeter key={row.key} slot="cap-meter" label={label} title={label}
-          meterLabel={t('admin:channelCapMeterLabel', { name: label })} percent={percent}
-          footerTitle={reset ? `${amount} · ${reset.full}` : amount}
-          footer={<span className={reached ? 'truncate font-medium text-destructive' : 'truncate'}>
-            {!reached ? amount : reset ? t('admin:channelCapReachedUntil', { span: reset.span }) : t('admin:channelCapReached')}
-          </span>} />
+        return (
+          <CompactMeter
+            key={row.key}
+            slot="cap-meter"
+            layout="stacked"
+            label={label}
+            title={label}
+            meterLabel={t('admin:channelCapMeterLabel', { name: label })}
+            percent={percent}
+            footerTitle={reset ? `${amount} · ${reset.full}` : amount}
+            footer={
+              <span className={reached ? 'truncate font-medium text-destructive' : 'truncate'}>
+                {!reached ? amount : reset ? t('admin:channelCapReachedUntil', { span: reset.span }) : t('admin:channelCapReached')}
+              </span>
+            }
+          />
+        )
       })}
     </div>
   )

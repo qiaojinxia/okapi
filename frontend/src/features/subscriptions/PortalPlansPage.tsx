@@ -200,7 +200,7 @@ function CurrentSubscription({
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-base font-semibold">{sub.display_name}</span>
             <Badge variant="muted" className="font-mono">{sub.plan_code}</Badge>
-            <Badge variant="success">{t('portal:subStatus_1')}</Badge>
+            <Badge variant="success" dot>{t('portal:subStatus_1')}</Badge>
             {sub.group_code !== null && (
               <Badge variant="info">{t('portal:planWithGroup', { group: sub.group_code })}</Badge>
             )}

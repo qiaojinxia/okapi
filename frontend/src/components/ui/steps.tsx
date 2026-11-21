@@ -53,11 +53,11 @@ export function Steps({
               >
                 <span
                   className={cn(
-                    'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-medium tabular-nums transition-colors',
+                    'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold tabular-nums transition-[color,background-color,box-shadow]',
                     isCurrent
-                      ? 'bg-primary text-primary-foreground'
+                      ? 'bg-primary text-primary-foreground shadow-[0_2px_8px_-2px_var(--primary)]'
                       : done
-                        ? 'bg-primary/12 text-primary'
+                        ? 'bg-primary/12 text-primary ring-1 ring-inset ring-primary/20'
                         : 'border border-border bg-card text-muted-foreground',
                   )}
                 >

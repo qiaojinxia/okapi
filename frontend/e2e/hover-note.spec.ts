@@ -79,13 +79,12 @@ async function paperColors(page: Page, selector: string) {
 }
 
 for (const theme of ['light', 'dark'] as const) {
-  test(`悬停提示是一张便签 ${theme}：纸色取自令牌、字清晰、右下折角、暖色投影`, async ({ page }) => {
+  test(`悬停提示采用简约浮层卡片 ${theme}：底色取自令牌、字清晰、无折角装饰、轻投影`, async ({ page }) => {
     await prepare(page, theme)
     await page.goto('/portal/keys')
     await page.locator('[data-slot="key-usage-sparkline"]').first().focus()
     const tip = page.getByRole('tooltip')
     await expect(tip).toContainText('2,390')
-    // 外层负责定位与投影，内层是纸
     await expect(tip).toHaveClass(/\bnote\b/)
     const body = tip.locator('.note-body')
     await expect(body).toHaveCount(1)
@@ -93,34 +92,33 @@ for (const theme of ['light', 'dark'] as const) {
     const colors = await paperColors(page, '[role="tooltip"] .note-body')
     expect(colors.paper).toEqual(colors.token)
     expect(colors.border).toEqual(colors.borderToken)
-    expect(colors.contrast, '字与纸的对比度').toBeGreaterThanOrEqual(10)
+    expect(colors.contrast, '字与底色的对比度').toBeGreaterThanOrEqual(10)
     if (theme === 'light') {
-      // 朴素：比页面纸面黄一档就够，不是荧光便利贴
-      expect(colors.yellow - colors.pageYellow, '浅色便签比页面纸面更暖').toBeGreaterThanOrEqual(8)
-      expect(colors.yellow, '但不能黄得抢眼').toBeLessThanOrEqual(30)
-      expect(colors.paperLuminance, '浅色便签是亮纸').toBeGreaterThanOrEqual(0.85)
+      // 简约白底浮层，不再是偏黄便签
+      expect(colors.yellow, '浅色浮层保持中性纸白').toBeLessThanOrEqual(8)
+      expect(colors.paperLuminance, '浅色浮层是亮底').toBeGreaterThanOrEqual(0.9)
     } else {
-      expect(colors.paperLuminance, '暗色便签是深色纸').toBeLessThanOrEqual(0.12)
-      expect(colors.paperLuminance, '暗色便签比卡片亮一档才浮得起来').toBeGreaterThan(colors.cardLuminance)
+      expect(colors.paperLuminance, '暗色浮层是深底').toBeLessThanOrEqual(0.12)
+      expect(colors.paperLuminance, '暗色浮层比卡片亮一档才浮得起来').toBeGreaterThan(colors.cardLuminance)
     }
-    // 右下折角：内层被切掉一个小三角，外层 ::after 画翻过来的那一角；投影用 drop-shadow 才不会被切角带走
+    // 简约圆角与物理投影：无裁切折角与 ::after 翻角
     const shape = await tip.evaluate((root) => {
       const body = root.querySelector('.note-body')!
       const after = getComputedStyle(root, '::after')
+      const bodyStyle = getComputedStyle(body)
       return {
-        clip: getComputedStyle(body).clipPath,
-        filter: getComputedStyle(root).filter,
-        curl: { content: after.content, width: after.width, height: after.height },
-        radius: getComputedStyle(body).borderTopLeftRadius,
+        clip: bodyStyle.clipPath,
+        shadow: bodyStyle.boxShadow,
+        curl: after.content,
+        radius: bodyStyle.borderTopLeftRadius,
         overflowX: root.scrollWidth <= root.clientWidth,
       }
     })
-    expect(shape.clip).toContain('polygon')
-    expect(shape.filter).toContain('drop-shadow')
-    expect(shape.curl).toEqual({ content: '""', width: '8px', height: '8px' })
-    expect(shape.radius).toBe('4px')
+    expect(shape.clip).toBe('none')
+    expect(shape.shadow).not.toBe('none')
+    expect(shape.curl).toBe('none')
+    expect(shape.radius).toBe('8px')
     expect(shape.overflowX).toBe(true)
-    // 位置与可读性不受外观影响：整块在窗口内
     const box = (await tip.boundingBox())!
     expect(box.x).toBeGreaterThanOrEqual(0)
     expect(box.x + box.width).toBeLessThanOrEqual(1280)
@@ -128,11 +126,10 @@ for (const theme of ['light', 'dark'] as const) {
   })
 }
 
-test('图表悬浮卡与 recharts 默认内容共用同一张便签：内联的白底灰边被全局样式压掉', async ({ page }) => {
+test('图表悬浮卡与 recharts 默认内容共用同一简约浮层：内联的白底灰边被全局样式统一', async ({ page }) => {
   await prepare(page, 'light')
   await page.goto('/portal/keys')
   await expect(page.locator('[data-slot="key-usage-sparkline"]').first()).toBeVisible()
-  // 没有真图表可悬停：按 recharts 默认的 DOM 与内联样式摆一张
   await page.evaluate(() => {
     document.body.insertAdjacentHTML('beforeend', `
       <div class="recharts-tooltip-wrapper" id="fake-wrapper" style="position:fixed;left:40px;top:300px;visibility:visible;pointer-events:none">
@@ -142,16 +139,21 @@ test('图表悬浮卡与 recharts 默认内容共用同一张便签：内联的�
       </div>`)
   })
   const colors = await paperColors(page, '#fake-content')
-  expect(colors.paper, '白底被换成便签纸').toEqual(colors.token)
-  expect(colors.border, '灰边被换成便签边').toEqual(colors.borderToken)
-  const shape = await page.evaluate(() => ({
-    clip: getComputedStyle(document.querySelector('#fake-content')!).clipPath,
-    filter: getComputedStyle(document.querySelector('#fake-wrapper')!).filter,
-    curl: getComputedStyle(document.querySelector('#fake-wrapper')!, '::after').width,
-  }))
-  expect(shape.clip).toContain('polygon')
-  expect(shape.filter).toContain('drop-shadow')
-  expect(shape.curl).toBe('8px')
+  expect(colors.paper, '底色由全局令牌统一').toEqual(colors.token)
+  expect(colors.border, '边框由全局令牌统一').toEqual(colors.borderToken)
+  const shape = await page.evaluate(() => {
+    const content = getComputedStyle(document.querySelector('#fake-content')!)
+    return {
+      clip: content.clipPath,
+      shadow: content.boxShadow,
+      curl: getComputedStyle(document.querySelector('#fake-wrapper')!, '::after').content,
+      radius: content.borderTopLeftRadius,
+    }
+  })
+  expect(shape.clip).toBe('none')
+  expect(shape.shadow).not.toBe('none')
+  expect(shape.curl).toBe('none')
+  expect(shape.radius).toBe('8px')
 })
 
 test('悬停提示不再有深色小条：源码里没有 bg-foreground + text-background 的组合', () => {

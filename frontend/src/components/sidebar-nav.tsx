@@ -127,7 +127,7 @@ export function SidebarNav({ nav, rail, pathname, onExpand, onNavigate }: {
             {group.title !== undefined && (rail ? (
               <span className="mx-2 mb-1 h-px bg-sidebar-border" aria-hidden />
             ) : (
-              <span className="mb-1 px-3 text-[11px] font-semibold tracking-wider text-muted-foreground/80 uppercase">{group.title}</span>
+              <span className="mb-1 px-3 text-[10.5px] font-semibold tracking-[0.07em] text-muted-foreground/70 uppercase">{group.title}</span>
             ))}
             {group.items.map((item) => <NavLink key={item.to} item={item} rail={rail} onClick={finish} />)}
           </div>
@@ -149,13 +149,14 @@ export function NavLink({ item, rail, onClick }: { item: NavItem; rail: boolean;
         onClick={onClick}
         activeOptions={{ exact: true }}
         className={cn(
-          'relative flex min-h-11 w-full items-center gap-2.5 rounded-md py-2 text-sm text-sidebar-foreground/85 transition-colors outline-none md:min-h-9',
-          'hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60',
+          'relative flex min-h-11 w-full items-center gap-2.5 rounded-lg py-2 text-sm text-sidebar-foreground/85 transition-[color,background-color,box-shadow] duration-150 outline-none md:min-h-9',
+          'hover:bg-sidebar-accent/80 hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60',
           rail ? 'justify-center px-0' : 'px-3',
         )}
         activeProps={{
           'aria-current': 'page',
-          className: 'bg-sidebar-accent font-medium text-foreground before:absolute before:top-2 before:bottom-2 before:left-0 before:w-0.5 before:rounded-full before:bg-primary',
+          className:
+            'bg-card font-medium text-foreground shadow-[0_1px_2px_oklch(0.24_0.015_70/0.06)] ring-1 ring-inset ring-border/75 dark:bg-sidebar-accent dark:shadow-[inset_0_1px_0_oklch(1_0_0/0.05)] dark:ring-border/80 [&>svg]:text-primary [&>svg]:opacity-100 before:absolute before:top-2 before:bottom-2 before:left-1 before:w-[3px] before:rounded-full before:bg-primary',
         }}
       >
         {item.icon ? <item.icon aria-hidden className="h-4 w-4 shrink-0 opacity-90" /> : <span className="h-4 w-4 shrink-0" />}

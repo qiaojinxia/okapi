@@ -231,7 +231,7 @@ function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => 
           activeProps={{ className: 'bg-primary/10 text-primary', 'aria-current': 'page' }}
           className={cn('flex min-h-12 w-full items-center gap-3 rounded-lg outline-none transition-colors hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-primary/40', rail ? 'justify-center' : 'px-2 py-2')}
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-semibold text-primary">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary/18 to-chart-4/18 text-xs font-semibold text-primary ring-1 ring-inset ring-primary/15">
             {initial}
           </span>
           {!rail && (
@@ -312,10 +312,11 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
 
       {me.data && (
         <div className="hidden items-center gap-1.5 sm:flex">
-          <Badge variant="outline" className="h-7 bg-card px-2.5 font-medium tabular-nums">
-            {t('common:balance')} {formatMoney(me.data.balance_micro, i18n.language)}
+          <Badge variant="outline" className="h-7 gap-1.5 bg-card px-2.5 font-medium shadow-xs tabular-nums">
+            <span className="font-normal text-muted-foreground">{t('common:balance')}</span>{' '}
+            <span className="font-semibold text-foreground">{formatMoney(me.data.balance_micro, i18n.language)}</span>
           </Badge>
-          <Badge variant="muted" className="h-7 px-2.5">
+          <Badge variant="muted" className="h-7 px-2.5 font-mono text-[11px]">
             {me.data.group}
           </Badge>
         </div>

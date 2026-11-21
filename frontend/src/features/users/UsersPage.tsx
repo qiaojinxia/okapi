@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { EmptyState } from '@/components/ui/state'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
@@ -122,17 +122,17 @@ export function UsersPage() {
               <Th>{t('admin:usersEmail')}</Th>
               <Th>{t('admin:usersRole')}</Th>
               <Th>{t('common:status')}</Th>
-              <Th>{t('common:balance')}</Th>
+              <Th numeric>{t('common:balance')}</Th>
               {usage.enabled && <Th>{t('admin:usageColumn')}</Th>}
-              <Th>{t('admin:usersMultiplier')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th numeric>{t('admin:usersMultiplier')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((u) => (
               <Tr key={u.id}>
-                <Td>{u.id}</Td>
-                <Td className="max-w-48 truncate">{u.username}</Td>
+                <Td className="font-mono text-muted-foreground tabular-nums">{u.id}</Td>
+                <Td className="max-w-48 truncate font-medium">{u.username}</Td>
                 <Td className="max-w-48 truncate text-xs text-muted-foreground">
                   {u.email ?? '—'}
                 </Td>
@@ -143,11 +143,11 @@ export function UsersPage() {
                   </Badge>
                 </Td>
                 <Td>
-                  <Badge variant={u.status === 1 ? 'success' : 'destructive'}>
+                  <Badge dot variant={u.status === 1 ? 'success' : 'destructive'}>
                     {u.status === 1 ? t('common:enabled') : t('common:disabled')}
                   </Badge>
                 </Td>
-                <Td>{formatMoney(u.balance_micro, i18n.language)}</Td>
+                <Td numeric>{formatMoney(u.balance_micro, i18n.language)}</Td>
                 {usage.enabled && (
                   <Td>
                     <UsageCell
@@ -157,14 +157,17 @@ export function UsersPage() {
                     />
                   </Td>
                 )}
-                <Td className="font-mono text-xs">×{u.price_multiplier}</Td>
+                <Td numeric className="font-mono text-xs">×{u.price_multiplier}</Td>
                 <Td>
-                  <IconButton
-                    icon={Settings2}
-                    label={t('admin:usersManage')}
-                    variant="outline"
-                    onClick={() => setSelected(u.id)}
-                  />
+                  <div className="flex items-center justify-end">
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton
+                        icon={Settings2}
+                        label={t('admin:usersManage')}
+                        onClick={() => setSelected(u.id)}
+                      />
+                    </ActionGroup>
+                  </div>
                 </Td>
               </Tr>
             ))}

@@ -70,6 +70,7 @@ export function PlansPage() {
       <PageHeader
         title={t('admin:planListTitle')}
         description={t('admin:planHint')}
+        meta={plans.data && t('common:totalCount', { n: plans.data.total })}
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
@@ -106,14 +107,14 @@ export function PlansPage() {
               <Th numeric>{t('admin:planValidDays')}</Th>
               <Th numeric>{t('admin:planCodeCount')}</Th>
               <Th numeric>{t('admin:planSubscribers')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((p) => (
               <Tr key={p.id}>
-                <Td className="font-mono text-xs">{p.plan_code}</Td>
-                <Td>{p.display_name}</Td>
+                <Td className="font-mono text-xs font-medium">{p.plan_code}</Td>
+                <Td className="font-medium">{p.display_name}</Td>
                 <Td>
                   <Badge variant={p.kind === 1 ? 'default' : 'muted'}>
                     {t(`admin:planKind_${p.kind}`)}
@@ -140,25 +141,27 @@ export function PlansPage() {
                 <Td numeric>{p.code_count}</Td>
                 <Td numeric>{p.kind === 1 ? p.active_subscribers : '—'}</Td>
                 <Td>
-                  <ActionGroup label={t('common:actions')}>
-                    <IconButton
-                      icon={Pencil}
-                      label={t('common:edit')}
-                      onClick={() => setDrawer(p)}
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: p.plan_code }),
-                          description: t('common:confirmPlanDelete'),
-                          onConfirm: () => remove.mutate(p.plan_code),
-                        })
-                      }
-                    />
-                  </ActionGroup>
+                  <div className="flex items-center justify-end">
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton
+                        icon={Pencil}
+                        label={t('common:edit')}
+                        onClick={() => setDrawer(p)}
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label={t('common:delete')}
+                        variant="destructive"
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: p.plan_code }),
+                            description: t('common:confirmPlanDelete'),
+                            onConfirm: () => remove.mutate(p.plan_code),
+                          })
+                        }
+                      />
+                    </ActionGroup>
+                  </div>
                 </Td>
               </Tr>
             ))}

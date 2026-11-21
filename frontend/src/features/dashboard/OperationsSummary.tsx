@@ -108,7 +108,7 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
       {rate && meter && <div aria-hidden className="mt-1 h-1 overflow-hidden rounded-full bg-muted"><div className={cn('h-full rounded-full', rate.tone === 'good' ? 'bg-success' : rate.tone === 'warn' ? 'bg-warning' : 'bg-destructive')} style={{ width: `${rate.pct}%` }} /></div>}
     </div>
   }
-  return <section className="min-w-0 overflow-hidden rounded-xl border border-border bg-card" aria-label={t('admin:dashboardOperations')} aria-busy={query.isPending}>
+  return <section className="min-w-0 overflow-hidden rounded-xl border border-border bg-card shadow-card" aria-label={t('admin:dashboardOperations')} aria-busy={query.isPending}>
     <header className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-border/70 px-3.5 py-1.5">
       <h2 className="text-[15px] font-semibold">{t('admin:dashboardQuality')}</h2>
       <StatisticsStatus query={query} />

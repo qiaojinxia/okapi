@@ -63,7 +63,7 @@ export function Segmented<T extends string | number>({
       aria-label={ariaLabel}
       onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(value) }}
       className={cn(
-        'inline-flex min-w-0 max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted/60 p-0.5 scrollbar-none',
+        'inline-flex min-w-0 max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-border/85 bg-muted/65 p-0.5 shadow-[inset_0_1px_2px_oklch(0_0_0/0.04)] scrollbar-none dark:shadow-[inset_0_1px_2px_oklch(0_0_0/0.25)]',
         className,
       )}
     >
@@ -93,7 +93,7 @@ export function Segmented<T extends string | number>({
               'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60 disabled:pointer-events-none disabled:opacity-50',
               size === 'sm' ? 'h-11 px-2.5 text-xs md:h-7' : size === 'field' ? 'h-11 px-3 text-sm md:h-7.5' : 'h-11 px-3 text-sm md:h-8',
               active
-                ? 'bg-card text-foreground shadow-card'
+                ? 'bg-card text-foreground shadow-xs ring-1 ring-inset ring-border/55 dark:ring-white/[0.08]'
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >

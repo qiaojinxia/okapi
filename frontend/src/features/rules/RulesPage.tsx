@@ -184,7 +184,7 @@ export function RulesPage() {
               const typeKey = TYPE_LABEL[r.rule_type as keyof typeof TYPE_LABEL]
               return (
                 <Tr key={r.rule_code}>
-                  <Td className="truncate font-mono text-xs" title={r.rule_code}>{r.rule_code}</Td>
+                  <Td className="truncate font-mono text-xs font-medium" title={r.rule_code}>{r.rule_code}</Td>
                   <Td>
                     <div className="flex min-w-0 flex-col items-start gap-0.5">
                       <Badge className="min-h-5 py-0">
@@ -201,7 +201,7 @@ export function RulesPage() {
                   </Td>
                   <Td numeric>{r.priority}</Td>
                   <Td className="text-center">
-                    <Badge variant={r.enabled ? 'success' : 'muted'}>
+                    <Badge dot variant={r.enabled ? 'success' : 'muted'}>
                       {r.enabled ? t('common:enabled') : t('common:disabled')}
                     </Badge>
                   </Td>

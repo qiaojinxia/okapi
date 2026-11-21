@@ -14,7 +14,7 @@ export function ActionGroup({ label, className, ...props }: ActionGroupProps) {
       role="group"
       aria-label={label}
       className={cn(
-        'inline-flex shrink-0 items-center gap-0.5 rounded-lg md:border md:border-border/70 md:bg-background/55 md:p-0.5 md:shadow-xs',
+        'inline-flex shrink-0 items-center gap-0.5 rounded-lg transition-[border-color,background-color,box-shadow] duration-150 md:border md:border-border/75 md:bg-muted/35 md:p-0.5 md:shadow-[inset_0_1px_0_oklch(1_0_0/0.55)] dark:md:bg-background/55 dark:md:shadow-none group-hover/row:md:border-border group-hover/row:md:bg-card group-hover/row:md:shadow-xs',
         '[&_[data-slot=button]]:rounded-md',
         className,
       )}

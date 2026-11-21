@@ -90,7 +90,7 @@ export function DistributionSummary({ days, range, view, onViewChange, modelMetr
   const { t } = useTranslation()
   const tabsId = useId()
   const views: DistributionView[] = ['model', 'channel', 'tokens']
-  return <section data-slot="dashboard-distribution" role="region" aria-label={t('admin:dashboardDistribution')} className="flex min-w-0 flex-[1_1_20rem] flex-col gap-3 rounded-xl border border-border bg-card p-3.5">
+  return <section data-slot="dashboard-distribution" role="region" aria-label={t('admin:dashboardDistribution')} className="flex min-w-0 flex-[1_1_20rem] flex-col gap-3 rounded-xl border border-border bg-card p-3.5 shadow-card">
     <div className="flex flex-wrap items-center gap-3">
       <h2 className="flex min-h-[34px] items-center text-[15px] font-semibold">{t('admin:dashboardDistribution')}</h2>
       <span className="flex-1" />

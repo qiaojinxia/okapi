@@ -29,7 +29,7 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-info: var(--info);
-  /* 便签：悬停提示与图表悬浮卡的纸色（见下方 .note） */
+  /* 悬浮提示卡：悬停提示与图表悬浮卡的表面色（见下方 .note） */
   --color-note: var(--note);
   --color-note-foreground: var(--note-fg);
   --color-note-border: var(--note-border);
@@ -54,10 +54,10 @@
   --radius-lg: 0.75rem;
   --radius-xl: 1rem;
 
-  /* 阴影按层级：卡片一档、浮层两档、抽屉三档。暗色下阴影几乎不可见，改靠边框分层 */
-  --shadow-card: 0 1px 2px 0 oklch(0 0 0 / 0.04), 0 1px 3px 0 oklch(0 0 0 / 0.06);
-  --shadow-popover: 0 4px 16px -4px oklch(0 0 0 / 0.12), 0 2px 6px -2px oklch(0 0 0 / 0.08);
-  --shadow-drawer: -12px 0 40px -12px oklch(0 0 0 / 0.25);
+  /* 阴影按层级：卡片一档、浮层两档、抽屉三档。亮色用暖褐微投影承托纸面；暗色靠顶部高光线与深影分层 */
+  --shadow-card: var(--card-shadow);
+  --shadow-popover: var(--popover-shadow);
+  --shadow-drawer: var(--drawer-shadow);
 
   /* 入场动画一律不保留终态（fill-mode none）：终态若带 transform，元素会成为其内部
      fixed 定位子元素（确认框 / 提示）的包含块，弹层就会被困在抽屉里 */
@@ -145,34 +145,37 @@
   --table-cell-padding: 0.375rem;
   --table-min-height: 10rem;
   --table-radius: var(--radius-xl);
-  --note-curl: 0.5rem;
   color-scheme: light;
   /* 浅色主题是「纸」：页底是暖一点的米白，卡片 / 表格是纸白，线条与悬停底是暖灰（色相 85 / 70，
      色度只有 0.004–0.012，几乎看不出偏色，只让整体不再发冷发蓝）。语义色（主色 / 成功 / 警告 /
      危险）不跟着变——纸面是底，颜色是信息。次级文字在页底上 ≥5.6:1。 */
   --bg: oklch(0.964 0.004 85);
-  --fg: oklch(0.21 0.01 70);
-  --card: oklch(0.995 0.002 85);
-  --popover: oklch(0.995 0.002 85);
-  --muted: oklch(0.948 0.005 85);
-  --muted-fg: oklch(0.49 0.012 70);
-  --accent: oklch(0.94 0.006 85);
-  --border: oklch(0.912 0.006 85);
-  --primary: oklch(0.55 0.18 260);
+  --fg: oklch(0.205 0.012 70);
+  --card: oklch(0.996 0.002 85);
+  --popover: oklch(0.997 0.002 85);
+  --muted: oklch(0.946 0.005 85);
+  --muted-fg: oklch(0.475 0.012 70);
+  --accent: oklch(0.938 0.006 85);
+  --border: oklch(0.905 0.006 85);
+  --primary: oklch(0.515 0.175 262);
   --primary-fg: oklch(0.99 0 0);
-  --destructive: oklch(0.6 0.2 25);
-  --success: oklch(0.6 0.15 155);
-  --warning: oklch(0.68 0.15 75);
-  --info: oklch(0.6 0.13 215);
-  /* 便签纸：页面纸面（色相 85）再暖一点点的米色，只比页底黄一档（红蓝通道差 ~18，页底 ~4），
-     不抢眼；字用暖深褐（对比 >12:1）。粘条 / 折角各深一档，投影基色是暖褐而不是纯黑，
-     整体读起来是一张贴在页面上的小纸片 */
-  --note: oklch(0.977 0.018 92);
-  --note-fg: oklch(0.28 0.02 75);
-  --note-border: oklch(0.89 0.03 90);
-  --note-strip: oklch(0.955 0.026 90);
-  --note-fold: oklch(0.925 0.04 88);
-  --note-shadow: oklch(0.38 0.04 70);
+  --destructive: oklch(0.585 0.205 24);
+  --success: oklch(0.575 0.155 155);
+  --warning: oklch(0.655 0.155 72);
+  --info: oklch(0.585 0.135 218);
+  --card-shadow:
+    0 1px 2px 0 oklch(0.28 0.015 70 / 0.045),
+    0 4px 12px -4px oklch(0.28 0.015 70 / 0.045);
+  --popover-shadow:
+    0 8px 24px -6px oklch(0.24 0.018 70 / 0.12),
+    0 2px 6px -2px oklch(0.24 0.018 70 / 0.07);
+  --drawer-shadow:
+    -16px 0 44px -12px oklch(0.22 0.015 70 / 0.18),
+    -1px 0 0 0 oklch(0.22 0.015 70 / 0.04);
+  /* 悬浮提示卡：与菜单 / 弹层同源的克制白底，清晰对比、零装饰 */
+  --note: var(--popover);
+  --note-fg: var(--fg);
+  --note-border: var(--border);
   /* 信纸：站点公告（components/notice-center.tsx）。和便签同一个纸面家族，但更白一点、更安静——
      便签是贴上去的黄色小纸片，信纸是象牙色的一整张；边线、横格线、印章都是暖褐色的墨，不用主色蓝 */
   --letter: oklch(0.986 0.011 88);
@@ -201,27 +204,35 @@
 
 .dark {
   color-scheme: dark;
-  --bg: oklch(0.16 0.014 260);
-  --fg: oklch(0.93 0.005 250);
-  --card: oklch(0.205 0.015 260);
+  --bg: oklch(0.155 0.014 260);
+  --fg: oklch(0.935 0.005 250);
+  --card: oklch(0.2 0.015 260);
   --popover: oklch(0.225 0.016 260);
-  --muted: oklch(0.26 0.015 260);
-  --muted-fg: oklch(0.66 0.01 255);
-  --accent: oklch(0.29 0.018 260);
-  --border: oklch(0.29 0.015 260);
-  --primary: oklch(0.7 0.16 260);
-  --primary-fg: oklch(0.15 0.02 260);
+  --muted: oklch(0.255 0.015 260);
+  --muted-fg: oklch(0.665 0.011 255);
+  --accent: oklch(0.285 0.018 260);
+  --border: oklch(0.285 0.015 260);
+  --primary: oklch(0.71 0.155 262);
+  --primary-fg: oklch(0.145 0.02 260);
   --destructive: oklch(0.66 0.2 25);
-  --success: oklch(0.7 0.14 155);
-  --warning: oklch(0.76 0.14 75);
-  --info: oklch(0.72 0.12 215);
-  /* 暗色下是一张暖调的深色纸：比卡片亮一档才浮得起来，折角是翻过来的那一面所以更亮 */
-  --note: oklch(0.31 0.012 90);
-  --note-fg: oklch(0.94 0.01 90);
-  --note-border: oklch(0.43 0.03 88);
-  --note-strip: oklch(0.355 0.02 88);
-  --note-fold: oklch(0.42 0.03 88);
-  --note-shadow: oklch(0 0 0);
+  --success: oklch(0.7 0.145 155);
+  --warning: oklch(0.76 0.145 75);
+  --info: oklch(0.72 0.125 215);
+  --card-shadow:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.045),
+    0 1px 2px 0 oklch(0 0 0 / 0.3),
+    0 4px 12px -4px oklch(0 0 0 / 0.24);
+  --popover-shadow:
+    inset 0 1px 0 0 oklch(1 0 0 / 0.06),
+    0 12px 32px -8px oklch(0 0 0 / 0.55),
+    0 2px 8px -2px oklch(0 0 0 / 0.35);
+  --drawer-shadow:
+    inset 1px 0 0 0 oklch(1 0 0 / 0.05),
+    -18px 0 48px -12px oklch(0 0 0 / 0.6);
+  /* 暗色悬浮提示卡：比卡片亮一档的深板，细边轻投影自然浮起 */
+  --note: var(--popover);
+  --note-fg: var(--fg);
+  --note-border: oklch(0.32 0.016 260);
   /* 暗色下的信纸：暖调深纸，比卡片亮一档；墨色反过来是浅的 */
   --letter: oklch(0.255 0.012 80);
   --letter-fg: oklch(0.93 0.01 85);
@@ -319,44 +330,30 @@
 }
 
 @layer components {
-  /* 便签：悬停提示（components/ui/tooltip.tsx）与图表悬浮卡（recharts 的 tooltip）共用的外观。
-     两层：外层 .note 只管投影和折角——投影用 drop-shadow，才能跟着内层被切掉的右下角走；
-     内层 .note-body 是纸：奶油黄底、顶部一抹粘条、细边、小圆角、右下角折掉一个小三角。
-     recharts 自己生成的外层 / 内层（.recharts-tooltip-wrapper / .recharts-default-tooltip）
-     套同一套规则；它的内联样式（白底、灰边）用 !important 压掉。recharts 的外层在内容为空时也可能
-     显示（自定义内容返回 null），折角只给里面真有便签的外层画。 */
+  /* 悬浮提示卡：悬停提示（components/ui/tooltip.tsx）与图表悬浮卡（recharts tooltip）共用的简约浮层。
+     干净纸白 / 暗板、1px 细边、圆角与轻量物理投影，无折角或粘条等过度装饰。 */
   .note,
   .recharts-tooltip-wrapper {
     position: relative;
-    filter: drop-shadow(0 1px 1px color-mix(in oklch, var(--note-shadow) 16%, transparent))
-      drop-shadow(0 9px 10px color-mix(in oklch, var(--note-shadow) 24%, transparent));
-  }
-  .note::after,
-  .recharts-tooltip-wrapper:has(> .note-body, > .recharts-default-tooltip)::after {
-    content: "";
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    width: var(--note-curl);
-    height: var(--note-curl);
-    pointer-events: none;
-    /* 只画左上那半个三角：翻过来的纸角；右下那半是被切掉的缺口，保持透明 */
-    background: linear-gradient(to top left, transparent 50%, var(--note-fold) 50%);
-    border-top-left-radius: 0.125rem;
   }
   .note-body,
   .recharts-default-tooltip {
     color: var(--note-fg);
-    background: linear-gradient(to bottom, var(--note-strip), transparent 0.8rem), var(--note) !important;
+    background: var(--note) !important;
     border: 1px solid var(--note-border) !important;
-    border-radius: 0.25rem;
-    clip-path: polygon(
-      0 0,
-      100% 0,
-      100% calc(100% - var(--note-curl)),
-      calc(100% - var(--note-curl)) 100%,
-      0 100%
-    );
+    border-radius: 0.5rem;
+    box-shadow: var(--popover-shadow);
+  }
+  .recharts-default-tooltip {
+    padding: 0.5rem 0.75rem !important;
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+  }
+  .recharts-default-tooltip .recharts-tooltip-label {
+    margin-bottom: 0.375rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: var(--muted-fg);
   }
 
   /* 信纸：公告的弹窗、列表里的每一封、后台的预览。一张象牙色的纸：极淡的纸纹、暖褐细边、两层很浅的投影；
@@ -528,11 +525,20 @@ select:not(.appearance-none, [multiple], [size]) {
   gap: 1rem;
 }
 :is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > :is([data-slot="field-group"], [data-slot="optional-section"], [data-slot="channel-key-schedule"]) {
-  border: 1px solid color-mix(in oklch, var(--border) 78%, transparent);
+  border: 1px solid color-mix(in oklch, var(--border) 82%, transparent);
   border-radius: 0.875rem;
-  background: color-mix(in oklch, var(--muted) 34%, transparent);
-  padding: 1rem;
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.025);
+  background: color-mix(in oklch, var(--muted) 28%, var(--card));
+  padding: 1rem 1.0625rem;
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.55),
+    0 1px 2px oklch(0.24 0.015 70 / 0.03);
+  transition: border-color 0.15s ease;
+}
+.dark :is(.channel-editor, .form-sections, [data-slot="drawer-body"]) > :is([data-slot="field-group"], [data-slot="optional-section"], [data-slot="channel-key-schedule"]) {
+  background: color-mix(in oklch, var(--muted) 32%, var(--card));
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.035),
+    0 1px 2px oklch(0 0 0 / 0.18);
 }
 /* 抽屉正文不是 flex 容器（里面常混着说明文字、确认框），段与段之间用外边距拉开 */
 [data-slot="drawer-body"] > :is([data-slot="field-group"], [data-slot="optional-section"]) + *,

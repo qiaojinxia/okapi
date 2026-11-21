@@ -188,19 +188,19 @@ export function AdminKeysPage() {
               <Th>{t('portal:keyName')}</Th>
               <Th>{t('portal:keyPrefix')}</Th>
               <Th>{t('common:status')}</Th>
-              <Th>{t('portal:keyUsed')}</Th>
+              <Th numeric>{t('portal:keyUsed')}</Th>
               {usage.enabled && <Th>{t('admin:usageColumn')}</Th>}
-              <Th>{t('portal:keyRpm')}</Th>
+              <Th numeric>{t('portal:keyRpm')}</Th>
               <Th>{t('admin:keyExpires')}</Th>
               <Th>{t('admin:keyLastUsed')}</Th>
-              {showActions && <Th>{t('common:actions')}</Th>}
+              {showActions && <Th className="text-right">{t('common:actions')}</Th>}
             </Tr>
           </THead>
           <TBody>
             {rows.map((k) => (
               <Tr key={k.id}>
-                <Td>{k.id}</Td>
-                <Td className="max-w-40 truncate" title={k.username}>
+                <Td className="font-mono text-muted-foreground tabular-nums">{k.id}</Td>
+                <Td className="max-w-40 truncate font-medium" title={k.username}>
                   {k.username}
                 </Td>
                 <Td>
@@ -228,11 +228,11 @@ export function AdminKeysPage() {
                 </Td>
                 <Td className="whitespace-nowrap font-mono text-xs">{k.key_prefix}…</Td>
                 <Td>
-                  <Badge variant={k.status === 1 ? 'success' : 'muted'}>
+                  <Badge dot variant={k.status === 1 ? 'success' : 'muted'}>
                     {k.status === 1 ? t('common:enabled') : t('common:disabled')}
                   </Badge>
                 </Td>
-                <Td className="whitespace-nowrap">{formatMoney(k.used_micro, locale)}</Td>
+                <Td numeric>{formatMoney(k.used_micro, locale)}</Td>
                 {usage.enabled && (
                   <Td className="whitespace-nowrap">
                     <UsageCell
@@ -242,13 +242,13 @@ export function AdminKeysPage() {
                     />
                   </Td>
                 )}
-                <Td>{k.rpm_limit ?? '—'}</Td>
+                <Td numeric>{k.rpm_limit ?? '—'}</Td>
                 <Td>{expiry(k)}</Td>
-                <Td className="whitespace-nowrap text-xs">
+                <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
                   {k.last_used_at ? dayjs(k.last_used_at).format('MM-DD HH:mm') : '—'}
                 </Td>
                 {showActions && <Td>
-                  <div className="flex items-center gap-0.5">
+                  <div className="flex items-center justify-end gap-0.5">
                     <ActionGroup label={t('common:actions')}>
                       {canReadLogs && <Link
                         to="/admin/logs"

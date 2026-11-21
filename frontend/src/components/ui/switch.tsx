@@ -52,8 +52,8 @@ export function Switch({
           onChange={(e) => onChange(e.target.checked)}
           className="peer absolute inset-0 z-10 cursor-inherit appearance-none opacity-0"
         />
-        <span className="h-5 w-9 rounded-full bg-input transition-colors peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary/40 peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-background" />
-        <span className="pointer-events-none absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-card shadow-xs transition-transform peer-checked:translate-x-4" />
+        <span className="h-5 w-9 rounded-full bg-input shadow-[inset_0_1px_2px_oklch(0_0_0/0.12)] transition-colors peer-checked:bg-primary peer-checked:shadow-[inset_0_1px_2px_oklch(0_0_0/0.18)] peer-focus-visible:ring-2 peer-focus-visible:ring-primary/40 peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-background" />
+        <span className="pointer-events-none absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-card shadow-[0_1px_3px_oklch(0_0_0/0.22)] transition-transform peer-checked:translate-x-4" />
       </span>
     </label>
   )

@@ -14,6 +14,7 @@ import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { poolOptions } from '@/features/pools/pool-options'
+import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import { maskEmails } from '@/lib/mask'
 
 interface DiagKeyReport {
@@ -208,10 +209,10 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
           <FieldGroup title={t('admin:diagVerdict')}>
             <code className="text-xs">{report.endpoint}</code>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={report.verdict === 'ok' ? 'success' : 'destructive'}>
+              <Badge variant={report.verdict === 'ok' ? 'success' : 'destructive'} dot>
                 {t(VERDICT_LABEL[report.verdict] ?? 'admin:diagVerdictNoAvailable')}
               </Badge>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-sm font-medium text-muted-foreground tabular-nums">
                 {t('admin:diagCandidates', { n: report.candidates })}
               </span>
             </div>
@@ -263,38 +264,53 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
             ) : (
               <div className="flex flex-col gap-2">
                 {report.channels.map((ch) => (
-                  <div key={ch.channel_id} className="rounded-md border border-border p-2">
-                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <span className="font-medium">{maskEmails(ch.name)}</span>
-                      <Badge variant="muted">{ch.provider}</Badge>
-                      <Badge variant="muted">P{ch.priority}</Badge>
-                      {ch.pools.map((p) => (
-                        <Badge key={p} variant="muted" className="font-mono">
-                          {p}
-                        </Badge>
-                      ))}
-                      {ch.excluded !== null && (
-                        <Badge variant="destructive">{reasonText(ch.excluded)}</Badge>
-                      )}
-                      {ch.via_fallback && (
-                        <Badge variant="warning">{t('admin:diagViaFallback')}</Badge>
-                      )}
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {ch.keys.map((k) => (
-                        <Badge
-                          key={k.key_id}
-                          variant={k.ok ? 'success' : k.reason === null ? 'muted' : 'warning'}
-                          className="font-mono"
-                        >
-                          #{k.key_id}
-                          {k.ok
-                            ? ` ${t('admin:diagKeyOk')}`
-                            : k.reason !== null
-                              ? ` ${reasonText(k.reason)}`
-                              : ''}
-                        </Badge>
-                      ))}
+                  <div
+                    key={ch.channel_id}
+                    className={
+                      ch.excluded !== null
+                        ? 'rounded-lg border border-destructive/25 bg-card p-3 shadow-xs'
+                        : ch.via_fallback
+                          ? 'rounded-lg border border-warning/30 bg-card p-3 shadow-xs'
+                          : 'rounded-lg border border-border/85 bg-card p-3 shadow-xs'
+                    }
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <ProviderMark provider={ch.provider} size="sm" className="h-7 w-7 rounded-lg" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5 text-sm">
+                          <span className="font-semibold">{maskEmails(ch.name)}</span>
+                          <ProviderChip provider={ch.provider} compact />
+                          <Badge variant="muted" className="font-mono text-[11px]">P{ch.priority}</Badge>
+                          {ch.pools.map((p) => (
+                            <Badge key={p} variant="muted" className="font-mono text-[11px]">
+                              {p}
+                            </Badge>
+                          ))}
+                          {ch.excluded !== null && (
+                            <Badge variant="destructive" dot>{reasonText(ch.excluded)}</Badge>
+                          )}
+                          {ch.via_fallback && (
+                            <Badge variant="warning" dot>{t('admin:diagViaFallback')}</Badge>
+                          )}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {ch.keys.map((k) => (
+                            <Badge
+                              key={k.key_id}
+                              variant={k.ok ? 'success' : k.reason === null ? 'muted' : 'warning'}
+                              dot
+                              className="font-mono text-[11px]"
+                            >
+                              #{k.key_id}
+                              {k.ok
+                                ? ` ${t('admin:diagKeyOk')}`
+                                : k.reason !== null
+                                  ? ` ${reasonText(k.reason)}`
+                                  : ''}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 ))}

@@ -70,10 +70,10 @@ export const toast = Object.assign(
 )
 
 const TONE = {
-  success: { icon: CheckCircle2, cls: 'text-success' },
-  error: { icon: XCircle, cls: 'text-destructive' },
-  warning: { icon: AlertTriangle, cls: 'text-warning' },
-  info: { icon: Info, cls: 'text-primary' },
+  success: { icon: CheckCircle2, cls: 'text-success', border: 'border-success/25' },
+  error: { icon: XCircle, cls: 'text-destructive', border: 'border-destructive/30' },
+  warning: { icon: AlertTriangle, cls: 'text-warning', border: 'border-warning/30' },
+  info: { icon: Info, cls: 'text-primary', border: 'border-border' },
 } as const
 
 export function Toaster() {
@@ -117,7 +117,8 @@ function ToastCard({ item }: { item: ToastItem }) {
       onMouseEnter={pausable ? () => setPaused(true) : undefined}
       onMouseLeave={pausable ? () => setPaused(false) : undefined}
       className={cn(
-        'pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border border-border bg-popover p-3.5 pr-2.5 text-sm shadow-popover',
+        'pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-xl border bg-popover/95 p-3.5 pr-2.5 text-sm shadow-popover backdrop-blur-md',
+        TONE[item.tone].border,
         'animate-toast-in',
       )}
     >

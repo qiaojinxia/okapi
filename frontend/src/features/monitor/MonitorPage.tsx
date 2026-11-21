@@ -101,7 +101,7 @@ function OverviewTab({ interval }: { interval: number | false }) {
           <Stat icon={Network} layout="stacked" label={t('monitor:network')} value={rates.net_rx_bps == null ? na : `↓ ${formatRate(rates.net_rx_bps, locale)}`}
             sub={rates.net_tx_bps == null ? undefined : `↑ ${formatRate(rates.net_tx_bps, locale)}`} />
         </div>
-        <dl className="grid gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-3 text-xs sm:grid-cols-2">
+        <dl className="grid gap-x-6 gap-y-1 rounded-xl border border-border bg-card px-4 py-3 text-xs shadow-card sm:grid-cols-2">
           <Kv label={t('monitor:load')} value={host.load ? `${host.load.map((l) => l.toFixed(2)).join(' / ')}${loadPct == null ? '' : ` · ${t('monitor:perCore', { v: formatPercent(loadPct, locale, 0) })}`}` : na} />
           <Kv label={t('monitor:swap')} value={host.memory?.swap_total_bytes ? t('monitor:usedOf', { used: formatBytes(host.memory.swap_total_bytes - host.memory.swap_free_bytes, locale), total: formatBytes(host.memory.swap_total_bytes, locale) }) : '—'} />
           <Kv label={t('monitor:processRss')} value={host.process ? `${formatBytes(host.process.rss_bytes, locale)} · ${t('monitor:threads', { n: host.process.threads })}${host.process.open_fds == null ? '' : ` · ${t('monitor:fds', { n: host.process.open_fds })}`}` : na} />

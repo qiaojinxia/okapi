@@ -72,7 +72,7 @@ export function KeyUsageSeries({ keyId, name }: { keyId: number; name: string })
   const peak = series?.data.reduce<SeriesDay | null>((best, row) => (value(row, metric) > (best ? value(best, metric) : 0) ? row : best), null) ?? null
 
   return (
-    <section data-slot="key-usage-series" aria-label={t('portal:keySeriesTitle')} className="overflow-hidden rounded-xl border border-border bg-card shadow-xs">
+    <section data-slot="key-usage-series" aria-label={t('portal:keySeriesTitle')} className="overflow-hidden rounded-xl border border-border bg-card shadow-card">
       {/* 用 div 而非 header：既有用例按 `dialog header` 取抽屉自己的关闭按钮 */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-4 py-2.5">
         <h3 className="flex items-center gap-2 text-sm font-semibold">

@@ -226,7 +226,7 @@ export function PortalOverviewPage() {
           <Button variant="outline" loading={refreshing} onClick={() => void refresh()} className="h-[34px] rounded-lg px-3.5 text-[13px]">
             {!refreshing && <RefreshCw className="h-[15px] w-[15px]" />}{t('common:refresh')}
           </Button>
-          <Link to="/portal/logs" search={logSearch} className="inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-primary px-3.5 text-[13px] font-medium text-primary-foreground outline-none transition-colors hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-primary/40">
+          <Link to="/portal/logs" search={logSearch} className="inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-primary px-3.5 text-[13px] font-medium text-primary-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.22),0_1px_2px_oklch(0_0_0/0.1),0_6px_16px_-10px_var(--primary)] outline-none transition-[background-color,box-shadow] hover:bg-primary/92 focus-visible:ring-2 focus-visible:ring-primary/40">
             {t('portal:usageDetails')}<ArrowUpRight className="h-[13px] w-[13px]" />
           </Link>
         </div>

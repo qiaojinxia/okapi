@@ -11,7 +11,7 @@ import { EmptyState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { GenerateDrawer } from '@/features/codes/GenerateDrawer'
 import { CODE_STATUS, CODE_STATUS_FILTERS } from '@/features/codes/types'
-import { IconButton } from '@/components/ui/icon-button'
+import { ActionGroup, IconButton } from '@/components/ui/icon-button'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { Select } from '@/components/ui/select'
@@ -163,13 +163,13 @@ export function RedemptionsPage() {
               <Th>{t('admin:codeCreated')}</Th>
               <Th>{t('admin:codeRedeemedBy')}</Th>
               <Th>{t('admin:codeRedeemedAt')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((c) => (
               <Tr key={c.id}>
-                <Td>{c.id}</Td>
+                <Td className="font-mono text-muted-foreground tabular-nums">{c.id}</Td>
                 <Td>
                   <span className="block truncate font-mono text-xs" title={c.batch_id}>
                     {c.batch_id}
@@ -177,31 +177,35 @@ export function RedemptionsPage() {
                 </Td>
                 <Td numeric>{formatMoney(c.amount_micro, i18n.language)}</Td>
                 <Td>
-                  <Badge variant={c.status === CODE_STATUS.unused ? 'success' : 'muted'}>
+                  <Badge dot variant={c.status === CODE_STATUS.unused ? 'success' : 'muted'}>
                     {statusLabel(c.status)}
                   </Badge>
                 </Td>
                 <Td className="truncate" title={c.plan_code ?? undefined}>{c.plan_code ?? '—'}</Td>
-                <Td className="whitespace-nowrap text-xs">{dayjs(c.created_at).format('MM-DD HH:mm')}</Td>
-                <Td>{c.redeemed_by ?? '—'}</Td>
-                <Td className="whitespace-nowrap text-xs">
+                <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">{dayjs(c.created_at).format('MM-DD HH:mm')}</Td>
+                <Td className="tabular-nums">{c.redeemed_by ?? '—'}</Td>
+                <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
                   {c.redeemed_at ? dayjs(c.redeemed_at).format('MM-DD HH:mm') : '—'}
                 </Td>
                 <Td>
-                  <IconButton
-                    icon={Ban}
-                    label={t('admin:disableBatch')}
-                    variant="destructive"
-                    disabled={c.status !== CODE_STATUS.unused}
-                    onClick={() =>
-                      confirm({
-                        title: t('admin:disableBatch'),
-                        description: t('admin:disableBatchHint'),
-                        confirmLabel: t('admin:disableBatch'),
-                        onConfirm: () => disableBatch.mutate(c.batch_id),
-                      })
-                    }
-                  />
+                  <div className="flex items-center justify-end">
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton
+                        icon={Ban}
+                        label={t('admin:disableBatch')}
+                        variant="destructive"
+                        disabled={c.status !== CODE_STATUS.unused}
+                        onClick={() =>
+                          confirm({
+                            title: t('admin:disableBatch'),
+                            description: t('admin:disableBatchHint'),
+                            confirmLabel: t('admin:disableBatch'),
+                            onConfirm: () => disableBatch.mutate(c.batch_id),
+                          })
+                        }
+                      />
+                    </ActionGroup>
+                  </div>
                 </Td>
               </Tr>
             ))}

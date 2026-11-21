@@ -31,14 +31,14 @@ function Kpi({ loading, label, hint, period, value, valueClassName, aside, sub, 
   search: AnalyticsSearch
 }) {
   const { t } = useTranslation()
-  const card = 'flex min-w-0 flex-col gap-1.5 rounded-xl border border-border bg-card px-3.5 py-3'
+  const card = 'flex min-w-0 flex-col gap-1.5 rounded-xl border border-border bg-card px-3.5 py-3 shadow-card'
   if (loading) return <div aria-hidden className={card}>
     <Skeleton className="h-4 w-16" />
     <Skeleton className="mt-0.5 h-[22px] w-28" />
     <Skeleton className="h-3.5 w-24" />
   </div>
   return <Link to="/admin/stats" search={search} aria-label={t('admin:dashboardOpenMetric', { label: t('admin:dashboardMetricLabel', { period, label }), value })}
-    className={cn(card, 'group outline-none transition-colors hover:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/50')}>
+    className={cn(card, 'group outline-none transition-[border-color,box-shadow] duration-150 hover:border-primary/40 hover:shadow-popover focus-visible:ring-2 focus-visible:ring-primary/50')}>
     <span className="flex items-center justify-between gap-2 text-[13px] text-muted-foreground">
       <span title={hint} className="min-w-0 truncate">{label}</span>
       {aside && <span className={cn('shrink-0 text-xs font-medium tabular-nums', ASIDE_TONE[aside.tone])}>{aside.text}</span>}

@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 /// 指标条的外框：一张卡，格子之间 1px 分隔线（gap-px 透出底色）。
 /// 数字条与调用质量条共用，随所在容器的宽度折成 4 / 2 / 1 列（容器查询，不靠视口断点）；
 /// 四格只会 4 列、2×2 或单列，不会出现 3+1 的孤格把底色露出来。外层要套一层 `@container`。
-export const STRIP = 'grid min-w-0 grid-cols-1 gap-px overflow-hidden rounded-xl border border-border bg-border @xl:grid-cols-2 @4xl:grid-cols-4'
+export const STRIP = 'grid min-w-0 grid-cols-1 gap-px overflow-hidden rounded-xl border border-border bg-border shadow-card @xl:grid-cols-2 @4xl:grid-cols-4'
 
 export interface KpiCell {
   label: string

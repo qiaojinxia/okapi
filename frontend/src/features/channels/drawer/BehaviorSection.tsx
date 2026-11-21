@@ -34,14 +34,14 @@ export function BehaviorSection({ f, channel }: {
       <OptionalSection id="channel-behavior-options" title={t('admin:groupBehavior')} hint={t('admin:groupBehaviorHint')} defaultOpen
         summary={t(behaviorCustom ? 'admin:channelOptionsCustomized' : 'admin:channelOptionsDefault')}>
         <Switch
-          className="rounded-lg border border-border/60 bg-card/65 px-3 py-3"
+          className="rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30"
           label={t('admin:thinkingToContent')}
           description={t('admin:thinkingToContentHint')}
           checked={settings.thinking_to_content}
           onChange={(v) => setSettings((s) => ({ ...s, thinking_to_content: v }))}
         />
         <Switch
-          className="rounded-lg border border-border/60 bg-card/65 px-3 py-3"
+          className="rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30"
           label={t('admin:billByResponseModel')}
           description={t('admin:billByResponseModelHint')}
           checked={settings.bill_by_response_model}
@@ -49,7 +49,7 @@ export function BehaviorSection({ f, channel }: {
         />
         {speaksOpenAi(channel.provider) && (
           <Switch
-            className="rounded-lg border border-border/60 bg-card/65 px-3 py-3"
+            className="rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30"
             label={t('admin:responsesNative')}
             description={t('admin:responsesNativeHint')}
             checked={settings.responses_native ?? defaultResponsesNative(channel.provider)}
@@ -62,7 +62,7 @@ export function BehaviorSection({ f, channel }: {
           <p className="text-xs leading-5 text-muted-foreground">{t('admin:toolLossPolicyHint')}</p>
           <Select
             id="d-tool-loss"
-            className="w-72"
+            className="w-full max-w-md"
             value={settings.tool_loss_policy ?? 'safe'}
             onChange={(v) => setSettings((s) => ({ ...s, tool_loss_policy: TOOL_LOSS_POLICIES.find((p) => p === v) ?? 'safe' }))}
             options={TOOL_LOSS_POLICIES.map((p) => ({ value: p, label: t(`admin:toolLoss_${p}`) }))}

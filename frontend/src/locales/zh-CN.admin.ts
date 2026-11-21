@@ -713,7 +713,6 @@ export default {
   channelColQuota: '额度 / 余额',
   channelColUsage30: '近 30 天',
   channelColSchedule: '调度',
-  channelColOps: '操作',
   channelModelCount: '{{n}} 个模型',
   channelBalanceAt: '{{at}} 查询',
   channelAllProviders: '全部协议',

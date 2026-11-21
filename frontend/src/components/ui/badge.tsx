@@ -6,12 +6,12 @@ const badgeVariants = cva(
   {
     variants: {
       variant: {
-        default: 'bg-primary/10 text-primary',
-        success: 'bg-success/14 text-success',
-        warning: 'bg-warning/16 text-warning',
-        destructive: 'bg-destructive/12 text-destructive',
-        info: 'bg-info/14 text-info',
-        muted: 'bg-muted text-muted-foreground',
+        default: 'bg-primary/10 text-primary ring-1 ring-inset ring-primary/15',
+        success: 'bg-success/12 text-success ring-1 ring-inset ring-success/20',
+        warning: 'bg-warning/14 text-warning ring-1 ring-inset ring-warning/25',
+        destructive: 'bg-destructive/10 text-destructive ring-1 ring-inset ring-destructive/20',
+        info: 'bg-info/12 text-info ring-1 ring-inset ring-info/20',
+        muted: 'bg-muted/85 text-muted-foreground ring-1 ring-inset ring-border/55',
         outline: 'border border-border bg-transparent text-foreground',
       },
     },

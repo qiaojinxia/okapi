@@ -24,8 +24,8 @@ export function ModelPresetSummary({ preset, metadata, applied, canApplyPrice, o
     </div>
     <div className="flex flex-wrap gap-1.5">{badges.map((label) => <span key={label} className="rounded bg-background/80 px-1.5 py-0.5 text-xs text-muted-foreground">{label}</span>)}</div>
     {preset.cacheTtls?.length ? <p className="text-xs text-muted-foreground">{t('admin:modelPreset.ttls', { values: preset.cacheTtls.join(' / ') })}</p> : null}
-    {preset.notices?.includes('partial') && <p className="text-xs leading-5 text-amber-600 dark:text-amber-400">{t('admin:modelPresetNotices.partial')}</p>}
-    {preset.notices?.includes('imagePricing') && <p className="text-xs leading-5 text-amber-600 dark:text-amber-400">{t('admin:modelPresetNotices.imagePricing')}</p>}
+    {preset.notices?.includes('partial') && <p className="text-xs leading-5 text-warning">{t('admin:modelPresetNotices.partial')}</p>}
+    {preset.notices?.includes('imagePricing') && <p className="text-xs leading-5 text-warning">{t('admin:modelPresetNotices.imagePricing')}</p>}
     {preset.referencePrice && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-primary/10 pt-2">
       <span className="text-xs text-muted-foreground">{t('admin:modelPreset.priceReference', preset.referencePrice)}
         {preset.pricingSource && <a href={preset.pricingSource} target="_blank" rel="noopener noreferrer" className="ml-1 text-primary hover:underline">{t('admin:modelPreset.pricingSource')}</a>}</span>

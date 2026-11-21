@@ -93,7 +93,14 @@ export function PoolMembershipEditor({
       {list.map((p) => {
         const m = find(p.pool_code)
         return (
-          <div key={p.pool_code} className="flex flex-wrap items-center gap-3 rounded-md border border-border px-3 py-2">
+          <div
+            key={p.pool_code}
+            className={
+              m !== undefined
+                ? 'flex flex-wrap items-center gap-3 rounded-md border border-primary/35 bg-primary/[0.035] px-3 py-2.5 shadow-xs transition-colors'
+                : 'flex flex-wrap items-center gap-3 rounded-md border border-border/85 bg-card px-3 py-2.5 transition-colors hover:border-muted-foreground/35'
+            }
+          >
             <Checkbox
               label={p.pool_code === DEFAULT_POOL ? t('admin:poolDefaultOption') : p.pool_code}
               checked={m !== undefined}

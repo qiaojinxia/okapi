@@ -52,7 +52,7 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
 
   return <div data-slot="usage-overview" className={cn('grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,26.25rem),1fr))] items-stretch gap-4', className)}>
     <SpendTrendView rows={data.data} total={data.total} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} />
-    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl border-border px-5 py-5 shadow-none">
+    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl border-border px-5 py-5">
       <section aria-label={t('portal:modelSnapshot')} className="flex min-h-0 flex-1 flex-col gap-[18px]">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
           <h2 className="text-[15px] font-semibold">{t('portal:modelSnapshot')}</h2>

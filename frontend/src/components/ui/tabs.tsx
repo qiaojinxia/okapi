@@ -81,7 +81,7 @@ export function Tabs({
         'min-w-0 max-w-full items-center overflow-x-auto scrollbar-none',
         underline
           ? 'flex flex-1 gap-1 border-b border-border'
-          : 'inline-flex gap-0.5 self-start rounded-lg border border-border bg-muted/60 p-0.5',
+          : 'inline-flex gap-0.5 self-start rounded-lg border border-border/85 bg-muted/65 p-0.5 shadow-[inset_0_1px_2px_oklch(0_0_0/0.04)] dark:shadow-[inset_0_1px_2px_oklch(0_0_0/0.25)]',
       )}
     >
       {items.map((item, index) => {
@@ -122,7 +122,7 @@ export function Tabs({
                     ? 'border-primary font-medium text-foreground'
                     : 'border-transparent text-muted-foreground hover:border-border hover:text-foreground')
                 : cn('rounded-md', on
-                    ? 'bg-card font-medium text-foreground shadow-card'
+                    ? 'bg-card font-medium text-foreground shadow-xs ring-1 ring-inset ring-border/55 dark:ring-white/[0.08]'
                     : 'text-muted-foreground hover:text-foreground'),
             )}
             onClick={() => { if (!on) onChange(item.id) }}

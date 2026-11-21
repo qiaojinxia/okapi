@@ -86,14 +86,14 @@ export function RolesPage() {
               <Th>{t('admin:roleCode')}</Th>
               <Th>{t('admin:roleName')}</Th>
               <Th>{t('admin:rolePermissionsCol')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((r) => (
               <Tr key={r.id}>
-                <Td>{r.id}</Td>
-                <Td className="whitespace-nowrap font-mono text-xs">{r.role_code}</Td>
+                <Td className="font-mono text-muted-foreground tabular-nums">{r.id}</Td>
+                <Td className="whitespace-nowrap font-mono text-xs font-medium">{r.role_code}</Td>
                 <Td className="min-w-32 max-w-64 break-words">{r.display_name}</Td>
                 <Td>
                   <div className="flex flex-wrap gap-1">
@@ -111,25 +111,27 @@ export function RolesPage() {
                   </div>
                 </Td>
                 <Td>
-                  <ActionGroup label={t('common:actions')}>
-                    <IconButton
-                      icon={Pencil}
-                      label={t('common:edit')}
-                      onClick={() => setDrawer(r)}
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: r.role_code }),
-                          description: t('common:confirmRoleDelete'),
-                          onConfirm: () => remove.mutate(r.role_code),
-                        })
-                      }
-                    />
-                  </ActionGroup>
+                  <div className="flex items-center justify-end">
+                    <ActionGroup label={t('common:actions')}>
+                      <IconButton
+                        icon={Pencil}
+                        label={t('common:edit')}
+                        onClick={() => setDrawer(r)}
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label={t('common:delete')}
+                        variant="destructive"
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: r.role_code }),
+                            description: t('common:confirmRoleDelete'),
+                            onConfirm: () => remove.mutate(r.role_code),
+                          })
+                        }
+                      />
+                    </ActionGroup>
+                  </div>
                 </Td>
               </Tr>
             ))}

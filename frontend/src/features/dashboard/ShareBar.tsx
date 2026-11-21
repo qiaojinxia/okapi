@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 /// `data-share-bp` 带着原始基点，便于核对画出来的比例没有被取整或截断。
 export function ShareBar({ bp, opacity = 1, className }: { bp: number | null; opacity?: number; className?: string }) {
   const width = bp == null ? 0 : Math.min(100, Math.max(0, bp / 100))
-  return <span aria-hidden data-slot="share-bar" className="block h-1.5 overflow-hidden rounded-full bg-muted">
-    <span data-share-bp={bp ?? undefined} className={cn('block h-full min-w-0.5 rounded-full', className ?? 'bg-primary')} style={{ width: `${width}%`, opacity }} />
+  return <span aria-hidden data-slot="share-bar" className="block h-1.5 overflow-hidden rounded-full bg-muted/85 ring-1 ring-inset ring-border/60 dark:bg-muted/60 dark:ring-white/[0.05]">
+    <span data-share-bp={bp ?? undefined} className={cn('block h-full min-w-0.5 rounded-full transition-[width] duration-300', className ?? 'bg-primary')} style={{ width: `${width}%`, opacity }} />
   </span>
 }

@@ -277,13 +277,13 @@ export function AttentionStrip({ days }: { days: number }) {
   const visible = expanded ? items : items.slice(0, 4)
 
   return <section id="dashboard-attention" tabIndex={-1} aria-label={t('admin:dashboardPriorityActions')}
-    className="min-w-0 scroll-mt-4 overflow-hidden rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+    className="min-w-0 scroll-mt-4 overflow-hidden rounded-xl border border-border bg-card shadow-card outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
     {items.length > 0 && <div id={listId} className="flex flex-wrap gap-px bg-border">
       {visible.map((item) => {
         const critical = item.tone === 'destructive'
         return <Link key={item.key} to={item.to} search={item.search} aria-label={item.text}
           className={cn('group flex min-h-11 min-w-0 flex-1 basis-[22.5rem] items-center gap-3 bg-card px-3.5 py-2 text-[13px] outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40', critical && 'border-l-[3px] border-l-destructive')}>
-          <span className={cn('shrink-0 rounded-[5px] px-2 py-0.5 text-xs font-semibold whitespace-nowrap', critical ? 'bg-destructive/10 text-destructive' : 'bg-warning/15 text-warning')}>{critical ? t('admin:attnCritical') : t('admin:attnNotice')}</span>
+          <span className={cn('shrink-0 rounded-[5px] px-2 py-0.5 text-xs font-semibold whitespace-nowrap ring-1 ring-inset', critical ? 'bg-destructive/10 text-destructive ring-destructive/20' : 'bg-warning/14 text-warning ring-warning/25')}>{critical ? t('admin:attnCritical') : t('admin:attnNotice')}</span>
           <span className="min-w-0 flex-1 leading-5"><b className="font-semibold">{item.summary}</b><span className="text-muted-foreground"> · {item.text}</span></span>
           <span className="shrink-0 whitespace-nowrap text-primary group-hover:underline">{item.action}<span aria-hidden> →</span></span>
         </Link>

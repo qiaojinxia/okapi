@@ -31,7 +31,7 @@ export function DashboardHeader({ title, days, range, calendar, today, refreshin
   const { t } = useTranslation()
   return <header data-slot="dashboard-header" className="flex flex-wrap items-end gap-x-4 gap-y-3">
     <div className="flex min-w-[16rem] flex-1 flex-col gap-1.5">
-      <h1 className="text-xl leading-7 font-bold tracking-tight">{title}</h1>
+      <h1 className="text-xl leading-7 font-semibold tracking-tight">{title}</h1>
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px] leading-5 text-muted-foreground">
         {calendar && <>
           <span data-slot="dashboard-calendar" className="tabular-nums">{t('admin:dashboardCalendar', { start: calendar.start, end: calendar.end, timezone: calendar.timezone })}</span>
@@ -53,7 +53,7 @@ export function DashboardHeader({ title, days, range, calendar, today, refreshin
       <Button variant="outline" size="icon" loading={refreshing} aria-label={t('common:refresh')} title={t('common:refresh')} onClick={onRefresh} className="size-[34px] rounded-lg">
         {!refreshing && <RefreshCw className="h-[15px] w-[15px]" />}
       </Button>
-      <Link to="/admin/stats" search={dashboardSearch(days, range)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-primary px-3.5 text-[13px] font-semibold text-primary-foreground outline-none transition-colors hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-primary/40 md:min-h-[34px]">
+      <Link to="/admin/stats" search={dashboardSearch(days, range)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-primary px-3.5 text-[13px] font-medium text-primary-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.22),0_1px_2px_oklch(0_0_0/0.1),0_6px_16px_-10px_var(--primary)] outline-none transition-[background-color,box-shadow] hover:bg-primary/92 focus-visible:ring-2 focus-visible:ring-primary/40 md:min-h-[34px]">
         {t('admin:dashboardAnalyze')}<ArrowUpRight className="h-[13px] w-[13px]" />
       </Link>
     </div>

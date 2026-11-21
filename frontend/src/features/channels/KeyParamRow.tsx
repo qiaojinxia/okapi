@@ -74,9 +74,9 @@ export function KeyParamRow({
   })
 
   return (
-    <div className={showIdentity ? 'flex flex-wrap items-end gap-2 rounded-md border border-border p-2' : 'flex flex-wrap items-end gap-2'}>
-      {showIdentity && <div className="flex h-9 items-center">
-        <Badge variant={row.status === 1 ? 'success' : row.status === 6 ? 'destructive' : 'muted'}>
+    <div className={showIdentity ? 'flex flex-wrap items-center gap-2 rounded-md border border-border/85 bg-card px-3 py-2.5 shadow-xs' : 'flex flex-wrap items-end gap-2'}>
+      {showIdentity && <div className="flex items-center">
+        <Badge variant={row.status === 1 ? 'success' : row.status === 6 ? 'destructive' : 'muted'} dot className="font-mono">
           #{row.id}
         </Badge>
       </div>}

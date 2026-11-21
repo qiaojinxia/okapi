@@ -180,7 +180,7 @@ export function OAuthLoginSteps({ login, codeId, action }: { login: OAuthLogin; 
           {action}
         </StepRow>
       </ol>
-      <p className="rounded-lg bg-warning/8 px-3 py-2 text-xs leading-5 text-warning">{t('admin:oauthExperimental')}</p>
+      <p className="rounded-lg border border-warning/25 bg-warning/8 px-3 py-2 text-xs leading-5 text-warning">{t('admin:oauthExperimental')}</p>
     </div>
   )
 }

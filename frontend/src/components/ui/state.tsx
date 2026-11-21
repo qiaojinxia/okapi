@@ -24,14 +24,14 @@ export function EmptyState({
     <div
       data-slot="empty-state"
       className={cn(
-        'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-card/50 px-6 py-12 text-center animate-fade-in',
+        'flex flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-border/90 bg-card/60 px-6 py-12 text-center animate-fade-in',
         className,
       )}
     >
-      <span className="flex h-11 w-11 items-center justify-center rounded-full bg-muted text-muted-foreground">
+      <span className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-card ring-4 ring-muted/65">
         <Icon className="h-5 w-5" />
       </span>
-      <span className="mt-1 text-sm font-medium">{title ?? t('common:empty')}</span>
+      <span className="mt-1 text-sm font-semibold text-foreground">{title ?? t('common:empty')}</span>
       {hint !== undefined && (
         <span className="max-w-md text-xs leading-5 text-muted-foreground">{hint}</span>
       )}

@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer } from '@/components/ui/drawer'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
+import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import type { TimelinePoint, TimelineResp } from '@/lib/cube'
 import { BAD_BP, WARN_BP } from '@/lib/health'
 import { apiFetch } from '@/lib/api'
@@ -140,6 +141,7 @@ export function ChannelTimelineDrawer({
       open={open}
       onClose={onClose}
       size="lg"
+      icon={<ProviderMark provider={channel.provider} />}
       title={t('admin:timelineTitle', { name: maskEmails(channel.name) })}
       description={t('admin:timelineDesc')}
       footer={
@@ -177,9 +179,9 @@ export function ChannelTimelineDrawer({
           />
           {total && (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Badge variant="muted">{channel.provider}</Badge>
-              <span>{t('admin:health24hRequests', { n: formatCount(total.requests, locale) })}</span>
-              <Badge variant={variant}>
+              <ProviderChip provider={channel.provider} compact />
+              <span className="tabular-nums">{t('admin:health24hRequests', { n: formatCount(total.requests, locale) })}</span>
+              <Badge variant={variant} dot>
                 {t('admin:timelineErrorRate', { v: formatBp(total.error_rate_bp, locale) })}
               </Badge>
             </div>
@@ -194,19 +196,19 @@ export function ChannelTimelineDrawer({
           <EmptyState hint={t('admin:timelineEmpty')} />
         ) : (
           <>
-            <section aria-label={t('admin:timelineRequests')} className="rounded-xl border border-border bg-muted/10 p-3">
+            <section aria-label={t('admin:timelineRequests')} className="rounded-xl border border-border/85 bg-muted/20 p-4 shadow-xs">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs font-medium">{t('admin:timelineRequests')}</p>
-                <dl className="flex flex-wrap items-center gap-2 text-xs tabular-nums">
-                  <div className="flex items-center gap-1.5 rounded-md bg-muted px-2 py-1">
+                <p className="text-xs font-semibold text-foreground">{t('admin:timelineRequests')}</p>
+                <dl className="flex flex-wrap items-center gap-1.5 text-xs tabular-nums">
+                  <div className="flex items-center gap-1.5 rounded-md border border-border/70 bg-card px-2 py-1 shadow-xs">
                     <dt className="text-muted-foreground">{t('admin:timelineTotal')}</dt>
                     <dd className="font-semibold">{formatCount(total?.requests ?? 0, locale)}</dd>
                   </div>
-                  <div className="flex items-center gap-1.5 rounded-md bg-primary/10 px-2 py-1 text-primary">
+                  <div className="flex items-center gap-1.5 rounded-md bg-primary/10 px-2 py-1 text-primary ring-1 ring-inset ring-primary/15">
                     <dt>{t('admin:timelineOk')}</dt>
                     <dd className="font-semibold">{formatCount((total?.requests ?? 0) - (total?.errors ?? 0), locale)}</dd>
                   </div>
-                  <div className={`flex items-center gap-1.5 rounded-md px-2 py-1 ${(total?.errors ?? 0) > 0 ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'}`}>
+                  <div className={`flex items-center gap-1.5 rounded-md px-2 py-1 ring-1 ring-inset ${(total?.errors ?? 0) > 0 ? 'bg-destructive/10 text-destructive ring-destructive/20' : 'bg-muted/75 text-muted-foreground ring-border/60'}`}>
                     <dt>{t('logs:failed')}</dt>
                     <dd className="font-semibold">{formatCount(total?.errors ?? 0, locale)}</dd>
                   </div>
@@ -232,22 +234,22 @@ export function ChannelTimelineDrawer({
                 </ResponsiveContainer>
               </div>
             </section>
-            <div>
-              <p className="mb-1 text-xs font-medium text-muted-foreground">{t('admin:timelineTtft')}</p>
-              <div className="h-40">
+            <section aria-label={t('admin:timelineTtft')} className="rounded-xl border border-border/85 bg-muted/20 p-4 shadow-xs">
+              <p className="mb-3 text-xs font-semibold text-foreground">{t('admin:timelineTtft')}</p>
+              <div className="h-44">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={rows}>
+                  <LineChart data={rows} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
-                    <XAxis dataKey="bucket" fontSize={10} minTickGap={32} />
-                    <YAxis fontSize={10} unit=" ms" />
+                    <XAxis dataKey="bucket" fontSize={10} minTickGap={32} tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
+                    <YAxis fontSize={10} unit=" ms" tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} />
                     <Tooltip contentStyle={{ fontSize: 12 }} formatter={(v) => `${formatCount(Number(v), locale)} ms`} />
                     <Legend itemSorter={null} />
-                    <Line type="monotone" dataKey="p50" name="p50" stroke="var(--color-chart-1)" dot={false} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="p95" name="p95" stroke="var(--color-chart-2)" dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="p50" name="p50" stroke="var(--color-chart-1)" strokeWidth={1.75} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="p95" name="p95" stroke="var(--color-chart-2)" strokeWidth={1.75} dot={false} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-            </div>
+            </section>
           </>
         )}
       </div>

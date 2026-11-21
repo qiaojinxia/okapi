@@ -15,12 +15,15 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground shadow-[0_6px_16px_-10px_var(--primary)] hover:bg-primary/90',
-        secondary: 'bg-accent text-foreground hover:bg-accent/70',
-        outline: 'border border-border bg-card shadow-xs hover:bg-accent/60 hover:border-muted-foreground/30',
+        default:
+          'bg-primary text-primary-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.22),0_1px_2px_oklch(0_0_0/0.1),0_6px_16px_-10px_var(--primary)] hover:bg-primary/92 hover:shadow-[inset_0_1px_0_oklch(1_0_0/0.24),0_2px_6px_-1px_oklch(0_0_0/0.12),0_8px_20px_-10px_var(--primary)]',
+        secondary: 'bg-accent text-foreground hover:bg-accent/75',
+        outline:
+          'border border-border bg-card shadow-[0_1px_2px_oklch(0.24_0.015_70/0.04)] hover:bg-accent/55 hover:border-muted-foreground/35 dark:shadow-[inset_0_1px_0_oklch(1_0_0/0.04)]',
         ghost: 'hover:bg-accent/70 text-foreground',
         link: 'h-auto px-0 text-primary underline-offset-4 hover:underline',
-        destructive: 'bg-destructive text-primary-foreground shadow-xs hover:bg-destructive/90',
+        destructive:
+          'bg-destructive text-primary-foreground shadow-[inset_0_1px_0_oklch(1_0_0/0.2),0_1px_2px_oklch(0_0_0/0.1)] hover:bg-destructive/92',
       },
       size: {
         default: 'h-9 px-4',
