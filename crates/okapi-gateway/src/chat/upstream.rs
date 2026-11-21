@@ -530,16 +530,25 @@ pub(super) async fn dispatch_chat(
     );
     // 操作臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
     let endpoint = plan.endpoint(stream);
+    let infer_call = |model, body, stream| super::super::dialect::InferCall {
+        cand,
+        endpoint,
+        base,
+        model,
+        body,
+        stream,
+        outbound: &outbound,
+    };
     let resp = match (bill.ingress, plan.operation) {
         (Ingress::ResponsesCompact, Operation::ResponsesCompact) => {
             bill.state
-                .responses_via(cand, endpoint, base, body, false, true, &outbound)
+                .responses_via(true, infer_call("", body, false))
                 .await
         }
         // Responses 客户端 + 说 Responses 方言的上游：直转，事件原样透出
         (Ingress::Responses, Operation::Responses) => {
             bill.state
-                .responses_via(cand, endpoint, base, body, stream, false, &outbound)
+                .responses_via(false, infer_call("", body, stream))
                 .await
         }
         // Gemini 客户端 + gemini 方言上游：透传 + 计费元数据扫描
@@ -579,15 +588,7 @@ pub(super) async fn dispatch_chat(
         // Gemini 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
         (Ingress::Gemini, Operation::Messages) => bill
             .state
-            .messages_via(
-                cand,
-                endpoint,
-                base,
-                &upstream_model,
-                body,
-                stream,
-                &outbound,
-            )
+            .messages_via(infer_call(&upstream_model, body, stream))
             .await
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model))
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
@@ -607,15 +608,7 @@ pub(super) async fn dispatch_chat(
         // OpenAI/Responses 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状
         (Ingress::OpenAi | Ingress::Responses, Operation::Messages) => bill
             .state
-            .messages_via(
-                cand,
-                endpoint,
-                base,
-                &upstream_model,
-                body,
-                stream,
-                &outbound,
-            )
+            .messages_via(infer_call(&upstream_model, body, stream))
             .await
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model)),
         // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
@@ -628,15 +621,7 @@ pub(super) async fn dispatch_chat(
         (Ingress::Anthropic, Operation::Messages) => {
             match bill
                 .state
-                .messages_via(
-                    cand,
-                    endpoint,
-                    base,
-                    &upstream_model,
-                    body,
-                    stream,
-                    &outbound,
-                )
+                .messages_via(infer_call(&upstream_model, body, stream))
                 .await?
             {
                 okapi_providers::anthropic::MessagesResponse::Json {

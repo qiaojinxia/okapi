@@ -110,16 +110,20 @@ impl AppState {
         body: Bytes,
         stream: bool,
     ) -> Result<ChatResponse, UpstreamError> {
+        let base = openai_base(cand);
+        let outbound = outbound(cand);
         match self
             .infer_via(
-                cand,
                 okapi_providers::inference::Surface::Chat,
-                endpoint,
-                &openai_base(cand),
-                upstream_model,
-                body,
-                stream,
-                &outbound(cand),
+                super::dialect::InferCall {
+                    cand,
+                    endpoint,
+                    base: &base,
+                    model: upstream_model,
+                    body,
+                    stream,
+                    outbound: &outbound,
+                },
             )
             .await?
         {

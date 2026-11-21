@@ -11,21 +11,33 @@ use okapi_store::ChannelCandidate;
 pub fn upstream_dialect(provider: &str, model: &str) -> &'static str {
     registry::lookup(provider).map_or("opaque", |adapter| adapter.dialect(model).as_str())
 }
+pub struct InferCall<'a> {
+    pub cand: &'a ChannelCandidate,
+    pub endpoint: &'a str,
+    pub base: &'a str,
+    pub model: &'a str,
+    pub body: Bytes,
+    pub stream: bool,
+    pub outbound: &'a Outbound,
+}
+
 impl AppState {
     /// `endpoint` 是这次尝试的执行计划给出的上游端点（`ExecutionPlan::endpoint`），诊断里按它记，
     /// 与账单上的 `upstream_endpoint` 是同一个标签。
-    #[allow(clippy::too_many_arguments)]
     pub async fn infer_via(
         &self,
-        cand: &ChannelCandidate,
         surface: Surface,
-        endpoint: &str,
-        base: &str,
-        model: &str,
-        body: Bytes,
-        stream: bool,
-        outbound: &Outbound,
+        call: InferCall<'_>,
     ) -> Result<Response, UpstreamError> {
+        let InferCall {
+            cand,
+            endpoint,
+            base,
+            model,
+            body,
+            stream,
+            outbound,
+        } = call;
         super::account_control::execute(self, cand, model, endpoint, async {
             let credential = CredentialManager.resolve(self, cand).await?;
             let account_id = credential
@@ -60,62 +72,28 @@ impl AppState {
         })
         .await
     }
-    #[allow(clippy::too_many_arguments)]
+
     pub async fn responses_via(
         &self,
-        cand: &ChannelCandidate,
-        endpoint: &str,
-        base: &str,
-        body: Bytes,
-        stream: bool,
         compact: bool,
-        outbound: &Outbound,
+        call: InferCall<'_>,
     ) -> Result<okapi_providers::ChatResponse, UpstreamError> {
-        match self
-            .infer_via(
-                cand,
-                Surface::Responses { compact },
-                endpoint,
-                base,
-                "",
-                body,
-                stream,
-                outbound,
-            )
-            .await?
-        {
+        match self.infer_via(Surface::Responses { compact }, call).await? {
             Response::OpenAi(response) => Ok(response),
             _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
         }
     }
-    #[allow(clippy::too_many_arguments)]
+
     pub async fn messages_via(
         &self,
-        cand: &ChannelCandidate,
-        endpoint: &str,
-        base: &str,
-        model: &str,
-        body: Bytes,
-        stream: bool,
-        outbound: &Outbound,
+        call: InferCall<'_>,
     ) -> Result<okapi_providers::anthropic::MessagesResponse, UpstreamError> {
-        match self
-            .infer_via(
-                cand,
-                Surface::Messages,
-                endpoint,
-                base,
-                model,
-                body,
-                stream,
-                outbound,
-            )
-            .await?
-        {
+        match self.infer_via(Surface::Messages, call).await? {
             Response::Messages(response) => Ok(response),
             _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
         }
     }
+
     pub async fn generate_via(
         &self,
         cand: &ChannelCandidate,
@@ -125,16 +103,19 @@ impl AppState {
         body: Bytes,
         stream: bool,
     ) -> Result<okapi_providers::gemini::GeminiResponse, UpstreamError> {
+        let outbound = super::openai_dialect::outbound(cand);
         match self
             .infer_via(
-                cand,
                 Surface::Generate,
-                endpoint,
-                base,
-                model,
-                body,
-                stream,
-                &super::openai_dialect::outbound(cand),
+                InferCall {
+                    cand,
+                    endpoint,
+                    base,
+                    model,
+                    body,
+                    stream,
+                    outbound: &outbound,
+                },
             )
             .await?
         {
