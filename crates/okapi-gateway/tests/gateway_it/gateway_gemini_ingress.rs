@@ -135,6 +135,16 @@ async fn mock_chat(body: axum::body::Bytes) -> axum::response::Response {
 }
 
 /// anthropic 上游：两跳 gemini→chat→anthropic，system 抽到顶层。
+/// 流里只有一个过载错误块的 chat 上游（ChatGPT 后端过载时就是这样）。
+async fn mock_chat_overloaded() -> axum::response::Response {
+    let error = serde_json::json!({"error": {"code": "server_is_overloaded", "message": "busy"}});
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        format!("data: {error}\n\ndata: [DONE]\n\n"),
+    )
+        .into_response()
+}
+
 async fn mock_anthropic(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(req["system"], "sys prompt");
@@ -153,6 +163,10 @@ async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
         .route("/g/v1beta/models/{model_and_action}", post(mock_gemini))
         .route("/oai/v1/chat/completions", post(mock_chat))
+        .route(
+            "/oai-overloaded/v1/chat/completions",
+            post(mock_chat_overloaded),
+        )
         .route("/ant/v1/messages", post(mock_anthropic));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -412,6 +426,22 @@ async fn openai_channel_stream_converted() {
     assert_eq!(status, 20);
     assert_eq!((prompt, completion), (100, 20));
     assert_eq!(amount, 240);
+}
+
+/// chat 上游在流里报过载、客户端说 Gemini：转换前认成上游错误，而不是当成空回复（`empty_completion`）。
+#[tokio::test]
+async fn openai_channel_in_stream_error_is_not_an_empty_reply() {
+    let env = setup("openai", "/oai-overloaded/v1").await;
+    let resp = post_gemini(&env, true, Auth::Bearer).await;
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    // 按上游错误回（网关统一 502 + `upstream_status`）；修之前是 `empty_completion`
+    assert_eq!(status, 502, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        body["error"]["message"], "upstream_status",
+        "不能是空回复：{text}"
+    );
 }
 
 /// 非流式：chat.completion → GenerateContentResponse。

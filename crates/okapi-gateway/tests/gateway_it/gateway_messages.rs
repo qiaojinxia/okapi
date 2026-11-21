@@ -131,6 +131,16 @@ async fn mock_openai(body: axum::body::Bytes) -> axum::response::Response {
     }
 }
 
+/// 流里只有一个错误块的 OpenAI 上游（ChatGPT 后端过载时就是这样，2026-10-29 线上见过）。
+async fn mock_openai_overloaded() -> axum::response::Response {
+    let error = json!({"error": {"code": "server_is_overloaded", "message": "busy, retry later"}});
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        format!("data: {error}\n\ndata: [DONE]\n\n"),
+    )
+        .into_response()
+}
+
 async fn mock_count_tokens(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -161,7 +171,11 @@ async fn spawn_mock() -> SocketAddr {
             post(mock_count_tokens),
         )
         .route("/anthropic/v1/messages", post(mock_anthropic))
-        .route("/openai/v1/chat/completions", post(mock_openai));
+        .route("/openai/v1/chat/completions", post(mock_openai))
+        .route(
+            "/openai-overloaded/v1/chat/completions",
+            post(mock_openai_overloaded),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -183,6 +197,11 @@ struct TestEnv {
 
 /// provider: "anthropic" | "openai"
 async fn setup(provider: &str) -> TestEnv {
+    setup_at(provider, provider).await
+}
+
+/// 渠道类型是 `provider`，地址指向模拟上游的 `/{path}/v1`（同一类型的不同行为）。
+async fn setup_at(provider: &str, path: &str) -> TestEnv {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
@@ -213,7 +232,7 @@ async fn setup(provider: &str) -> TestEnv {
         &pg,
         &format!("{provider}-{suffix}"),
         provider,
-        &format!("http://{mock}/{provider}/v1"),
+        &format!("http://{mock}/{path}/v1"),
         "mock-credential",
         &[model.as_str()],
         false,
@@ -371,6 +390,25 @@ async fn messages_converts_openai_upstream_stream() {
     assert_eq!(prompt, 900, "计费仍是 OpenAI 口径 prompt 含缓存");
     assert_eq!(cached, 800);
     assert_eq!(amount, 600_000);
+}
+
+/// OpenAI 上游在流里报过载、客户端说 Anthropic：转换前就得认成上游错误。转换器不认 chat 的错误块，
+/// 以前这次请求被当成空回复（`empty_completion`，过载原因丢失）；透传路径 10-29 修过，跨方言这条漏了。
+#[tokio::test]
+async fn messages_surfaces_in_stream_errors_from_an_openai_upstream() {
+    let env = setup_at("openai", "openai-overloaded").await;
+    let resp = post_messages(&env, true).await;
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    // 流内 `server_is_overloaded` 认成上游 503（`stream_failure::status_of`），按上游错误回给客户端
+    // （网关统一 502 + `upstream_status`，重试矩阵与 key 冷却按过载走）；修之前是 `empty_completion`
+    assert_eq!(status, 502, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["type"], "error", "{text}");
+    assert_eq!(
+        body["error"]["type"], "upstream_status",
+        "不能是空回复：{text}"
+    );
 }
 
 /// 非流式回向转换 + 错误壳。

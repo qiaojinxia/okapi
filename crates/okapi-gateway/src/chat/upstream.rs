@@ -596,6 +596,7 @@ pub(super) async fn dispatch_chat(
             .state
             .openai_chat(cand, endpoint, &upstream_model, body, stream)
             .await
+            .map(surface_stream_failures)
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + gemini 方言上游：providers 内转回 OpenAI 形状
         (Ingress::OpenAi | Ingress::Responses, Operation::GenerateContent) => bill
@@ -667,11 +668,11 @@ pub(super) async fn dispatch_chat(
         }
         // Anthropic 客户端 + OpenAI(兼容 / Azure) 上游：回向转换为 Anthropic 事件/JSON
         (Ingress::Anthropic, Operation::ChatCompletions) => {
-            match bill
-                .state
-                .openai_chat(cand, endpoint, &upstream_model, body, stream)
-                .await?
-            {
+            match surface_stream_failures(
+                bill.state
+                    .openai_chat(cand, endpoint, &upstream_model, body, stream)
+                    .await?,
+            ) {
                 ChatResponse::Json {
                     status,
                     upstream_request_id,
@@ -730,12 +731,38 @@ pub(super) async fn dispatch_chat(
     Ok(resp)
 }
 
+/// 上游说 chat 方言、流要转成别的方言给客户端时：在转换**之前**认出流里的错误事件（`{"error":…}`），
+/// 变成 `Err` 交给转换器原样往下传。
+///
+/// 转换器不认 chat 的错误事件（当普通块处理，至多产出一个 `message_start`），转换后网关再按客户端方言找
+/// （`stream::stream_failure_in`）就找不到了：客户端拿到空回复，看不到上游的 429 / 529，也不会按限流退避
+/// （10-29 修过的 `server_is_overloaded` 同一类，跨方言这条路漏了）。判定与透传路径同一个函数；同方言透传
+/// 不走这里，仍在原始事件上判（不算错误的说明留作空回复的诊断）。
+fn surface_stream_failures(resp: ChatResponse) -> ChatResponse {
+    use futures::StreamExt as _;
+    match resp {
+        ChatResponse::Stream(h) => ChatResponse::Stream(StreamHandle {
+            upstream_request_id: h.upstream_request_id,
+            events: Box::pin(h.events.map(|item| {
+                if let Ok(event) = &item
+                    && let Some(error) = super::stream::stream_failure_in(event, &mut None)
+                {
+                    return Err(error);
+                }
+                item
+            })),
+        }),
+        json @ ChatResponse::Json { .. } => json,
+    }
+}
+
 /// chat 形状 → Responses 方言（response.created/.output_text.delta/.completed 事件骨架）。
 pub(super) fn wrap_responses_egress(
     resp: ChatResponse,
     upstream_model: &str,
 ) -> Result<ChatResponse, UpstreamError> {
     use futures::StreamExt as _;
+    let resp = surface_stream_failures(resp);
     match resp {
         ChatResponse::Json {
             status,
@@ -1058,5 +1085,95 @@ mod tests {
         assert!(sv.get("provider").is_none());
         assert!(sv.get("reasoning").is_none());
         assert_eq!(sv["metadata"], serde_json::json!({"env": "prod"}));
+    }
+
+    fn chat_data(raw: &str) -> okapi_providers::ChatEvent {
+        okapi_providers::ChatEvent::Data {
+            event: None,
+            has_output: false,
+            content_chars: 0,
+            usage: None,
+            raw: raw.to_owned(),
+        }
+    }
+
+    fn chat_stream(items: Vec<okapi_providers::ChatEvent>) -> ChatResponse {
+        ChatResponse::Stream(StreamHandle {
+            upstream_request_id: None,
+            events: Box::pin(futures::stream::iter(items.into_iter().map(Ok))),
+        })
+    }
+
+    async fn drain(resp: ChatResponse) -> Vec<Result<okapi_providers::ChatEvent, UpstreamError>> {
+        use futures::StreamExt as _;
+        let ChatResponse::Stream(h) = resp else {
+            panic!("expected a stream");
+        };
+        h.events.collect().await
+    }
+
+    /// chat 上游在流里报错（`{"error":…}`）而客户端说别的方言：转换之前就得认成上游错误。
+    /// 否则转换器把它当普通块，网关转换后再找已经找不到，客户端只拿到空回复（看不到 529 / 429）。
+    #[tokio::test]
+    async fn chat_stream_errors_survive_conversion_to_other_dialects() {
+        use futures::StreamExt as _;
+        let overloaded = r#"{"error":{"code":"server_is_overloaded","message":"busy"}}"#;
+        let is_overloaded = |item: &Result<okapi_providers::ChatEvent, UpstreamError>| matches!(item, Err(UpstreamError::Status { status, .. }) if *status >= 500);
+        // Responses 客户端：出口转换自带识别
+        let out = drain(
+            wrap_responses_egress(
+                chat_stream(vec![
+                    chat_data(overloaded),
+                    okapi_providers::ChatEvent::Done,
+                ]),
+                "m",
+            )
+            .expect("egress wraps"),
+        )
+        .await;
+        assert!(
+            out.iter().any(is_overloaded),
+            "Responses 出口丢了流内错误：{out:?}"
+        );
+        // Anthropic 客户端：与 dispatch 分支同一组合（先认错误，再转 Anthropic 事件）
+        let ChatResponse::Stream(h) =
+            surface_stream_failures(chat_stream(vec![chat_data(overloaded)]))
+        else {
+            panic!("expected a stream");
+        };
+        let mut st = conv_a2o::OaiStreamToAnthropic::new("m");
+        let out: Vec<_> = h
+            .events
+            .flat_map(move |item| futures::stream::iter(st.step(item)))
+            .collect()
+            .await;
+        assert!(
+            out.first().is_some_and(is_overloaded),
+            "Anthropic 出口丢了流内错误：{out:?}"
+        );
+        // Gemini 客户端
+        let out = drain(
+            conv_g2o::wrap_chat_as_gemini(
+                surface_stream_failures(chat_stream(vec![chat_data(overloaded)])),
+                "m",
+            )
+            .expect("gemini wraps"),
+        )
+        .await;
+        assert!(
+            out.iter().any(is_overloaded),
+            "Gemini 出口丢了流内错误：{out:?}"
+        );
+        // 普通增量与认不出类型的错误照常通过（后者留给空回复诊断）
+        for raw in [
+            r#"{"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+            r#"{"error":{"code":"something_new","message":"?"}}"#,
+        ] {
+            let out = drain(surface_stream_failures(chat_stream(vec![chat_data(raw)]))).await;
+            assert!(
+                matches!(&out[..], [Ok(okapi_providers::ChatEvent::Data { raw: got, .. })] if got == raw),
+                "{raw}: {out:?}"
+            );
+        }
     }
 }
