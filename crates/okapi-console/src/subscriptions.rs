@@ -17,7 +17,6 @@ use okapi_ledger::subscriptions::{self as flow, Receipt};
 use okapi_store::subscriptions::{self as store, SubPlan, Subscription};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 /// 售价为 0 的套餐不可自助购买（只能兑换码 / 管理员发放）。
 pub const PLAN_NOT_PURCHASABLE: &str = "plan_not_purchasable";
@@ -282,21 +281,8 @@ pub async fn admin_grant(
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
     let actor_tag = format!("admin:{}", actor.user_id);
-    let source = if let Some(key) = headers.get("Idempotency-Key") {
-        let key = key.to_str().map_err(|_| {
-            AppError::new(StatusCode::BAD_REQUEST, codes::BAD_REQUEST).with_param("idempotency_key")
-        })?;
-        if key.is_empty() || key.len() > 128 || !key.bytes().all(|b| b.is_ascii_graphic()) {
-            return Err(AppError::new(StatusCode::BAD_REQUEST, codes::BAD_REQUEST)
-                .with_param("idempotency_key"));
-        }
-        format!(
-            "{actor_tag}:{}",
-            hex::encode(Sha256::digest(key.as_bytes()))
-        )
-    } else {
-        format!("{actor_tag}:{}", uuid::Uuid::new_v4())
-    };
+    let source = crate::idempotency::source(&headers, &actor_tag)?
+        .unwrap_or_else(|| format!("{actor_tag}:{}", uuid::Uuid::new_v4()));
     let accepted = sqlx::query_scalar!(
         "SELECT plan_snapshot FROM subscription_grants WHERE user_id=$1 AND source=$2",
         user_id,

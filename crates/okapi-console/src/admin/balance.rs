@@ -111,30 +111,53 @@ pub async fn credit_user(
     // debit：按可用余额钳制（与 expire 同语义），事件仍是 adjust 的**负额**——
     // 现金流的 clawed 统计正是按负额 adjust 聚合的。
     let admin = format!("admin:{}", actor.actor_user_id());
-    let (applied_micro, receipt, action) = if req.amount_micro > 0 {
-        let receipt = okapi_ledger::operations::credit(
+    // 带 `Idempotency-Key` 的重复提交（双击、超时后重发）只动一次钱：键写进事件 payload，
+    // 账本在用户锁里查到同键事件就不再执行，这里回「已执行过」
+    let mut payload = json!({
+        "tags": [if req.amount_micro > 0 { "manual_credit" } else { "manual_debit" }],
+        "reason": req.reason,
+    });
+    if let Some(source) = crate::idempotency::source(&headers, &admin)? {
+        payload["idempotency"] = json!(source);
+    }
+    let outcome = if req.amount_micro > 0 {
+        okapi_ledger::operations::credit(
             &state.pg,
             &state.ledger,
             user_id,
             Money::from_micros(req.amount_micro),
             "adjust",
             &admin,
-            json!({ "tags": ["manual_credit"], "reason": req.reason }),
+            payload,
         )
-        .await?;
-        (req.amount_micro, Some(receipt), "user.credit")
+        .await
+        .map(|receipt| (req.amount_micro, Some(receipt), "user.credit"))
     } else {
-        let (applied, receipt) = okapi_ledger::operations::debit(
+        okapi_ledger::operations::debit(
             &state.pg,
             &state.ledger,
             user_id,
             Money::from_micros(req.amount_micro.saturating_neg()),
             "adjust",
             &admin,
-            json!({ "tags": ["manual_debit"], "reason": req.reason }),
+            payload,
         )
-        .await?;
-        (applied.as_micros().saturating_neg(), receipt, "user.debit")
+        .await
+        .map(|(applied, receipt)| (applied.as_micros().saturating_neg(), receipt, "user.debit"))
+    };
+    let (applied_micro, receipt, action) = match outcome {
+        Ok(done) => done,
+        Err(okapi_ledger::LedgerError::Replayed) => {
+            let balance = state.ledger.balance(user_id).await?;
+            return Ok(Json(json!({
+                "replayed": true,
+                "balance_after_micro": balance.as_micros(),
+                "operation_id": null,
+                "pending": false,
+                "applied_micro": 0,
+            })));
+        }
+        Err(err) => return Err(err.into()),
     };
     audit(
         &state,

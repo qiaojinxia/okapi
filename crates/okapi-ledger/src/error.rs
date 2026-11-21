@@ -54,6 +54,11 @@ pub enum LedgerError {
     #[error("ledger_user_busy")]
     UserBusy,
 
+    /// 带幂等键（payload 的 `idempotency`）的入账 / 扣减重复提交：这个用户近 7 天已有带同一把键的事件，
+    /// 这次没动钱。只有传了幂等键的调用方会见到，由它按「已执行过」回应。
+    #[error("ledger_replayed")]
+    Replayed,
+
     #[error("ledger_store_error: {0}")]
     Store(#[from] okapi_store::StoreError),
 

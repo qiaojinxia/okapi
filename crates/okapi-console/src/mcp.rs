@@ -198,13 +198,14 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "user_adjust_balance",
-        description: "Credit a user's balance (micro-USD, positive only). Two-phase: dry-run preview unless confirm=true.",
+        description: "Credit a user's balance (micro-USD, positive only). Two-phase: dry-run preview unless confirm=true. Pass the same idempotency_key when retrying a confirm=true call: a repeat is answered with replayed=true and credits nothing.",
         schema: || {
             json!({"type": "object", "required": ["user_id", "amount_micro"], "properties": {
                 "user_id": {"type": "integer"},
                 "amount_micro": {"type": "integer", "minimum": 1},
                 "reason": {"type": "string"},
-                "confirm": {"type": "boolean", "default": false}}})
+                "confirm": {"type": "boolean", "default": false},
+                "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}}})
         },
         permission: Some(permissions::USER_BALANCE_ADJUST),
         write: true,

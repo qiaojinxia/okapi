@@ -189,16 +189,36 @@ pub(super) async fn user_adjust_balance(
         }));
     }
     let amount = okapi_domain::Money::from_micros(amount_micro);
-    let balance_after = okapi_ledger::operations::credit(
+    let actor = format!("mcp:{}", key.key_id);
+    let mut payload = json!({"tags": ["mcp_credit"], "reason": reason});
+    // 智能体超时后常原样重发 confirm=true 的调用：带同一个 idempotency_key 只入账一次
+    if let Some(idempotency) = args.get("idempotency_key") {
+        let idempotency = idempotency
+            .as_str()
+            .filter(|k| !k.is_empty() && k.len() <= 128 && k.bytes().all(|b| b.is_ascii_graphic()))
+            .ok_or_else(|| AppError::bad_request().with_param("idempotency_key"))?;
+        payload["idempotency"] = json!(crate::idempotency::of(&actor, idempotency));
+    }
+    let balance_after = match okapi_ledger::operations::credit(
         &state.pg,
         &state.ledger,
         user_id,
         amount,
         "adjust",
-        &format!("mcp:{}", key.key_id),
-        json!({"tags": ["mcp_credit"], "reason": reason}),
+        &actor,
+        payload,
     )
-    .await?;
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(okapi_ledger::LedgerError::Replayed) => {
+            let balance = state.ledger.balance(user_id).await?;
+            return Ok(
+                json!({"dry_run": false, "replayed": true, "balance_after_micro": balance.as_micros(), "pending": false}),
+            );
+        }
+        Err(err) => return Err(err.into()),
+    };
     mcp_audit(
         state,
         key,

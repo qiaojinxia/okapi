@@ -408,11 +408,12 @@ async fn settle_paid_order(
             true,
         )
         .await?;
+        let reward = aff_reward_in_tx(state, &mut tx, user_id, amount_micro, order_no).await;
         tx.commit().await.map_err(okapi_store::StoreError::from)?;
         okapi_ledger::subscriptions::finish(&mut guard, &state.ledger, user_id, id).await;
         drop(guard);
         state.sched.auth_flush().await;
-        aff_reward(state, user_id, amount_micro, order_no).await;
+        finish_aff_reward(state, reward).await;
         return Ok(true);
     }
     let amount = okapi_domain::Money::from_micros(amount_micro);
@@ -425,6 +426,7 @@ async fn settle_paid_order(
         json!({"tags": ["recharge"], "order_no": order_no, "trade_no": trade_no}),
     )
     .await?;
+    let reward = aff_reward_in_tx(state, &mut tx, user_id, amount_micro, order_no).await;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
     let receipt = okapi_ledger::transfers::finish(
         &mut guard,
@@ -435,7 +437,7 @@ async fn settle_paid_order(
     )
     .await;
     drop(guard);
-    aff_reward(state, user_id, amount_micro, order_no).await;
+    finish_aff_reward(state, reward).await;
     tracing::info!(
         order_no,
         user_id,
@@ -513,9 +515,30 @@ pub async fn stripe_webhook(
     Ok(Json(json!({"received": true})))
 }
 
+/// 返佣已在付款事务里记账、还没落到热账本的那一笔（拿着邀请人的用户锁）。
+struct PendingAffReward {
+    inviter_id: i64,
+    operation_id: uuid::Uuid,
+    guard: okapi_ledger::holds::UserGuard,
+}
+
 /// 邀请返利（M4 aff）：充值核销成功后给邀请人按 settings.aff_percent_bp（基点）返利。
 /// 缺省 0 = 关闭；仅充值触发（兑换码核销不返利，防套利）；失败不阻断充值主流程。
-async fn aff_reward(state: &AppState, invitee: i64, amount_micro: i64, order_no: &str) {
+///
+/// 返佣与付款**同一个 PG 事务**记账：订单置为已付和邀请人的入账意向一起提交、一起回滚，
+/// 提交后再落热账本；落热账本失败或进程这时退出，由 worker 的 `transfers::recover_pending` 补上。
+/// 此前在付款提交之后另起一笔入账，失败只留一条 error，进程正好退出时返佣就丢了，也没有任何补救。
+///
+/// 返佣自身出错（拿不到邀请人的锁、入账失败）只回滚到保存点、记 error，不连累付款本身：
+/// 一个坏掉的邀请人账户不能卡住被邀请人的充值。锁的顺序固定是「付款人 → 邀请人」，
+/// 邀请关系不成环（邀请人必先注册），不会互等。
+async fn aff_reward_in_tx(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    invitee: i64,
+    amount_micro: i64,
+    order_no: &str,
+) -> Option<PendingAffReward> {
     // 设置页存的是 JSON 数字；写成数字字符串的也认
     let bp = state
         .setting_fresh("aff_percent_bp")
@@ -525,38 +548,75 @@ async fn aff_reward(state: &AppState, invitee: i64, amount_micro: i64, order_no:
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
         .unwrap_or(0);
     if bp <= 0 {
-        return;
+        return None;
     }
     let inviter_id = sqlx::query_scalar!(
         r#"SELECT inviter_id FROM users WHERE id = $1 AND deleted_at IS NULL"#,
         invitee
     )
-    .fetch_optional(&state.pg)
+    .fetch_optional(&mut **tx)
     .await
     .ok()
     .flatten()
-    .flatten();
-    let Some(inviter_id) = inviter_id else {
-        return;
-    };
+    .flatten()
+    .filter(|inviter| *inviter != invitee)?;
     // i128 里乘：单笔上限 2^53 微元 × 1 万基点放不进 i64，saturating 会把大额返利算少
     let reward = i64::try_from(i128::from(amount_micro) * i128::from(bp.min(10_000)) / 10_000)
         .unwrap_or(i64::MAX);
     if reward <= 0 {
-        return;
+        return None;
     }
-    let money = okapi_domain::Money::from_micros(reward);
-    if let Err(err) = okapi_ledger::operations::credit(
-        &state.pg,
-        &state.ledger,
+    let guard = match okapi_ledger::holds::UserGuard::acquire(&state.pg, inviter_id).await {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::error!(inviter_id, order_no, error = %err, "aff 返利跳过：拿不到邀请人的账本锁（需核对账本）");
+            return None;
+        }
+    };
+    let recorded = async {
+        // 嵌套 begin = SAVEPOINT：返佣失败只回滚这一段，付款照常提交
+        let mut savepoint = sqlx::Connection::begin(&mut **tx).await?;
+        let operation_id = okapi_ledger::transfers::credit_in_tx(
+            &mut savepoint,
+            inviter_id,
+            okapi_domain::Money::from_micros(reward),
+            "adjust",
+            "system:aff",
+            json!({"reason": "aff_reward", "invitee": invitee, "order_no": order_no, "bp": bp}),
+        )
+        .await?;
+        savepoint.commit().await?;
+        Ok::<_, okapi_ledger::LedgerError>(operation_id)
+    }
+    .await;
+    match recorded {
+        Ok(operation_id) => Some(PendingAffReward {
+            inviter_id,
+            operation_id,
+            guard,
+        }),
+        Err(err) => {
+            tracing::error!(inviter_id, order_no, error = %err, "aff 返利入账失败，付款照常（需核对账本）");
+            None
+        }
+    }
+}
+
+/// 付款提交之后把返佣落到邀请人的热账本（`finish` 失败只会留成待恢复，不会丢）。
+async fn finish_aff_reward(state: &AppState, reward: Option<PendingAffReward>) {
+    if let Some(PendingAffReward {
         inviter_id,
-        money,
-        "adjust",
-        "system:aff",
-        json!({"reason": "aff_reward", "invitee": invitee, "order_no": order_no, "bp": bp}),
-    )
-    .await
+        operation_id,
+        mut guard,
+    }) = reward
     {
-        tracing::error!(inviter_id, error = %err, "aff 返利入账失败（需核对账本）");
+        okapi_ledger::transfers::finish(
+            &mut guard,
+            &state.ledger,
+            inviter_id,
+            operation_id,
+            okapi_ledger::Pool::Wallet,
+        )
+        .await;
     }
 }

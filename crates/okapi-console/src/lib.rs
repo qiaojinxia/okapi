@@ -22,6 +22,7 @@ mod cloud_probe;
 mod core_source;
 pub mod dlq;
 pub mod egress;
+mod idempotency;
 mod identifiers;
 mod input_units;
 mod key_copy;

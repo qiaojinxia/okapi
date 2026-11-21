@@ -264,6 +264,24 @@ async fn mcp_write_full_scenario() {
         applied["result"]["structuredContent"]["balance_after_micro"],
         5_000_000
     );
+    // 智能体超时后原样重发 confirm=true：带同一个 idempotency_key 只入账一次，第二次回 replayed
+    let keyed = json!({"user_id": target, "amount_micro": 1_000_000, "confirm": true, "idempotency_key": "retry-1"});
+    let first = call(&env, "user_adjust_balance", keyed.clone()).await;
+    assert_eq!(
+        first["result"]["structuredContent"]["balance_after_micro"], 6_000_000,
+        "{first}"
+    );
+    let again = call(&env, "user_adjust_balance", keyed).await;
+    let again = &again["result"]["structuredContent"];
+    assert_eq!(again["replayed"], true, "{again}");
+    assert_eq!(again["balance_after_micro"], 6_000_000, "{again}");
+    let bad = call(
+        &env,
+        "user_adjust_balance",
+        json!({"user_id": target, "amount_micro": 1, "confirm": true, "idempotency_key": ""}),
+    )
+    .await;
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
 
     // ban：dry-run 不动，confirm 后 status=2
     let _ = call(&env, "user_ban", json!({"user_id": target})).await;

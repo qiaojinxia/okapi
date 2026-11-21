@@ -470,6 +470,18 @@ async fn aff_reward_on_recharge() {
         1_000_000,
         "邀请人应得 10% 返利"
     );
+    // 返利与付款同一个事务：支付网关重发同一个回调时订单已付、整个事务不再执行，返利也不会再发一次
+    let resend = client
+        .get(format!("http://{}/pay/callback/epay?{qs}", env.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resend.text().await.unwrap(), "success");
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        inviter_after,
+        "重发的回调不得重复返利"
+    );
 
     // 门户统计：邀请 1 人、累计返利
     let stat: Value = client

@@ -119,6 +119,68 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+/// 同一个 `Idempotency-Key` 的加款 / 扣款重复提交（双击、超时后重发）只动一次钱，第二次回 `replayed`。
+/// 结束时余额回到进来时的数（加 1 USD、再扣 1 USD），不影响后面按余额算的断言。
+async fn assert_repeated_credit_with_one_idempotency_key_moves_money_once(
+    env: &Env,
+    token: &str,
+    user_id: i64,
+) {
+    let send = |amount: i64, key: &'static str| {
+        client()
+            .post(format!(
+                "http://{}/admin/users/{user_id}/credit",
+                env.console
+            ))
+            .bearer_auth(token)
+            .header("Idempotency-Key", key)
+            .json(&json!({"amount_micro": amount, "reason": "idempotency"}))
+            .send()
+    };
+    let before = env.state.ledger.balance(user_id).await.unwrap().as_micros();
+    for (amount, key, delta) in [
+        (1_000_000, "credit-once", 1_000_000),
+        (-1_000_000, "debit-once", -1_000_000),
+    ] {
+        let first: Value = send(amount, key).await.unwrap().json().await.unwrap();
+        assert_eq!(first["applied_micro"], delta, "{first}");
+        assert!(first.get("replayed").is_none(), "{first}");
+        let again = send(amount, key).await.unwrap();
+        assert_eq!(again.status(), 200);
+        let again: Value = again.json().await.unwrap();
+        assert_eq!(again["replayed"], true, "同键第二次不得再动钱：{again}");
+        assert_eq!(again["applied_micro"], 0, "{again}");
+    }
+    assert_eq!(
+        env.state.ledger.balance(user_id).await.unwrap().as_micros(),
+        before
+    );
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM billing_events WHERE user_id = $1 AND payload ? 'idempotency'",
+    )
+    .bind(user_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(events, 2, "两把键各一笔事件");
+    let bad = client()
+        .post(format!(
+            "http://{}/admin/users/{user_id}/credit",
+            env.console
+        ))
+        .bearer_auth(token)
+        .header("Idempotency-Key", "has space")
+        .json(&json!({"amount_micro": 1, "reason": "bad key"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        bad.status(),
+        400,
+        "不可见字符的键要拒收，不能静默当成没带键"
+    );
+}
+
 async fn console_post(env: &Env, token: &str, path: &str, body: Value) -> reqwest::Response {
     client()
         .post(format!("http://{}{path}", env.console))
@@ -253,6 +315,8 @@ async fn pricing_publish_hot_reload_e2e() {
     let credited: Value = r.json().await.unwrap();
     assert_eq!(credited["balance_after_micro"], 10_000_000, "{credited}");
     assert_credit_beyond_the_money_bound_is_refused(&env, &super_token, user_id).await;
+    assert_repeated_credit_with_one_idempotency_key_moves_money_once(&env, &super_token, user_id)
+        .await;
 
     // 第一笔：ratio 1 → 240 micro
     let amount1 = chat_and_settle(&env, &user_token, &model).await;

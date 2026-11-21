@@ -5,6 +5,27 @@ use serde_json::Value;
 use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
+/// payload 带幂等键（`"idempotency": "<调用方:散列>"`）时，这个用户在窗口内是否已有同键事件。
+/// 在用户锁（`UserGuard`）里查：同键的并发请求排队进来，后到的一定看得见先到的那笔。
+/// 窗口 7 天：重试 / 重复提交都发生在几分钟内；限定时间也让查询只碰最近的分区（走 `idx_be_user_time`）。
+async fn replayed(
+    guard: &mut UserGuard,
+    user_id: i64,
+    payload: &Value,
+) -> Result<bool, LedgerError> {
+    let Some(key) = payload.get("idempotency").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM billing_events WHERE user_id = $1 \
+         AND created_at > now() - interval '7 days' AND payload->>'idempotency' = $2)",
+    )
+    .bind(user_id)
+    .bind(key)
+    .fetch_one(guard.connection()?)
+    .await?)
+}
+
 /// Accept the event, snapshot and recovery intent in one PG transaction. A
 /// transient Redis failure returns a pending receipt and is recovered by worker.
 pub async fn credit(
@@ -21,6 +42,9 @@ pub async fn credit(
         return Err(LedgerError::InvalidAmount);
     }
     let mut guard = UserGuard::acquire(db, user_id).await?;
+    if replayed(&mut guard, user_id, &payload).await? {
+        return Err(LedgerError::Replayed);
+    }
     let mut tx = guard.connection()?.begin().await?;
     let id = crate::transfers::credit_in_tx(&mut tx, user_id, amount, event_type, actor, payload)
         .await?;
@@ -49,6 +73,9 @@ pub async fn debit(
         return Err(LedgerError::InvalidAmount);
     }
     let mut guard = UserGuard::acquire(db, user_id).await?;
+    if replayed(&mut guard, user_id, &payload).await? {
+        return Err(LedgerError::Replayed);
+    }
     guard.synchronize(ledger).await?;
     let available = ledger.balance(user_id).await?.as_micros().max(0);
     let applied = amount.as_micros().min(available);
