@@ -53,6 +53,13 @@ impl Trace {
         if let Some(session) = header(&["session_id", "session-id", "x-session-id"]) {
             fields["session_id"] = json!(bounded(&sanitize(session, &secrets), 256));
         }
+        if let Some(raw_tp) = header(&[okapi_kernel::trace_context::TRACEPARENT_HEADER])
+            && let Some((trace_id, span_id, _)) =
+                okapi_kernel::trace_context::parse_traceparent(raw_tp)
+        {
+            fields["trace_id"] = json!(trace_id);
+            fields["span_id"] = json!(span_id);
+        }
         Self(Arc::new(Mutex::new(Data {
             fields,
             secrets,

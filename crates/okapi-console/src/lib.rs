@@ -133,6 +133,17 @@ where
     Ok(())
 }
 
+async fn metrics_endpoint(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    state.metrics_response("console", &headers)
+}
+
+async fn observe_console_http(req: Request, next: Next) -> Response {
+    okapi_kernel::metrics::observe_http("console", req, next).await
+}
+
 /// 组装路由（集成测试直接复用）。按域拆分子路由，与 IMPLEMENTATION §11.6
 /// 的接口面清单一一对应：供应商接入 / 定价配置 / 用户与权限 / 运维统计 / 用户自助 / 认证。
 pub fn router(state: AppState) -> Router {
@@ -145,6 +156,8 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes())
         .route("/mcp", post(mcp::endpoint))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_endpoint))
+        .route_layer(axum::middleware::from_fn(observe_console_http))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin::authenticate_first,
@@ -166,6 +179,9 @@ pub fn router(state: AppState) -> Router {
             okapi_kernel::security_headers::apply,
         ))
         .layer(TraceLayer::new_for_http().make_span_with(okapi_kernel::clients::request_span))
+        .layer(axum::middleware::from_fn(
+            okapi_kernel::trace_context::propagate,
+        ))
         .with_state(state)
 }
 
@@ -176,7 +192,7 @@ pub fn router(state: AppState) -> Router {
 /// 而 `fetch`/curl 等（`Accept: */*` 或 `application/json`）完全不受影响，API 语义不变。
 /// 豁免必须由服务端处理的浏览器导航：OAuth 起跳/回调、支付回跳，以及探针与 MCP。
 async fn spa_navigation(req: Request, next: Next) -> Response {
-    const SERVER_HANDLED: [&str; 4] = ["/auth/", "/pay/", "/mcp", "/healthz"];
+    const SERVER_HANDLED: [&str; 5] = ["/auth/", "/pay/", "/mcp", "/healthz", "/metrics"];
 
     let is_navigation = req.method() == Method::GET
         && req

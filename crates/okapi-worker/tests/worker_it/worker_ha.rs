@@ -220,3 +220,69 @@ async fn routing_invalidate_broadcast_clears_margin_cache_across_replicas() {
         "routing.invalidate 广播必须即时失效其它副本的 margin_cache"
     );
 }
+
+#[tokio::test]
+async fn gateway_exposes_prometheus_metrics_and_propagates_w3c_traceparent() {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let state = okapi_gateway::build_state(&database_url, &redis_url, "gw-obs", None, None)
+        .await
+        .unwrap();
+    let app = okapi_gateway::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let incoming_trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let incoming_parent = "00f067aa0ba902b7";
+    let health = client
+        .get(format!("http://{addr}/healthz"))
+        .header(
+            "traceparent",
+            format!("00-{incoming_trace}-{incoming_parent}-01"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health.status(), 200);
+    let echoed = health
+        .headers()
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .expect("response must include traceparent");
+    let (trace_id, span_id, flags) =
+        okapi_kernel::trace_context::parse_traceparent(echoed).expect("valid W3C traceparent");
+    assert_eq!(trace_id, incoming_trace);
+    assert_ne!(span_id, incoming_parent);
+    assert_eq!(flags, 1);
+
+    let metrics = client
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), 200);
+    assert_eq!(
+        metrics
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some(okapi_kernel::metrics::PROMETHEUS_CONTENT_TYPE)
+    );
+    let body = metrics.text().await.unwrap();
+    assert!(body.contains(
+        "okapi_http_requests_total{role=\"gateway\",method=\"GET\",route=\"/healthz\",status_class=\"2xx\"}"
+    ));
+    assert!(body.contains("okapi_pg_pool_connections{role=\"gateway\",state=\"total\"}"));
+    assert!(body.contains("okapi_pricebook_epoch "));
+    assert!(body.contains("okapi_settlement_backlog{role=\"gateway\"}"));
+}

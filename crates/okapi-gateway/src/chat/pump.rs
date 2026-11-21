@@ -38,6 +38,7 @@ pub(super) struct CandInfo {
     pub(super) trust_usage: bool,
     pub(super) upstream_model: String,
     pub(super) upstream_endpoint: String,
+    pub(super) provider: String,
 }
 
 /// 该渠道的首字窗口：未配 `retry_policy.first_output_timeout_secs` 时用全局缺省。
@@ -69,6 +70,7 @@ pub(super) fn cand_info(
         trust_usage: cand.trust_upstream_usage,
         upstream_model: cand.upstream_model(model).to_owned(),
         upstream_endpoint: upstream_endpoint(cand, model, stream, ingress).to_owned(),
+        provider: cand.provider.clone(),
     }
 }
 /// 账单与日志里的 `upstream_endpoint`：由这次尝试的执行计划推导（[`ExecutionPlan::endpoint`]），
@@ -95,6 +97,13 @@ pub(super) async fn spawn_stream_pump(
 ) -> Response {
     let setting = bill.state.setting_cached("streaming_policy").await;
     let policy = super::super::stream_policy::StreamPolicy::from_setting(setting.as_ref().as_ref());
+    okapi_kernel::metrics::global().record_upstream_ttft(
+        &info.provider,
+        Duration::from_millis(u64::try_from(ttft_ms.max(0)).unwrap_or(0)),
+    );
+    if failover > 0 {
+        okapi_kernel::metrics::global().record_upstream_failover();
+    }
     info.upstream_request_id = handle.upstream_request_id.take();
     let request_id = bill.request_id;
     let (mut tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);

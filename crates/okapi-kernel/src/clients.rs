@@ -8,7 +8,17 @@ use axum::http::HeaderMap;
 
 /// API keys and OAuth codes in query strings must not enter request spans.
 pub fn request_span(request: &axum::extract::Request) -> tracing::Span {
-    tracing::debug_span!("request", method = %request.method(), uri = request.uri().path(), version = ?request.version())
+    let trace = request
+        .extensions()
+        .get::<super::trace_context::TraceContext>();
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = request.uri().path(),
+        version = ?request.version(),
+        trace_id = trace.map_or("", |t| t.trace_id.as_str()),
+        span_id = trace.map_or("", |t| t.span_id.as_str()),
+    )
 }
 
 const RULES: &[(&str, &str)] = &[

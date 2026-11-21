@@ -36,8 +36,10 @@ pub async fn authenticate(
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
 
     let authed = if let Some(hit) = state.sched.auth_get(&key_hash).await {
+        crate::metrics::global().record_auth_cache(true);
         Arc::new(hit)
     } else {
+        crate::metrics::global().record_auth_cache(false);
         let mut resolved = None;
         for _ in 0..3 {
             let version = state.sched.auth_version().await;

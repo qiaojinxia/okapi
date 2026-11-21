@@ -279,6 +279,7 @@ pub(super) async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailu
                 .upstream
                 .as_ref()
                 .map_or_else(String::new, |v| v.1.clone()),
+            provider: String::new(),
         },
         TokenUsage::default(),
         Money::ZERO,

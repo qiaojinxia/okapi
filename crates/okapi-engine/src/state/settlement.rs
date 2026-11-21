@@ -84,10 +84,21 @@ async fn run_batcher(
             }
         }
         let batch = std::mem::take(&mut pending);
+        let batch_len = batch.len();
         let (inputs, replies): (Vec<_>, Vec<_>) =
             batch.into_iter().map(|b| (b.input, b.reply)).unzip();
         let _permit = gate.acquire().await;
+        let started = std::time::Instant::now();
         let outcomes = okapi_ledger::sync::record_batch(&pg, &ledger, &inputs).await;
+        let fallbacks = outcomes
+            .iter()
+            .filter(|o| matches!(o, Ok(BatchOutcome::Fallback) | Err(_)))
+            .count();
+        okapi_kernel::metrics::global().record_settlement_batch(
+            batch_len,
+            started.elapsed(),
+            fallbacks,
+        );
         for (reply, outcome) in replies.into_iter().zip(outcomes) {
             let _ = reply.send(outcome);
         }

@@ -224,14 +224,15 @@ pub(super) async fn run_maintenance(
             continue;
         }
         let round_ttl = maintenance_round_ttl_secs(interval);
-        let token = match ctx
+        let (token, outcome) = match ctx
             .sched
             .maintenance_claim(job.name(), &ctx.node, MAINT_LOCK_TTL_SECS, round_ttl)
             .await
         {
-            MaintenanceLease::Acquired(token) => Some(token),
-            MaintenanceLease::RedisUnavailable => None,
+            MaintenanceLease::Acquired(token) => (Some(token), "ran"),
+            MaintenanceLease::RedisUnavailable => (None, "redis_unavailable"),
             MaintenanceLease::Skipped => {
+                okapi_kernel::metrics::global().record_worker_maintenance(job.name(), "skipped");
                 tracing::trace!(
                     job = job.name(),
                     "maintenance skipped; held by another replica"
@@ -239,6 +240,7 @@ pub(super) async fn run_maintenance(
                 continue;
             }
         };
+        okapi_kernel::metrics::global().record_worker_maintenance(job.name(), outcome);
         let heartbeat = token.as_ref().map(|token| {
             let sched = ctx.sched.clone();
             let job_name = job.name();

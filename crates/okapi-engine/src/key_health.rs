@@ -16,6 +16,15 @@ use okapi_store::channels::{self, KeyFailure};
 
 /// 登记一次上游失败。只有瞬态失败参与连续计数，也只有它留本地标记等成功来清。
 pub async fn failure(state: &AppState, cand: &ChannelCandidate, code: &str, kind: KeyFailure) {
+    let outcome = match kind {
+        KeyFailure::Request => "request_error",
+        KeyFailure::Unreachable { .. } => "unreachable",
+        KeyFailure::Transient => "transient",
+        KeyFailure::RateLimited { .. } => "rate_limited",
+        KeyFailure::QuotaExhausted => "quota_exhausted",
+        KeyFailure::Invalid => "invalid",
+    };
+    okapi_kernel::metrics::global().record_upstream_outcome(&cand.provider, outcome);
     // 登记失败不阻断请求，但要留痕：计数丢了，熔断和冷却就不会触发，坏 key 会继续接流量
     if let Err(error) = channels::mark_key_failure(&state.pg, cand.channel_key_id, code, kind).await
     {
@@ -146,6 +155,7 @@ async fn cluster_egress_dirty(state: &AppState, proxy_id: i64) -> bool {
 /// 上游给出了可用响应：这把 key 是好的，清掉它的连续失败计数；走的出口代理同理。
 /// 本地标记与 5s 缓存的集群脏集任一命中即回 PG 清零，健康 key 零额外热路径 IO。
 pub async fn success(state: &AppState, cand: &ChannelCandidate) {
+    okapi_kernel::metrics::global().record_upstream_outcome(&cand.provider, "ok");
     // 装箱保持调用方（images / chat / audio 等大状态机）的 future 尺寸精简
     Box::pin(async {
         if let Some(proxy) = cand.egress_proxy_id

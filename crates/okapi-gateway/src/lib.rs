@@ -180,6 +180,17 @@ where
     Ok(())
 }
 
+async fn metrics_endpoint(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    state.metrics_response("gateway", &headers)
+}
+
+async fn observe_gateway_http(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    okapi_kernel::metrics::observe_http("gateway", req, next).await
+}
+
 fn log_response_failure(class: &ServerErrorsFailureClass, latency: Duration) {
     // 503 有独立的过载/渠道信号，逐请求 ERROR 会在过载时放大日志压力。
     if matches!(class, ServerErrorsFailureClass::StatusCode(s)
@@ -283,6 +294,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/models", get(models::list_models))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_endpoint))
+        .route_layer(axum::middleware::from_fn(observe_gateway_http))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -308,5 +321,8 @@ pub fn router(state: AppState) -> Router {
                     },
                 ),
         )
+        .layer(axum::middleware::from_fn(
+            okapi_kernel::trace_context::propagate,
+        ))
         .with_state(state)
 }

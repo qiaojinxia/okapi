@@ -176,8 +176,8 @@ def check_nginx_gateway_routes(text: str, problems: list[str]) -> int:
     """网关路由表 ↔ 模板的 location：路径前缀要全被接住，请求体上限不能被反代抢先卡掉。"""
     with open(API_SURFACE, encoding='utf-8') as f:
         endpoints = json.load(f)['endpoints']
-    # /healthz 控制面也有，反代不必单独转给网关
-    prefixes = sorted({'/' + e['path'].strip('/').split('/')[0] for e in endpoints if e['surface'] == 'gateway'} - {'/healthz'})
+    # /healthz 与 /metrics 两个角色各自在内部端口提供（探针 / Prometheus 内网抓取），反代不必单独转给网关
+    prefixes = sorted({'/' + e['path'].strip('/').split('/')[0] for e in endpoints if e['surface'] == 'gateway'} - {'/healthz', '/metrics'})
     to_gateway = [(mod, pat, body) for mod, pat, body in nginx_locations(text) if 'okapi_gateway' in body]
 
     def covered(path: str) -> bool:

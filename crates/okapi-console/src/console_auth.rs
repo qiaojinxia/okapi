@@ -50,8 +50,10 @@ pub(crate) async fn authenticate(
     let hash = hex::encode(Sha256::digest(sid.as_bytes()));
     let cache_key = format!("sess:{hash}");
     let authed = if let Some(hit) = state.sched.auth_get(&cache_key).await {
+        okapi_kernel::metrics::global().record_auth_cache(true);
         Arc::new(hit)
     } else {
+        okapi_kernel::metrics::global().record_auth_cache(false);
         let mut resolved = None;
         for _ in 0..3 {
             let version = state.sched.auth_version().await;

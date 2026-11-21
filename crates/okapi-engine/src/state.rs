@@ -457,6 +457,7 @@ impl AppState {
     pub fn invalidate_routing_caches(&self) {
         self.invalidate_routing_caches_local();
         if let Some(nats) = self.nats.clone() {
+            okapi_kernel::metrics::global().record_routing_invalidation(true);
             // detach 说明：fire-and-forget 广播，失败由 TTL 兜底
             tokio::spawn(async move {
                 if let Err(err) = nats.publish(ROUTING_INVALIDATE_SUBJECT, "1".into()).await {
@@ -516,6 +517,7 @@ impl AppState {
 
     /// 只失效本进程（广播的接收端用；避免收到自己的广播再转发出去打环）。
     pub fn invalidate_routing_caches_local(&self) {
+        okapi_kernel::metrics::global().record_routing_invalidation(false);
         self.routing.model_cache.invalidate_all();
         self.routing.cand_cache.invalidate_all();
         self.routing.channel_cost_cache.invalidate_all();
@@ -523,6 +525,51 @@ impl AppState {
         self.routing.margin_cache.invalidate_all();
         self.routing.request_policy.invalidate_all();
         self.settings_cache.invalidate_all();
+    }
+
+    /// 采集当前角色的实时运行时水位，供 Prometheus `/metrics` 端点导出。
+    #[must_use]
+    pub fn runtime_metrics_snapshot(
+        &self,
+        role: &'static str,
+    ) -> okapi_kernel::metrics::RuntimeSnapshot {
+        use std::sync::atomic::Ordering;
+        okapi_kernel::metrics::RuntimeSnapshot {
+            role,
+            pg_pool_size: self.pg.size(),
+            pg_pool_idle: self.pg.num_idle(),
+            pricebook_epoch: self.pricebook.epoch(),
+            settle_backlog: self.flow.settle_backlog.load(Ordering::Relaxed),
+            settle_in_flight: self.core.settlements.in_flight(),
+            settle_shedding: self.flow.settle_shedding.load(Ordering::Relaxed),
+            cache_models: self.routing.model_cache.entry_count(),
+            cache_candidates: self.routing.cand_cache.entry_count(),
+            cache_channel_cost: self.routing.channel_cost_cache.entry_count(),
+            cache_channel_control: self.routing.channel_control_cache.entry_count(),
+            cache_settings: self.settings_cache.entry_count(),
+        }
+    }
+
+    /// 标准 Prometheus `/metrics` 处理器（gateway 与 console 共用）。
+    pub fn metrics_response(
+        &self,
+        role: &'static str,
+        headers: &axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        if let Err(status) = okapi_kernel::metrics::check_scrape_access(headers) {
+            return status.into_response();
+        }
+        let body =
+            okapi_kernel::metrics::global().render_prometheus(&self.runtime_metrics_snapshot(role));
+        (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                okapi_kernel::metrics::PROMETHEUS_CONTENT_TYPE,
+            )],
+            body,
+        )
+            .into_response()
     }
 }
 

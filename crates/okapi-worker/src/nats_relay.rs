@@ -20,6 +20,15 @@ const STREAM_NAME: &str = "BILLING";
 const CONSUMER_NAME: &str = "chsink";
 const BATCH_LIMIT: usize = 500;
 
+/// 从 outbox payload 的 `diagnostics` 提取 W3C `traceparent`，接力写入 NATS 消息头。
+fn traceparent_from_payload(payload: &serde_json::Value) -> Option<String> {
+    let diag = payload.get("diagnostics")?;
+    let trace_id = diag.get("trace_id").and_then(serde_json::Value::as_str)?;
+    let span_id = diag.get("span_id").and_then(serde_json::Value::as_str)?;
+    let candidate = format!("00-{trace_id}-{span_id}-01");
+    okapi_kernel::trace_context::parse_traceparent(&candidate).map(|_| candidate)
+}
+
 /// 确保 BILLING 流与 chsink 消费者存在（幂等）。
 pub async fn ensure_topology(client: &async_nats::Client) -> anyhow::Result<jetstream::Context> {
     let js = jetstream::new(client.clone());
@@ -103,15 +112,18 @@ pub async fn relay_once(pg: &PgPool, js: &jetstream::Context) -> anyhow::Result<
                 .is_ok();
             let ok = valid
                 && tokio::time::timeout(Duration::from_secs(5), async {
-                    match js
-                        .send_publish(
-                            row.topic.clone(),
-                            jetstream::message::PublishMessage::build()
-                                .message_id(delivery::outbox_key(row.event_id))
-                                .payload(payload.to_string().into()),
-                        )
-                        .await
-                    {
+                    let mut msg = jetstream::message::PublishMessage::build()
+                        .message_id(delivery::outbox_key(row.event_id))
+                        .payload(payload.to_string().into());
+                    if let Some(traceparent) = traceparent_from_payload(&payload) {
+                        let mut headers = async_nats::HeaderMap::new();
+                        headers.insert(
+                            okapi_kernel::trace_context::TRACEPARENT_HEADER,
+                            traceparent.as_str(),
+                        );
+                        msg = msg.headers(headers);
+                    }
+                    match js.send_publish(row.topic.clone(), msg).await {
                         Ok(ack) => ack.await.is_ok(),
                         Err(_) => false,
                     }
