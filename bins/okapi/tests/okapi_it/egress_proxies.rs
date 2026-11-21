@@ -1227,6 +1227,7 @@ async fn insert_proxy(pg: &PgPool, name: &str, addr: SocketAddr) -> i64 {
 
 /// 后台探测：经代理请求探测地址，记出口 IP；IP 变了记下变化前后并发 `egress_ip_changed`；
 /// 在用的代理连续两轮不可达才发 `egress_down`（单次抖动不吵，没人用的也不吵）；只记事实，不碰熔断。
+/// 只挂在停用渠道上的代理不算在用（2026-11-21 线上：代理 2 只绑着停用的渠道 3，十二天里每十分钟告警一次）。
 /// `notify_channels` / `ssrf_policy` 是全站设置，放在用完即删的临时库里。
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // 两轮探测前后状态相连，拆开要重建代理、渠道与通知通道
@@ -1312,19 +1313,20 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
     state.master_key = Some(Arc::from(master_key().as_str()));
     let notifier = notify::Notifier::new(pg.clone(), redis.clone());
 
-    // live：活代理、渠道在用；dead：死代理、渠道在用；idle：死代理、没人用
+    // live：活代理、渠道在用；dead：死代理、渠道在用；idle：死代理、没人用；parked：死代理、只绑着停用的渠道
     let live_hits = Arc::new(AtomicUsize::new(0));
     let live = insert_proxy(&pg, "live", spawn_proxy(Arc::clone(&live_hits)).await).await;
     let dead = insert_proxy(&pg, "dead", dead_addr().await).await;
     let idle = insert_proxy(&pg, "idle", dead_addr().await).await;
+    let parked = insert_proxy(&pg, "parked", dead_addr().await).await;
     // 临时库的代理 id 从 1 起，Redis 是共用的：清掉以前留下的连续失败计数
-    for proxy in [live, dead, idle] {
+    for proxy in [live, dead, idle, parked] {
         let _: Option<i64> =
             fred::interfaces::KeysInterface::del(&redis, format!("egress:probe:fail:{proxy}"))
                 .await
                 .unwrap();
     }
-    for proxy in [live, dead] {
+    for proxy in [live, dead, parked] {
         let (channel, _) = okapi_store::provision::create_channel(
             &pg,
             &format!("egp-{proxy}"),
@@ -1345,6 +1347,13 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
         .await
         .unwrap()
         .unwrap();
+        if proxy == parked {
+            sqlx::query("UPDATE channels SET status = 2 WHERE id = $1")
+                .bind(channel)
+                .execute(&pg)
+                .await
+                .unwrap();
+        }
     }
     let policy = okapi::kernel::policies::ProbePolicy::parse(&json!({
         "target": format!("http://{target}/trace"), "concurrency": 2
@@ -1354,7 +1363,7 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
     let first = egress_probe::probe_round(&state, &policy, &notifier)
         .await
         .unwrap();
-    assert_eq!((first.probed, first.failed, first.changed), (3, 2, 0));
+    assert_eq!((first.probed, first.failed, first.changed), (4, 3, 0));
     let row: (Option<String>, Option<String>, Option<String>) =
         sqlx::query_as("SELECT exit_ip, exit_country, previous_exit_ip FROM proxies WHERE id = $1")
             .bind(live)
@@ -1405,7 +1414,11 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
             )
         })
         .collect();
-    assert_eq!(names, [("dead", 2)], "没人用的 idle 不告警：{down}");
+    assert_eq!(
+        names,
+        [("dead", 2)],
+        "没人用的 idle、只绑着停用渠道的 parked 都不告警：{down}"
+    );
     let changed = sent
         .iter()
         .find(|b| b["event"] == "egress_ip_changed")

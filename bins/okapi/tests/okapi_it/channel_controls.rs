@@ -5,7 +5,8 @@ mod published_pricing;
 use axum::{
     Json, Router,
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use okapi::{
@@ -17,7 +18,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use uuid::Uuid;
 
@@ -27,6 +28,8 @@ struct Mock {
     quota: Arc<AtomicUsize>,
     refresh: Arc<AtomicUsize>,
     profile: Arc<AtomicUsize>,
+    /// 下一次刷新回 invalid_grant（refresh token 已被作废）。
+    refuse_refresh: Arc<AtomicBool>,
 }
 async fn inference(State(mock): State<Mock>) -> Json<Value> {
     mock.inference.fetch_add(1, Ordering::SeqCst);
@@ -34,15 +37,19 @@ async fn inference(State(mock): State<Mock>) -> Json<Value> {
         json!({"id":"mock","object":"chat.completion","model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}),
     )
 }
-async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
+async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Response {
     mock.quota.fetch_add(1, Ordering::SeqCst);
-    let used = if headers
-        .get("authorization")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .contains("high")
-    {
+    let authorization = headers.get("authorization").unwrap().to_str().unwrap();
+    if authorization.contains("revoked") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(
+                json!({"type":"error","error":{"type":"authentication_error","message":"OAuth token has been revoked"}}),
+            ),
+        )
+            .into_response();
+    }
+    let used = if authorization.contains("high") {
         95
     } else {
         10
@@ -50,6 +57,7 @@ async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
     Json(
         json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},"percent":37,"resets_at":4_070_908_800_i64}],"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
     )
+    .into_response()
 }
 async fn profile(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
     mock.profile.fetch_add(1, Ordering::SeqCst);
@@ -66,11 +74,19 @@ async fn count_tokens(State(mock): State<Mock>) -> Json<Value> {
     mock.inference.fetch_add(1, Ordering::SeqCst);
     Json(json!({"object":"response.input_tokens","input_tokens":4242}))
 }
-async fn refresh(State(mock): State<Mock>) -> Json<Value> {
+async fn refresh(State(mock): State<Mock>) -> Response {
     mock.refresh.fetch_add(1, Ordering::SeqCst);
+    if mock.refuse_refresh.load(Ordering::SeqCst) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid_grant","error_description":"revoked"})),
+        )
+            .into_response();
+    }
     Json(
         json!({"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}),
     )
+    .into_response()
 }
 
 struct Env {
@@ -919,6 +935,110 @@ async fn quota_observation_blocks_at_threshold_and_cannot_follow_a_reauthorized_
         );
         assert_eq!(env.mock.refresh.load(Ordering::SeqCst), 0);
     }
+}
+
+/// 这把 key 现在存着的凭证行与明文（按 state 的主密钥解封：刷新落库的凭证是封装过的）。
+async fn stored_credential(env: &Env) -> (okapi_store::oauth_credentials::KeyRow, String) {
+    let row = okapi_store::oauth_credentials::target(&env.state.pg, env.channel, env.key)
+        .await
+        .unwrap()
+        .unwrap();
+    let plaintext =
+        okapi_store::credential::open(env.state.master_key.as_deref(), &row.credential_ciphertext)
+            .unwrap();
+    (row, plaintext)
+}
+
+/// 把存着的 access token 换成上游会回 401 的那个，并放开本轮额度探测租约。
+async fn revoke_access_token(env: &Env) {
+    use fred::interfaces::KeysInterface;
+    let mut credential = OAuthCredential::parse(&stored_credential(env).await.1).unwrap();
+    credential.access_token = "revoked-access".into();
+    let sealed = okapi_store::credential::seal_or_plain(
+        env.state.master_key.as_deref(),
+        &credential.to_plaintext(),
+    )
+    .unwrap();
+    sqlx::query("UPDATE channel_keys SET credential_ciphertext=$2 WHERE id=$1")
+        .bind(env.key)
+        .bind(sealed)
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
+    let _: i64 = env
+        .state
+        .sched
+        .client()
+        .del(format!("quota:poll:ck:{}", env.key))
+        .await
+        .unwrap();
+}
+
+/// 2026-11-21 线上：codex 渠道 5 十多天没有请求，额度探测每小时被 401 一次，key 却一直显示正常。
+/// 推理遇到 401 会强制刷新一次再试，额度探测现在也这样做：刷新成功就接着读到额度；
+/// 六小时内再被 401 不重复轮换 token；刷新被 invalid_grant 拒绝就把 key 置为失效。
+#[tokio::test]
+async fn a_quota_probe_rejected_with_401_refreshes_the_token_once() {
+    use fred::interfaces::KeysInterface;
+    let env = setup("anthropic_max", json!({})).await;
+    sqlx::query("UPDATE channels SET settings = settings || $2 WHERE id = $1")
+        .bind(env.channel)
+        .bind(json!({"oauth_token_url": format!("{}/token", env.base)}))
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
+    let poll = || async {
+        let (row, plaintext) = stored_credential(&env).await;
+        account_control::quota::poll(&env.state, &row, &plaintext).await;
+    };
+    let key_state = || async {
+        sqlx::query_as::<_, (i16, Option<String>)>(
+            "SELECT status, last_error FROM channel_keys WHERE id = $1",
+        )
+        .bind(env.key)
+        .fetch_one(&env.state.pg)
+        .await
+        .unwrap()
+    };
+
+    revoke_access_token(&env).await;
+    poll().await;
+    assert_eq!(env.mock.refresh.load(Ordering::SeqCst), 1, "401 后刷新一次");
+    assert_eq!(env.mock.quota.load(Ordering::SeqCst), 2, "刷新后再探一次");
+    assert!(
+        account_control::quota::read(&env.state, env.key)
+            .await
+            .is_some(),
+        "换上新 token 读到了额度"
+    );
+    let stored = OAuthCredential::parse(&stored_credential(&env).await.1).unwrap();
+    assert_eq!(stored.access_token, "rotated-access", "新凭证已落库");
+    assert_eq!(key_state().await.0, 1);
+
+    // 六小时内又被 401：只退避，不再轮换 token
+    revoke_access_token(&env).await;
+    poll().await;
+    assert_eq!(env.mock.quota.load(Ordering::SeqCst), 3);
+    assert_eq!(env.mock.refresh.load(Ordering::SeqCst), 1);
+    assert_eq!(key_state().await.0, 1);
+
+    // refresh token 也被作废了：刷新回 invalid_grant，key 置为失效
+    let _: i64 = env
+        .state
+        .sched
+        .client()
+        .del(format!("quota:reauth:ck:{}", env.key))
+        .await
+        .unwrap();
+    env.mock.refuse_refresh.store(true, Ordering::SeqCst);
+    revoke_access_token(&env).await;
+    poll().await;
+    assert_eq!(env.mock.refresh.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        key_state().await,
+        (6, Some("oauth_invalid_grant".into())),
+        "账号失效要在控制台看得见"
+    );
 }
 
 #[tokio::test]

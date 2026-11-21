@@ -264,7 +264,8 @@ pub struct ProbeTarget {
     pub id: i64,
     pub name: String,
     pub url_ciphertext: Vec<u8>,
-    /// 有渠道在用：直接绑定、固定分配、经代理组（含全局默认）可达，或本身是全局默认。
+    /// 有**启用中**的渠道在用：直接绑定、固定分配、经代理组（含全局默认）可达，或本身是全局默认。
+    /// 停用的渠道不发请求，只挂在它上面的死代理不算在用（不每轮告警、不发 `egress_down`）。
     pub in_use: bool,
     pub channel_count: i64,
     pub assigned_keys: i64,
@@ -638,7 +639,7 @@ pub async fn probe_targets(pool: &PgPool) -> Result<Vec<ProbeTarget>, StoreError
                (SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id
                  WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS "assigned_keys!",
                (EXISTS (SELECT 1 FROM channel_egress e JOIN channels c ON c.id = e.channel_id
-                         WHERE c.deleted_at IS NULL
+                         WHERE c.deleted_at IS NULL AND c.status = 1
                            AND ((e.mode = 'proxy' AND e.proxy_id = p.id)
                              OR (e.mode = 'group' AND EXISTS (
                                      SELECT 1 FROM proxy_group_members m

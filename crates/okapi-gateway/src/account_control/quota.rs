@@ -42,6 +42,8 @@ const BACKOFF_MAX_SECS: i64 = 3600;
 /// 账号所在组织对额度端点说 403（`permission_error`，如 `oauth_not_allowed_for_organization`）：这是组织策略、不是抖动，
 /// 一小时后重试多半还是同一个答案——六小时试一次就够，免得日志里一天十几条同样的告警。
 const PERMISSION_BACKOFF_SECS: i64 = 6 * 3600;
+/// 额度探测 401 后强制刷新凭证的最小间隔。
+const REAUTH_SECS: i64 = 6 * 3600;
 
 fn permission_denied(error: &okapi_providers::UpstreamError) -> bool {
     matches!(
@@ -269,14 +271,9 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
     let Some(proxy_url) = probe_proxy(state, row.id).await else {
         return;
     };
-    let Some(credential) = observation_credential(
-        state,
-        row,
-        plaintext,
-        policy.refresh_mode == RefreshMode::Managed && hook.capabilities().refresh,
-        proxy_url.as_deref(),
-    )
-    .await
+    let managed = policy.refresh_mode == RefreshMode::Managed && hook.capabilities().refresh;
+    let Some(credential) =
+        observation_credential(state, row, plaintext, managed, proxy_url.as_deref()).await
     else {
         tracing::warn!(
             key = row.id,
@@ -291,60 +288,139 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
         );
         return;
     };
-    let outbound = okapi_providers::Outbound::from_settings(&row.settings, proxy_url);
+    let outbound = okapi_providers::Outbound::from_settings(&row.settings, proxy_url.clone());
+    let mut result = observe(state, row, hook, &credential, &base, &outbound).await;
+    // 推理遇到 401 会强制刷新一次再试（`refresh_rejected_credential`），额度探测以前只退避：
+    // 没有流量的账号 token 被上游作废后，探测每小时 401 一次、key 却一直显示正常。照推理的做法刷新一次；
+    // 刷新被 invalid_grant 拒绝时由刷新路径把 key 置为失效，控制台上看得见。
+    if managed
+        && matches!(
+            &result,
+            Err(okapi_providers::UpstreamError::Status { status: 401, .. })
+        )
+        && let Some(used) = credential.oauth()
+        && let Some(fresh) = reauthorize(state, row, used, proxy_url.as_deref()).await
+    {
+        result = observe(
+            state,
+            row,
+            hook,
+            &ResolvedCredential::OAuth(fresh),
+            &base,
+            &outbound,
+        )
+        .await;
+    }
+    if let Err(error) = result {
+        back_off(state, row.id, &error).await;
+    }
+}
+
+/// 拿一份凭证探一次额度；成功就落观测、记预判基线、顺带更新档位。
+async fn observe(
+    state: &AppState,
+    row: &okapi_store::oauth_credentials::KeyRow,
+    hook: &dyn okapi_providers::account::AccountHooks,
+    credential: &ResolvedCredential<'_>,
+    base: &str,
+    outbound: &okapi_providers::Outbound,
+) -> Result<(), okapi_providers::UpstreamError> {
     let context = || okapi_providers::account::QuotaContext {
         http: state.upstreams.openai.http(),
-        api_base: &base,
+        api_base: base,
         access_token: credential.material(),
         account_id: credential
             .oauth()
             .and_then(|oauth| oauth.account_id.as_deref()),
-        outbound: &outbound,
+        outbound,
     };
-    match hook.quota(context()).await {
-        Ok(mut snapshot) => {
-            let reported_plan = snapshot.plan.take();
-            // 先读烧速计数再落观测：预判拿「观测之后又花了多少」外推，基线必须不晚于观测
-            let burn_micro = super::forecast::current_burn(state, row.id).await;
-            let observation = Observation {
-                identity: identity(&row.provider, &credential),
-                snapshot,
-                burn_micro,
-            };
-            // 路由靠额度观测：先落库，档位（只供展示，可能还要再请求一次上游）放在后面
-            if let Ok(payload) = serde_json::to_string(&observation) {
-                let result: Result<(), _> = state
-                    .sched
-                    .client()
-                    .set(
-                        format!("quota:ck:{}", row.id),
-                        payload,
-                        Some(Expiration::EX(OBSERVATION_MAX_AGE_SECS)),
-                        None,
-                        false,
-                    )
-                    .await;
-                let _: Result<i64, _> = state
-                    .sched
-                    .client()
-                    .del(format!("quota:fail:ck:{}", row.id))
-                    .await;
-                if let Err(error) = result {
-                    tracing::warn!(key=row.id,%error,"quota observation persistence failed");
-                }
-            }
-            super::forecast::record_poll(state, row.id, &observation.snapshot, burn_micro).await;
-            refresh_plan(
-                state,
-                row.id,
-                hook,
-                observation.identity,
-                reported_plan,
-                context(),
+    let mut snapshot = hook.quota(context()).await?;
+    let reported_plan = snapshot.plan.take();
+    // 先读烧速计数再落观测：预判拿「观测之后又花了多少」外推，基线必须不晚于观测
+    let burn_micro = super::forecast::current_burn(state, row.id).await;
+    let observation = Observation {
+        identity: identity(&row.provider, credential),
+        snapshot,
+        burn_micro,
+    };
+    // 路由靠额度观测：先落库，档位（只供展示，可能还要再请求一次上游）放在后面
+    if let Ok(payload) = serde_json::to_string(&observation) {
+        let result: Result<(), _> = state
+            .sched
+            .client()
+            .set(
+                format!("quota:ck:{}", row.id),
+                payload,
+                Some(Expiration::EX(OBSERVATION_MAX_AGE_SECS)),
+                None,
+                false,
             )
             .await;
+        let _: Result<i64, _> = state
+            .sched
+            .client()
+            .del(format!("quota:fail:ck:{}", row.id))
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(key=row.id,%error,"quota observation persistence failed");
         }
-        Err(error) => back_off(state, row.id, &error).await,
+    }
+    super::forecast::record_poll(state, row.id, &observation.snapshot, burn_micro).await;
+    refresh_plan(
+        state,
+        row.id,
+        hook,
+        observation.identity,
+        reported_plan,
+        context(),
+    )
+    .await;
+    Ok(())
+}
+
+/// 额度探测被 401 拒绝后强制刷新一次凭证。每把 key 每 [`REAUTH_SECS`] 最多一次：
+/// 刷新成功、探测仍 401（端点本身不认这个账号）时，不能每次退避到期都再轮换一遍 token。
+async fn reauthorize(
+    state: &AppState,
+    row: &okapi_store::oauth_credentials::KeyRow,
+    rejected: &okapi_store::credential::OAuthCredential,
+    proxy_url: Option<&str>,
+) -> Option<okapi_store::credential::OAuthCredential> {
+    let lease: Result<Option<String>, _> = state
+        .sched
+        .client()
+        .set(
+            format!("quota:reauth:ck:{}", row.id),
+            "1",
+            Some(Expiration::EX(REAUTH_SECS)),
+            Some(SetOptions::NX),
+            false,
+        )
+        .await;
+    if !matches!(lease, Ok(Some(_))) {
+        return None;
+    }
+    let key = super::super::credentials::oauth::OAuthKey {
+        channel_key_id: row.id,
+        provider: &row.provider,
+        token_url: row
+            .settings
+            .get("oauth_token_url")
+            .and_then(serde_json::Value::as_str),
+        proxy_url,
+    };
+    match super::super::credentials::oauth::force_refresh_for(state, &key, &rejected.to_plaintext())
+        .await
+    {
+        Ok(fresh) => Some(fresh),
+        Err(error) => {
+            tracing::warn!(
+                key = row.id,
+                code = error.error_code(),
+                "quota observation: token refresh after 401 failed"
+            );
+            None
+        }
     }
 }
 

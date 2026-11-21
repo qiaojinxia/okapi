@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT p.id, p.name, p.url_ciphertext,\n               (SELECT COUNT(*) FROM channels c\n                 WHERE c.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"channel_count!\",\n               (SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id\n                 WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"assigned_keys!\",\n               (EXISTS (SELECT 1 FROM channel_egress e JOIN channels c ON c.id = e.channel_id\n                         WHERE c.deleted_at IS NULL\n                           AND ((e.mode = 'proxy' AND e.proxy_id = p.id)\n                             OR (e.mode = 'group' AND EXISTS (\n                                     SELECT 1 FROM proxy_group_members m\n                                     WHERE m.group_code = e.group_code AND m.proxy_id = p.id)))))\n                   AS \"in_use!\"\n        FROM proxies p\n        WHERE p.status = 1\n        ORDER BY p.id\n        ",
+  "query": "\n        SELECT p.id, p.name, p.url_ciphertext,\n               (SELECT COUNT(*) FROM channels c\n                 WHERE c.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"channel_count!\",\n               (SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id\n                 WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"assigned_keys!\",\n               (EXISTS (SELECT 1 FROM channel_egress e JOIN channels c ON c.id = e.channel_id\n                         WHERE c.deleted_at IS NULL AND c.status = 1\n                           AND ((e.mode = 'proxy' AND e.proxy_id = p.id)\n                             OR (e.mode = 'group' AND EXISTS (\n                                     SELECT 1 FROM proxy_group_members m\n                                     WHERE m.group_code = e.group_code AND m.proxy_id = p.id)))))\n                   AS \"in_use!\"\n        FROM proxies p\n        WHERE p.status = 1\n        ORDER BY p.id\n        ",
   "describe": {
     "columns": [
       {
@@ -67,5 +67,5 @@
       null
     ]
   },
-  "hash": "897e4e4a2f9be921e68a4f044360bd60f963ccda31225ef18573a2893841dc17"
+  "hash": "b3013fe5598efc9b415524a5e5fb1e7e594c3f7d50b23fb3d5dd7dcd61e1a1c8"
 }
