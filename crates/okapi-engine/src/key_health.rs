@@ -15,12 +15,7 @@ use okapi_store::ChannelCandidate;
 use okapi_store::channels::{self, KeyFailure};
 
 /// 登记一次上游失败。只有瞬态失败参与连续计数，也只有它留本地标记等成功来清。
-pub(crate) async fn failure(
-    state: &AppState,
-    cand: &ChannelCandidate,
-    code: &str,
-    kind: KeyFailure,
-) {
+pub async fn failure(state: &AppState, cand: &ChannelCandidate, code: &str, kind: KeyFailure) {
     // 登记失败不阻断请求，但要留痕：计数丢了，熔断和冷却就不会触发，坏 key 会继续接流量
     if let Err(error) = channels::mark_key_failure(&state.pg, cand.channel_key_id, code, kind).await
     {
@@ -51,7 +46,7 @@ pub(crate) async fn failure(
 
 /// 一次经代理的连接阶段失败（HTTP 与 WebSocket 路径共用）。`proxy_hop` 见
 /// [`okapi_providers::UpstreamError::proxy_hop_failed`]。
-pub(crate) async fn proxy_unreachable(
+pub async fn proxy_unreachable(
     state: &AppState,
     proxy: i64,
     proxy_url: Option<&str>,
@@ -123,7 +118,7 @@ async fn verify_proxy(state: &AppState, proxy: i64, proxy_url: String) {
 }
 
 /// 上游给出了可用响应：这把 key 是好的，清掉它的连续失败计数；走的出口代理同理。
-pub(crate) async fn success(state: &AppState, cand: &ChannelCandidate) {
+pub async fn success(state: &AppState, cand: &ChannelCandidate) {
     if let Some(proxy) = cand.egress_proxy_id
         && state.health.egress_failures.contains_key(&proxy)
     {

@@ -5,7 +5,7 @@ use okapi_ledger::{Pool, SettlementInput};
 use std::time::Instant;
 use uuid::Uuid;
 
-pub(crate) struct Guard {
+pub struct Guard {
     state: AppState,
     key: okapi_store::AuthedKey,
     id: Uuid,

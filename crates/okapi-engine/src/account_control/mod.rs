@@ -503,7 +503,7 @@ pub async fn admit_with(
 }
 
 /// 这个 provider 有没有额度观测能力（订阅渠道）。
-pub(crate) fn has_quota_hook(provider: &str) -> bool {
+pub fn has_quota_hook(provider: &str) -> bool {
     okapi_providers::registry::lookup(provider)
         .and_then(|adapter| adapter.account)
         .is_some_and(|hook| hook.capabilities().quota)

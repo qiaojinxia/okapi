@@ -9,13 +9,13 @@ use okapi_store::ChannelCandidate;
 
 /// 候选被哪道闸挡下（`with_param` 用的名字，与 count_tokens 的 `channel_rpm` 同名）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Closed {
+pub enum Closed {
     Rpm,
     DailySpend,
 }
 
 impl Closed {
-    pub(crate) fn param(self) -> &'static str {
+    pub fn param(self) -> &'static str {
         match self {
             Self::Rpm => "channel_rpm",
             Self::DailySpend => "channel_daily_spend",
@@ -24,7 +24,7 @@ impl Closed {
 }
 
 /// key 级 RPM：未配置上限时不产生 Redis 往返。
-pub(crate) async fn rpm_ok(state: &AppState, cand: &ChannelCandidate) -> bool {
+pub async fn rpm_ok(state: &AppState, cand: &ChannelCandidate) -> bool {
     match cand.rpm_limit.filter(|n| *n > 0) {
         Some(limit) => {
             state
@@ -37,7 +37,7 @@ pub(crate) async fn rpm_ok(state: &AppState, cand: &ChannelCandidate) -> bool {
 }
 
 /// 会产生费用的请求用的整套闸：RPM + 当日消费。
-pub(crate) async fn check(state: &AppState, cand: &ChannelCandidate) -> Result<(), Closed> {
+pub async fn check(state: &AppState, cand: &ChannelCandidate) -> Result<(), Closed> {
     if !rpm_ok(state, cand).await {
         return Err(Closed::Rpm);
     }

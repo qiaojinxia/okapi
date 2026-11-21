@@ -420,10 +420,51 @@ pub(super) async fn settle_stream(
 #[cfg(test)]
 mod upstream_endpoint_tests {
     use super::{Ingress, upstream_endpoint};
+    use okapi_store::ChannelCandidate;
+
+    fn test_cand() -> ChannelCandidate {
+        ChannelCandidate {
+            channel_id: 1,
+            channel_key_id: 1,
+            channel_name: "t".to_owned(),
+            provider: "openai".to_owned(),
+            api_base: None,
+            credential: String::new(),
+            priority: 0,
+            weight: 1,
+            trust_upstream_usage: false,
+            same_key_retries: 1,
+            first_output_timeout_secs: 30,
+            max_concurrency: None,
+            rpm_limit: None,
+            daily_spend_cap_micro: None,
+            model_mapping: serde_json::json!({}),
+            thinking_to_content: false,
+            bill_by_response_model: false,
+            strip_request_fields: Vec::new(),
+            inject_request_fields: serde_json::Map::new(),
+            responses_native: true,
+            tool_loss_policy: None,
+            api_version: None,
+            aws_region: None,
+            oauth_token_url: None,
+            extensions: serde_json::Value::Null,
+            proxy_url: None,
+            egress_proxy_id: None,
+            egress_max_concurrency: None,
+            egress_rotation: None,
+            extra_headers: Vec::new(),
+            capabilities: serde_json::json!({}),
+            cost_milli: 1000,
+            pool_rank: 0,
+            count_in_flight: false,
+            warm_affinity: false,
+        }
+    }
 
     #[test]
     fn subscription_anthropic_is_labelled_as_messages() {
-        let mut cand = crate::scheduler::tests::cand(0, 1, 1000);
+        let mut cand = test_cand();
         for provider in ["anthropic", "anthropic_max"] {
             cand.provider = provider.into();
             assert_eq!(
@@ -442,7 +483,7 @@ mod upstream_endpoint_tests {
     /// 编不出执行计划的候选（这里是只做透传的 custom_pass）发不到上游，不编一个端点出来。
     #[test]
     fn an_unplannable_candidate_has_no_upstream_endpoint() {
-        let mut cand = crate::scheduler::tests::cand(0, 1, 1000);
+        let mut cand = test_cand();
         cand.provider = "custom_pass".into();
         assert_eq!(upstream_endpoint(&cand, "m", false, Ingress::OpenAi), "");
     }

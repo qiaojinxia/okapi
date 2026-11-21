@@ -1,6 +1,6 @@
 //! 展示真实消费水位与积压，查询时刻不充当数据更新时间。
 use chrono::{DateTime, Utc};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use serde_json::{Value, json};
 

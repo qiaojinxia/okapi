@@ -1,7 +1,7 @@
 //! Opt-in dashboard query cache. Guards run before this helper; errors aren't cached.
 //! 缓存本体挂在 `CoreState` 上，类型与构造在 `kernel::state`（网关构造状态时不引用 console）。
 use axum::http::HeaderMap;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::state::QueryCache;
 #[cfg(test)]

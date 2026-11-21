@@ -17,8 +17,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
-use okapi_gateway::ingress::Ingress;
-use okapi_gateway::state::AppState;
+use okapi_engine::ingress::Ingress;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
@@ -58,7 +58,7 @@ pub async fn list_groups(
     guard(&state, &headers, permissions::PRICING_READ).await?;
     let page = okapi_store::listing::list_groups(&state.pg, q.slice()).await?;
     // 新建的分组要发布一次定价才进价簿，之前分配给用户、给 key 选都会被拒：列表上标出来
-    if let Err(err) = okapi_gateway::refresh_pricebook_if_newer(&state).await {
+    if let Err(err) = okapi_engine::refresh_pricebook_if_newer(&state).await {
         tracing::warn!(error = %err, "列分组前刷新价簿失败，按当前价簿标注");
     }
     let book = state.pricebook.load();

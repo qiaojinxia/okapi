@@ -115,9 +115,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let pg = okapi_store::connect_pg(&cfg.database_url).await?;
     okapi_store::run_migrations(&pg).await?;
     let redis = okapi_store::connect_redis(&cfg.redis_url).await?;
-    let nats = okapi_gateway::connect_nats_optional(cfg.nats_url.as_deref()).await;
-    let ch = okapi_gateway::build_ch_optional(cfg.clickhouse_url.as_deref())?;
-    let image_state = okapi_gateway::build_state_with_clients(
+    let nats = okapi_engine::connect_nats_optional(cfg.nats_url.as_deref()).await;
+    let ch = okapi_engine::build_ch_optional(cfg.clickhouse_url.as_deref())?;
+    let image_state = okapi_engine::build_state_with_clients(
         pg,
         okapi_store::default_pg_pool_size(),
         redis.clone(),
@@ -141,7 +141,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 #[allow(clippy::too_many_lines)]
 pub async fn run_with_state<F>(
     cfg: Config,
-    image_state: okapi_gateway::state::AppState,
+    image_state: okapi_engine::state::AppState,
     redis: fred::clients::Client,
     spawn_sync: bool,
     stop: F,
@@ -169,14 +169,14 @@ where
     let js = ensure_jetstream(image_state.nats.as_ref()).await;
     if spawn_sync {
         // Keep PriceBook, routing caches and SSRF/runtime settings fresh in standalone worker mode.
-        okapi_gateway::spawn_state_sync(&image_state);
+        okapi_engine::spawn_state_sync(&image_state);
     }
     let (image_stop, image_stopped) = tokio::sync::watch::channel(false);
     let native_batch_worker =
         tokio::spawn(supervision::run("image_batches", image_stopped.clone(), {
             let state = image_state.clone();
             let stop = image_stopped.clone();
-            move || okapi_gateway::images::batches::run_worker(state.clone(), stop.clone())
+            move || okapi_engine::images::batches::run_worker(state.clone(), stop.clone())
         }));
     let recovery_workers: Vec<_> = [false, true]
         .into_iter()
@@ -200,7 +200,7 @@ where
         // Image and credential workers share the same assembled state and credential gates.
         let image_state = image_state.clone();
         let stop = image_stopped.clone();
-        move || okapi_gateway::images::tasks::run_worker(image_state.clone(), stop.clone())
+        move || okapi_engine::images::tasks::run_worker(image_state.clone(), stop.clone())
     }));
 
     let credential_worker =
@@ -314,7 +314,7 @@ where
     image_state.settlements.drain();
     image_state
         .settlements
-        .wait_idle(okapi_gateway::SETTLE_DRAIN_CAP)
+        .wait_idle(okapi_engine::SETTLE_DRAIN_CAP)
         .await;
     tracing::info!("worker 已下线");
     Ok(())

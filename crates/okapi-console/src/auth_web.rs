@@ -7,7 +7,7 @@
 //! 登录与会话管理在 sessions，会话 key / TOTP / 自建 key 在 credentials。
 
 use axum::http::{HeaderMap, StatusCode};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use rand::RngExt;
 use rand::distr::Alphanumeric;

@@ -28,7 +28,7 @@ struct Data {
 
 tokio::task_local! { static CURRENT: Trace; }
 
-pub(crate) async fn scope(request: Request, next: Next) -> Response {
+pub async fn scope(request: Request, next: Next) -> Response {
     let trace = Trace::new(request.headers());
     trace.scope(next.run(request)).await
 }
@@ -62,7 +62,7 @@ impl Trace {
         })))
     }
 
-    pub(crate) fn current() -> Option<Self> {
+    pub fn current() -> Option<Self> {
         CURRENT.try_with(Clone::clone).ok()
     }
 
@@ -71,7 +71,7 @@ impl Trace {
         CURRENT.scope(self.clone(), future).await
     }
 
-    pub(crate) fn snapshot(&self) -> Value {
+    pub fn snapshot(&self) -> Value {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -79,20 +79,20 @@ impl Trace {
             .clone()
     }
 
-    pub(crate) fn set(&self, name: &str, value: Value) {
+    pub fn set(&self, name: &str, value: Value) {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .fields[name] = value;
     }
 
-    pub(crate) fn response_model(&self, model: Option<&str>) {
+    pub fn response_model(&self, model: Option<&str>) {
         if let Some(model) = model.filter(|s| !s.is_empty()) {
             self.set("response_model", json!(bounded(model, 256)));
         }
     }
 
-    pub(crate) fn stream_event(&self, raw: &str) {
+    pub fn stream_event(&self, raw: &str) {
         let Ok(value) = serde_json::from_str::<Value>(raw) else {
             return;
         };
@@ -113,7 +113,7 @@ impl Trace {
         }
     }
 
-    pub(crate) fn media(&self, body: &[u8], video: bool) {
+    pub fn media(&self, body: &[u8], video: bool) {
         #[derive(serde::Deserialize)]
         struct Media {
             size: Option<String>,
@@ -146,7 +146,7 @@ impl Trace {
         }
     }
 
-    pub(crate) fn begin(&self, candidate: &ChannelCandidate, model: &str, endpoint: &str) {
+    pub fn begin(&self, candidate: &ChannelCandidate, model: &str, endpoint: &str) {
         let mut data = self
             .0
             .lock()
@@ -214,7 +214,7 @@ impl Trace {
     }
 
     /// 给当前（最近一次）尝试挂一条观测（如上游返回的订阅限额头）。没有进行中的尝试则丢弃。
-    pub(crate) fn attempt_note(&self, name: &str, value: Value) {
+    pub fn attempt_note(&self, name: &str, value: Value) {
         let mut data = self
             .0
             .lock()
@@ -228,7 +228,7 @@ impl Trace {
         }
     }
 
-    pub(crate) fn finish(&self, status: Option<i16>, error: Option<&UpstreamError>) {
+    pub fn finish(&self, status: Option<i16>, error: Option<&UpstreamError>) {
         let mut data = self
             .0
             .lock()
@@ -271,12 +271,12 @@ impl Trace {
         }
     }
 
-    pub(crate) fn failure(&self, error: &UpstreamError) {
+    pub fn failure(&self, error: &UpstreamError) {
         self.finish(error.upstream_status(), Some(error));
     }
 }
 
-pub(crate) async fn upstream<T>(
+pub async fn upstream<T>(
     candidate: &ChannelCandidate,
     model: &str,
     endpoint: &str,
@@ -299,11 +299,11 @@ pub(crate) async fn upstream<T>(
     result
 }
 
-pub(crate) fn snapshot() -> Option<Value> {
+pub fn snapshot() -> Option<Value> {
     Trace::current().map(|t| t.snapshot())
 }
 
-pub(crate) fn phase(code: &str) -> &'static str {
+pub fn phase(code: &str) -> &'static str {
     match code {
         "no_available_channel" | "margin_blocked" | "unsupported_endpoint" => "routing",
         "insufficient_quota" | "rate_limited" | "overloaded" => "admission",

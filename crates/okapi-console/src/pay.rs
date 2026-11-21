@@ -11,7 +11,7 @@ use axum::Json;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use md5::{Digest as Md5Digest, Md5};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;

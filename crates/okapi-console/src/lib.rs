@@ -67,7 +67,7 @@ use axum::http::{Method, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use okapi_gateway::{self as gateway, state::AppState};
+use okapi_engine::{self as gateway, state::AppState};
 use okapi_kernel::config::Config;
 use tower_http::trace::TraceLayer;
 
@@ -565,7 +565,7 @@ fn auth_routes() -> ConsoleRouter {
 /// - `embed-web` feature（发布形态）：dist 编译期嵌入二进制（rust-embed）；
 /// - 缺省（开发形态）：磁盘目录（OKAPI_WEB_DIR 缺省 ./frontend/dist）。
 #[cfg(not(feature = "embed-web"))]
-fn spa_router() -> Router<okapi_gateway::state::AppState> {
+fn spa_router() -> Router<okapi_engine::state::AppState> {
     let dir = std::env::var("OKAPI_WEB_DIR").unwrap_or_else(|_| "frontend/dist".to_owned());
     let index = format!("{dir}/index.html");
     let service = tower_http::services::ServeDir::new(&dir)
@@ -579,7 +579,7 @@ fn spa_router() -> Router<okapi_gateway::state::AppState> {
 struct WebAssets;
 
 #[cfg(feature = "embed-web")]
-fn spa_router() -> Router<okapi_gateway::state::AppState> {
+fn spa_router() -> Router<okapi_engine::state::AppState> {
     use axum::http::{HeaderValue, StatusCode, Uri, header};
     use axum::response::IntoResponse;
 

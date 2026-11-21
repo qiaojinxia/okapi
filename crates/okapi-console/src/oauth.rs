@@ -9,7 +9,7 @@ use super::query::Query;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Path;
 use okapi_providers::custom_pass::{PassRequest, PassResponse};

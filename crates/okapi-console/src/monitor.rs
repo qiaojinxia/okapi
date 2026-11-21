@@ -6,7 +6,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use okapi_api::permissions;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::ops::{host, logbuf, probes::Probes, sampler};
 use serde::Deserialize;

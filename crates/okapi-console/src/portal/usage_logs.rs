@@ -4,7 +4,7 @@
 use super::{LogWindow, LogsQuery};
 use crate::query::Query;
 use axum::{Json, extract::State, http::HeaderMap};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use serde_json::{Value, json};
@@ -130,7 +130,7 @@ pub async fn list(
     }
     for row in &mut data {
         if let Some(diagnostics) = row.get_mut("diagnostics").filter(|d| !d.is_null()) {
-            *diagnostics = okapi_gateway::diagnostics::public(diagnostics);
+            *diagnostics = okapi_engine::diagnostics::public(diagnostics);
         }
     }
     let next_before = if has_more {

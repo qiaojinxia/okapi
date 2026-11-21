@@ -160,7 +160,7 @@ async fn epoch_broadcast_hot_reload() {
     let Some(env) = setup().await else {
         return;
     };
-    let state = okapi_gateway::build_state(
+    let state = okapi_engine::build_state(
         &env.database_url,
         &env.redis_url,
         "test-node",
@@ -170,7 +170,7 @@ async fn epoch_broadcast_hot_reload() {
     .await
     .unwrap();
     assert!(state.nats.is_some(), "NATS 应已连接");
-    okapi_gateway::spawn_epoch_subscriber(state.clone());
+    okapi_engine::spawn_epoch_subscriber(state.clone());
     // 订阅建立是异步的，稍等避免消息早于订阅
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 

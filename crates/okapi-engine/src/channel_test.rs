@@ -16,7 +16,7 @@ pub struct ChannelPin {
 }
 
 impl ChannelPin {
-    pub(crate) fn matches(&self, cand: &okapi_store::ChannelCandidate) -> bool {
+    pub fn matches(&self, cand: &okapi_store::ChannelCandidate) -> bool {
         cand.channel_id == self.channel_id
             && self.key_id.is_none_or(|key| key == cand.channel_key_id)
     }
@@ -25,7 +25,7 @@ impl ChannelPin {
 tokio::task_local! { static PIN: ChannelPin; }
 
 /// 当前请求钉住的渠道；数据面正常请求恒为 None。
-pub(crate) fn current() -> Option<ChannelPin> {
+pub fn current() -> Option<ChannelPin> {
     PIN.try_with(Clone::clone).ok()
 }
 

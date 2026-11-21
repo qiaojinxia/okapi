@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 /// 本次请求的计价上下文。`model` 是计价名（chat 的变体可能与路由名不同），
 /// `service_tier` 只有 chat 会带（预扣按请求声明档估）。
-pub(crate) fn calc_context(
+pub fn calc_context(
     key: &AuthedKey,
     model: &str,
     rules_in: RuleInputs,
@@ -55,7 +55,7 @@ fn local_minute_of_day(now: chrono::DateTime<chrono::Utc>, utc_offset_seconds: i
 }
 
 /// key 的 RPM / TPM / RPD / 并发上限（未配 = 0 = 不限）。
-pub(crate) fn limit_caps(key: &AuthedKey) -> LimitCaps {
+pub fn limit_caps(key: &AuthedKey) -> LimitCaps {
     let cap = |v: Option<i32>| v.map_or(0, i64::from);
     LimitCaps {
         rpm: cap(key.rpm_limit),
@@ -68,7 +68,7 @@ pub(crate) fn limit_caps(key: &AuthedKey) -> LimitCaps {
 /// 用户×模型 RPM（`settings.model_rpm_limits`，全局按用户；§11.1）：没配或配了 0 就不限。
 /// 对话、count_tokens、各媒体端点与图片批量记在同一个计数上（同一用户、同一模型、每分钟），
 /// 放在预扣之前查，被拒的请求什么都不预扣。
-pub(crate) async fn check_model_rpm(
+pub async fn check_model_rpm(
     state: &AppState,
     key: &AuthedKey,
     model: &str,
@@ -91,13 +91,13 @@ pub(crate) async fn check_model_rpm(
 }
 
 /// 预扣成功后的落点：所在池与订阅窗口（结算回到同一池）。
-pub(crate) struct Reserved {
+pub struct Reserved {
     pub pool: Pool,
     pub source_window: Option<String>,
 }
 
 /// 按 key 的限额预扣 `est`；余额不足与限流转成 429（`insufficient_quota` / `rate_limited`）。
-pub(crate) async fn reserve(
+pub async fn reserve(
     state: &AppState,
     key: &AuthedKey,
     request_id: Uuid,
@@ -140,19 +140,19 @@ pub(crate) async fn reserve(
 
 /// 请求来源：客户端类型与来源 IP（§14.2）。同一请求的每条账——成功、失败、补写——都带它。
 #[derive(Clone, Debug)]
-pub(crate) struct Origin {
+pub struct Origin {
     pub client_type: &'static str,
     pub client_ip: Option<String>,
 }
 
 impl Origin {
     /// 按 UA 认客户端类型。
-    pub(crate) fn of(headers: &HeaderMap) -> Self {
+    pub fn of(headers: &HeaderMap) -> Self {
         Self::labeled(detect_client_type(headers), headers)
     }
 
     /// 入口自己定客户端类型（realtime、custom_pass 不按 UA 认）。
-    pub(crate) fn labeled(client_type: &'static str, headers: &HeaderMap) -> Self {
+    pub fn labeled(client_type: &'static str, headers: &HeaderMap) -> Self {
         Self {
             client_type,
             client_ip: detect_client_ip(headers),
@@ -165,7 +165,7 @@ impl Origin {
 /// 各入口原本逐字段拼 `SettlementInput`，漏填过好几次（images / videos 的 request_id、媒体失败账的
 /// 来源 IP 与客户端类型）。这几项只在这里填，入口写 `SettlementInput { 结果字段…, ..payer.settlement(…) }`。
 #[derive(Clone, Copy)]
-pub(crate) struct Payer<'a> {
+pub struct Payer<'a> {
     pub request_id: Uuid,
     pub user_id: i64,
     pub api_key_id: i64,
@@ -178,7 +178,7 @@ pub(crate) struct Payer<'a> {
 }
 
 impl<'a> Payer<'a> {
-    pub(crate) fn new(
+    pub fn new(
         state: &'a AppState,
         key: &'a AuthedKey,
         request_id: Uuid,
@@ -200,7 +200,7 @@ impl<'a> Payer<'a> {
     }
 
     /// 这笔请求的一条账：身份字段已填；结果字段是「失败、没扣钱、没选上游」的零值，由入口按结果覆盖。
-    pub(crate) fn settlement(
+    pub fn settlement(
         self,
         model_name: &'a str,
         dimensions: UsageDimensions,

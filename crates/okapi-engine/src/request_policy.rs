@@ -34,7 +34,7 @@ pub async fn with<T>(policy: Arc<RequestPolicy>, future: impl Future<Output = T>
 }
 
 /// 数据面路由的中间件：每个请求开头取一次策略（10s 进程缓存），整个请求期间有效。
-pub(crate) async fn scope(State(state): State<AppState>, request: Request, next: Next) -> Response {
+pub async fn scope(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let policy = state.request_policy().await;
     with(policy, next.run(request)).await
 }

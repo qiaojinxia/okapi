@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 const DEFAULT_MAX_USES: u32 = 5;
 
 #[derive(Clone, Default)]
-pub(super) struct ToolAdmission {
+pub struct ToolAdmission {
     tools: Vec<Value>,
     search: Option<u32>,
     fetch: Option<u32>,
@@ -62,13 +62,13 @@ fn build_error(param: &str) -> UpstreamError {
 
 impl ToolAdmission {
     #[cfg(test)]
-    pub(super) fn parse(body: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(body: &[u8]) -> Result<Self, &'static str> {
         let value: Value = serde_json::from_slice(body).map_err(|_| "tools")?;
         Self::from_value(&value)
     }
 
     /// 已解析好的请求体（`prepare_chat` 共用同一份，不再按字节重解析）。
-    pub(super) fn from_value(value: &Value) -> Result<Self, &'static str> {
+    pub fn from_value(value: &Value) -> Result<Self, &'static str> {
         let mut plan = Self::default();
         for tool in value
             .get("tools")
@@ -114,20 +114,20 @@ impl ToolAdmission {
         Ok(plan)
     }
 
-    pub(super) fn has_tools(&self) -> bool {
+    pub fn has_tools(&self) -> bool {
         !self.tools.is_empty()
     }
 
     /// 转换后由 [`Self::restore`] 原样装回上游体的原生工具类型：转换不会丢它们，
     /// 不该再算进 `tool_loss` 的「会丢的工具」。
-    pub(super) fn carried_types(&self) -> Vec<&str> {
+    pub fn carried_types(&self) -> Vec<&str> {
         self.tools
             .iter()
             .filter_map(|t| t.get("type").and_then(Value::as_str))
             .collect()
     }
 
-    pub(super) fn estimated_usage(&self) -> Option<ServerToolUsage> {
+    pub fn estimated_usage(&self) -> Option<ServerToolUsage> {
         (self.search.is_some() || self.fetch.is_some()).then_some(ServerToolUsage::Anthropic(
             AnthropicToolUsage {
                 web_search_requests: Some(self.search.unwrap_or(0)),
@@ -138,11 +138,7 @@ impl ToolAdmission {
     }
 
     /// Pre-check on an immutable `Value` before cloning a copy-on-write body.
-    pub(super) fn needs_restore(
-        &self,
-        current: &Value,
-        dialect: &str,
-    ) -> Result<bool, UpstreamError> {
+    pub fn needs_restore(&self, current: &Value, dialect: &str) -> Result<bool, UpstreamError> {
         if self.has_tools() && dialect != "anthropic" {
             return Err(build_error("tools.provider"));
         }
@@ -158,11 +154,7 @@ impl ToolAdmission {
     }
 
     /// Mutate `value` in place to strip native tools and restore the admitted definitions.
-    pub(super) fn restore_value(
-        &self,
-        value: &mut Value,
-        dialect: &str,
-    ) -> Result<(), UpstreamError> {
+    pub fn restore_value(&self, value: &mut Value, dialect: &str) -> Result<(), UpstreamError> {
         if self.has_tools() && dialect != "anthropic" {
             return Err(build_error("tools.provider"));
         }
@@ -188,7 +180,7 @@ impl ToolAdmission {
     /// Directional converters handle ordinary tools. Restore the authorized native
     /// definitions afterwards, without changing them into client function tools.
     #[cfg(test)]
-    pub(super) fn restore(&self, body: Bytes, dialect: &str) -> Result<Bytes, UpstreamError> {
+    pub fn restore(&self, body: Bytes, dialect: &str) -> Result<Bytes, UpstreamError> {
         if self.has_tools() && dialect != "anthropic" {
             return Err(build_error("tools.provider"));
         }
@@ -203,7 +195,7 @@ impl ToolAdmission {
     }
 
     /// Check a parsed outbound body after channel injection/stripping.
-    pub(super) fn verify_outbound_value(&self, value: &Value) -> Result<(), UpstreamError> {
+    pub fn verify_outbound_value(&self, value: &Value) -> Result<(), UpstreamError> {
         let mut native = Vec::new();
         for tool in value
             .get("tools")
@@ -223,7 +215,7 @@ impl ToolAdmission {
 
     /// Check the final body after channel injection/stripping. Missing max_uses
     /// must not be normalized back to our default here: it is no longer bounded.
-    pub(super) fn verify_outbound(&self, body: &[u8]) -> Result<(), UpstreamError> {
+    pub fn verify_outbound(&self, body: &[u8]) -> Result<(), UpstreamError> {
         if !self.has_tools()
             && memchr::memmem::find(body, b"\"tools\"").is_none()
             && memchr::memchr(b'\\', body).is_none()
@@ -234,7 +226,7 @@ impl ToolAdmission {
         self.verify_outbound_value(&value)
     }
 
-    pub(super) fn validate_usage(
+    pub fn validate_usage(
         &self,
         prices: Option<ServerToolPrices>,
         observed: Option<ServerToolUsage>,
@@ -280,26 +272,22 @@ impl ToolAdmission {
     /// 不能白送，所以只许走订阅渠道（次数含在订阅里，Anthropic 不另收），按「已包含」计；
     /// 没有可用订阅渠道时选渠道那一步回 `SERVER_TOOL_UNPRICED`。只在准入调用：结算沿用准入时
     /// 冻结的价簿和这个决定，响应模型缺工具价格仍按既有规则拒绝改价并退款。
-    pub(super) fn admit(&mut self, book: &PriceBook, model: &okapi_domain::ModelCode) {
+    pub fn admit(&mut self, book: &PriceBook, model: &okapi_domain::ModelCode) {
         self.subscription_only = self.has_tools() && book.server_tool_prices(model).is_none();
     }
 
-    pub(super) fn subscription_only(&self) -> bool {
+    pub fn subscription_only(&self) -> bool {
         self.subscription_only
     }
 
     /// 兜底链上的备选模型能不能接这次请求：请求模型配了工具价格时，备选也得配
     /// （不然换了模型就白送）；只走订阅时备选同样按「已包含」计。
-    pub(super) fn allows_fallback(
-        &self,
-        book: &PriceBook,
-        model: &okapi_domain::ModelCode,
-    ) -> bool {
+    pub fn allows_fallback(&self, book: &PriceBook, model: &okapi_domain::ModelCode) -> bool {
         !self.has_tools() || self.subscription_only || book.server_tool_prices(model).is_some()
     }
 
     /// 实际生效的工具价格：价簿配了以价簿为准，只走订阅时缺省按「已包含」。
-    pub(super) fn prices(
+    pub fn prices(
         &self,
         book: &PriceBook,
         model: &okapi_domain::ModelCode,
@@ -308,7 +296,7 @@ impl ToolAdmission {
             .or(self.subscription_only.then_some(ServerToolPrices::INCLUDED))
     }
 
-    pub(super) fn quote(
+    pub fn quote(
         &self,
         book: &PriceBook,
         calc: &CalcContext,
@@ -327,13 +315,13 @@ impl ToolAdmission {
         }
     }
 
-    pub(super) fn snapshot(&self, reserved_amount: Money) -> Value {
+    pub fn snapshot(&self, reserved_amount: Money) -> Value {
         json!({"tools":self.tools,"reserved_amount_micro":reserved_amount})
     }
 
     /// Counts do not provide billed duration, organization allowance or inclusion.
     /// Keep known search/fetch fees without claiming they cover the whole cost.
-    pub(super) fn cost_coverage(&self, observed: Option<ServerToolUsage>) -> Option<Value> {
+    pub fn cost_coverage(&self, observed: Option<ServerToolUsage>) -> Option<Value> {
         let count = observed.and_then(|ServerToolUsage::Anthropic(u)| u.code_execution_requests);
         (self.execution || count.is_some_and(|n| n > 0)).then(|| {
             json!({

@@ -1,7 +1,7 @@
 //! Bounded OAuth pre-refresh; credentials stay in the shared gateway manager.
 use futures::{StreamExt, stream};
-use okapi_gateway::credentials::{health, oauth};
-use okapi_gateway::state::AppState;
+use okapi_engine::credentials::{health, oauth};
+use okapi_engine::state::AppState;
 use okapi_kernel::policies::RefreshPolicy;
 use serde_json::Value;
 use std::sync::Arc;
@@ -77,14 +77,14 @@ pub async fn refresh_once(
                     return;
                 };
                 let Ok(credential) =
-                    okapi_gateway::credentials::stored_credential(&row.provider, &plain)
+                    okapi_engine::credentials::stored_credential(&row.provider, &plain)
                 else {
                     health::record(state, row.id, Some("oauth_credential_expected")).await;
                     return;
                 };
                 let now = chrono::Utc::now().timestamp();
                 let Ok(control) =
-                    okapi_gateway::account_control::policy(state, row.channel_id).await
+                    okapi_engine::account_control::policy(state, row.channel_id).await
                 else {
                     return;
                 };
@@ -94,7 +94,7 @@ pub async fn refresh_once(
                 let refresh = capabilities.refresh
                     && policy.enabled
                     && control.refresh_mode
-                        == okapi_gateway::account_control::policy::RefreshMode::Managed
+                        == okapi_engine::account_control::policy::RefreshMode::Managed
                     && credential.oauth().is_some_and(|oauth| {
                         oauth.needs_refresh(
                             now,
@@ -135,7 +135,7 @@ pub async fn refresh_once(
                 {
                     tracing::warn!(key = row.id, error = %error, "OAuth pre-refresh failed");
                 }
-                okapi_gateway::account_control::quota::poll(state, &row, &plain).await;
+                okapi_engine::account_control::quota::poll(state, &row, &plain).await;
             }
         })
         .buffer_unordered(usize::from(policy.concurrency.max(1)))

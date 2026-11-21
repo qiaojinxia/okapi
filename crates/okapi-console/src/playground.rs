@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use serde_json::{Value, json};
 
@@ -34,11 +34,15 @@ pub async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         Ok(headers) => headers,
         Err(err) => return err.into_response_with(None),
     };
+    let bridge = match state.data_plane() {
+        Ok(bridge) => bridge,
+        Err(err) => return err.into_response_with(None),
+    };
     // Check user-supplied controls against the actual mapped upstream contract,
     // including failover candidates and channel strip/inject rules, before billing.
     let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     if let Some(model) = value.get("model").and_then(Value::as_str) {
-        match okapi_gateway::chat::playground_parameters(&state, &headers, model).await {
+        match bridge.playground_parameters(&state, &headers, model).await {
             Ok(profile) => {
                 if let Err(param) = profile.validate(&value) {
                     return AppError::new(StatusCode::BAD_REQUEST, okapi_api::codes::BAD_REQUEST)
@@ -51,13 +55,10 @@ pub async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes
     }
     // This direct call bypasses the gateway router's diagnostic middleware.
     // Initialize after selecting the key so credential redaction uses the actual key.
-    let trace = okapi_gateway::diagnostics::Trace::new(&headers);
+    let trace = okapi_engine::diagnostics::Trace::new(&headers);
+    let call_state = state.clone();
     trace
-        .scope(Box::pin(okapi_gateway::chat::chat_completions(
-            State(state),
-            headers,
-            body,
-        )))
+        .scope(Box::pin(bridge.chat_completions(call_state, headers, body)))
         .await
 }
 
@@ -79,8 +80,10 @@ pub async fn parameters(
         return Err(AppError::bad_request());
     }
     let headers = with_selected_key(&state, headers).await?;
-    let profile =
-        okapi_gateway::chat::playground_parameters(&state, &headers, query.model.trim()).await?;
+    let profile = state
+        .data_plane()?
+        .playground_parameters(&state, &headers, query.model.trim())
+        .await?;
     Ok(Json(json!(profile)))
 }
 

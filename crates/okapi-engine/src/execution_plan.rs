@@ -7,14 +7,14 @@ use okapi_store::ChannelCandidate;
 use serde_json::Value;
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct Requirements {
+pub struct Requirements {
     pub tools: bool,
     pub vision: bool,
     pub server_tools: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Operation {
+pub enum Operation {
     ChatCompletions,
     Messages,
     GenerateContent,
@@ -23,14 +23,14 @@ pub(crate) enum Operation {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ExecutionPlan {
+pub struct ExecutionPlan {
     pub adapter: &'static ProviderDescriptor,
     pub dialect: Dialect,
     pub operation: Operation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PlanError {
+pub enum PlanError {
     #[error("adapter_unregistered")]
     Unregistered,
     #[error("unsupported_endpoint")]
@@ -188,7 +188,7 @@ impl ExecutionPlan {
     }
 }
 
-pub(crate) fn format(ingress: Ingress) -> ApiFormat {
+pub fn format(ingress: Ingress) -> ApiFormat {
     match ingress {
         Ingress::OpenAi => ApiFormat::ChatCompletions,
         Ingress::Anthropic => ApiFormat::Messages,

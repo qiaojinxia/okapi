@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         Role::SealCredentials => seal_credentials(&cfg).await,
         Role::Gateway => gateway::run(cfg).await,
         Role::Worker => worker::run(cfg).await,
-        Role::Console => console::run(cfg).await,
+        Role::Console => run_console(cfg).await,
         Role::All => run_all(cfg).await,
         Role::Migrate {
             from,
@@ -179,6 +179,18 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+async fn run_console(cfg: Config) -> anyhow::Result<()> {
+    let state = gateway::build_state(
+        &cfg.database_url,
+        &cfg.redis_url,
+        &cfg.node,
+        cfg.clickhouse_url.as_deref(),
+        cfg.nats_url.as_deref(),
+    )
+    .await?;
+    console::run_with_state(cfg, state, true, okapi_kernel::shutdown::signal()).await
 }
 
 struct StopOnDrop(tokio::sync::watch::Sender<bool>);

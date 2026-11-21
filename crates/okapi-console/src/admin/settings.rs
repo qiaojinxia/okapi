@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::permissions;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
@@ -37,7 +37,7 @@ pub async fn set_setting(
     }
     let is_pricing_base = req.key == okapi_kernel::pricing_loader::BASE_PRICE_SETTING;
     if req.key == "streaming_policy"
-        && !okapi_gateway::stream_policy::StreamPolicy::valid(&req.value)
+        && !okapi_engine::stream_policy::StreamPolicy::valid(&req.value)
     {
         return Err(AppError::bad_request().with_param("streaming_policy"));
     }

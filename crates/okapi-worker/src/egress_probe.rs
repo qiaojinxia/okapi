@@ -9,7 +9,7 @@
 use crate::notify::Notifier;
 use fred::interfaces::KeysInterface;
 use futures::{StreamExt, stream};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::policies::{EGRESS_PROBE_SETTING, ProbePolicy};
 use serde_json::{Value, json};
 use std::time::Duration;

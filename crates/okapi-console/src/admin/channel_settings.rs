@@ -1,5 +1,5 @@
 //! 渠道 `settings` 的写入校验（API 版本、出口、模拟、额外字段、账号控制、OAuth 地址、Azure / Vertex 地址形状）。
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use serde_json::Value;
 
@@ -143,7 +143,7 @@ pub(super) fn ensure_request_extensions(
 
 pub(crate) fn ensure_account_control(settings: Option<&Value>) -> Result<(), AppError> {
     if let Some(settings) = settings {
-        okapi_gateway::account_control::policy::Policy::parse(settings)
+        okapi_engine::account_control::policy::Policy::parse(settings)
             .map_err(|param| AppError::bad_request().with_param(param))?;
     }
     Ok(())

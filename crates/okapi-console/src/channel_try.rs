@@ -12,8 +12,8 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use okapi_api::{codes, permissions};
-use okapi_gateway::channel_test::ChannelPin;
-use okapi_gateway::state::AppState;
+use okapi_engine::channel_test::ChannelPin;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
@@ -42,19 +42,24 @@ pub async fn try_channel(
 ) -> Response {
     match prepare(&state, &headers, channel_id, req).await {
         Ok((pin, body, responses)) => {
+            let bridge = match state.data_plane() {
+                Ok(bridge) => bridge,
+                Err(error) => return error.into_response_with(None),
+            };
             let mut headers = headers;
             // 试用台的选 key 头不适用：测试一律用登录的这把令牌
             headers.remove(super::playground::SELECTED_KEY_HEADER);
-            let trace = okapi_gateway::diagnostics::Trace::new(&headers);
+            let trace = okapi_engine::diagnostics::Trace::new(&headers);
+            let call_state = state.clone();
             let call = async move {
                 if responses {
-                    okapi_gateway::chat::responses(State(state), headers, body).await
+                    bridge.responses(call_state, headers, body).await
                 } else {
-                    okapi_gateway::chat::chat_completions(State(state), headers, body).await
+                    bridge.chat_completions(call_state, headers, body).await
                 }
             };
             trace
-                .scope(okapi_gateway::channel_test::scope(pin, Box::pin(call)))
+                .scope(okapi_engine::channel_test::scope(pin, Box::pin(call)))
                 .await
         }
         Err(error) => error.into_response_with(None),

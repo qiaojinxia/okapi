@@ -2202,6 +2202,7 @@ dependencies = [
  "md-5 0.10.6",
  "okapi-console",
  "okapi-domain",
+ "okapi-engine",
  "okapi-gateway",
  "okapi-kernel",
  "okapi-ledger",
@@ -2251,6 +2252,7 @@ dependencies = [
  "mime_guess",
  "okapi-api",
  "okapi-domain",
+ "okapi-engine",
  "okapi-gateway",
  "okapi-kernel",
  "okapi-ledger",
@@ -2282,11 +2284,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "okapi-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "async-trait",
+ "async_zip",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fred",
+ "futures",
+ "hex",
+ "memchr",
+ "moka",
+ "okapi-api",
+ "okapi-domain",
+ "okapi-kernel",
+ "okapi-ledger",
+ "okapi-pricing",
+ "okapi-providers",
+ "okapi-store",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "okapi-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
+ "async-trait",
  "async_zip",
  "aws-lc-rs",
  "axum",
@@ -2300,6 +2339,7 @@ dependencies = [
  "moka",
  "okapi-api",
  "okapi-domain",
+ "okapi-engine",
  "okapi-kernel",
  "okapi-ledger",
  "okapi-pricing",
@@ -2466,6 +2506,7 @@ dependencies = [
  "hex",
  "hmac",
  "okapi-domain",
+ "okapi-engine",
  "okapi-gateway",
  "okapi-kernel",
  "okapi-ledger",

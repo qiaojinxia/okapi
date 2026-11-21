@@ -2,8 +2,8 @@
   "schema": 1,
   "evidence": "static route inventory; runtime/business behavior unverified",
   "sources": {
-    "crates/okapi-console/src/lib.rs": "782a3f1eb21f8c227003c6a1c71bb4a4fdb50eae89283b8b4b9f365521fd89d8",
-    "crates/okapi-gateway/src/lib.rs": "4219a5bcb45808486bbf2d3a361e19771b3812ba0eecf14261ba4263996f386d"
+    "crates/okapi-console/src/lib.rs": "69ace9656a0e819bbf5d7382edd12f75da0f5be73ee4391fc2240557ea812761",
+    "crates/okapi-gateway/src/lib.rs": "b53f2eadea460cf7586bf814f4d26a60f41ee70d69433e23f2d60066257ea54b"
   },
   "endpoints": [
     {
@@ -2533,7 +2533,7 @@
       "handler": "|| async { \"ok\" }",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 557
+      "line": 284
     },
     {
       "surface": "gateway",
@@ -2542,7 +2542,7 @@
       "handler": "|| async { \"ok\" }",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 557
+      "line": 284
     },
     {
       "surface": "gateway",
@@ -2551,7 +2551,7 @@
       "handler": "images::tasks::edits",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 537
+      "line": 264
     },
     {
       "surface": "gateway",
@@ -2560,7 +2560,7 @@
       "handler": "images::tasks::generations",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 533
+      "line": 260
     },
     {
       "surface": "gateway",
@@ -2569,7 +2569,7 @@
       "handler": "images::tasks::get",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 538
+      "line": 265
     },
     {
       "surface": "gateway",
@@ -2578,7 +2578,7 @@
       "handler": "images::tasks::get",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 538
+      "line": 265
     },
     {
       "surface": "gateway",
@@ -2587,7 +2587,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2596,7 +2596,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2605,7 +2605,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2614,7 +2614,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2623,7 +2623,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2632,7 +2632,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2641,7 +2641,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2650,7 +2650,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2659,7 +2659,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 552
+      "line": 279
     },
     {
       "surface": "gateway",
@@ -2668,7 +2668,7 @@
       "handler": "audio::speech",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 544
+      "line": 271
     },
     {
       "surface": "gateway",
@@ -2677,7 +2677,7 @@
       "handler": "audio::transcriptions",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 545
+      "line": 272
     },
     {
       "surface": "gateway",
@@ -2686,7 +2686,7 @@
       "handler": "audio::translations",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 546
+      "line": 273
     },
     {
       "surface": "gateway",
@@ -2695,7 +2695,7 @@
       "handler": "chat::chat_completions",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 471
+      "line": 198
     },
     {
       "surface": "gateway",
@@ -2704,7 +2704,7 @@
       "handler": "dashboard::subscription",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 547
+      "line": 274
     },
     {
       "surface": "gateway",
@@ -2713,7 +2713,7 @@
       "handler": "dashboard::subscription",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 547
+      "line": 274
     },
     {
       "surface": "gateway",
@@ -2722,7 +2722,7 @@
       "handler": "dashboard::usage",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 551
+      "line": 278
     },
     {
       "surface": "gateway",
@@ -2731,7 +2731,7 @@
       "handler": "dashboard::usage",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 551
+      "line": 278
     },
     {
       "surface": "gateway",
@@ -2740,7 +2740,7 @@
       "handler": "embeddings::embeddings",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 489
+      "line": 216
     },
     {
       "surface": "gateway",
@@ -2749,7 +2749,7 @@
       "handler": "images::batches::list",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 491
+      "line": 218
     },
     {
       "surface": "gateway",
@@ -2758,7 +2758,7 @@
       "handler": "images::batches::list",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 491
+      "line": 218
     },
     {
       "surface": "gateway",
@@ -2767,7 +2767,7 @@
       "handler": "images::batches::create",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 491
+      "line": 218
     },
     {
       "surface": "gateway",
@@ -2776,7 +2776,7 @@
       "handler": "images::batches::models",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 497
+      "line": 224
     },
     {
       "surface": "gateway",
@@ -2785,7 +2785,7 @@
       "handler": "images::batches::models",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 497
+      "line": 224
     },
     {
       "surface": "gateway",
@@ -2794,7 +2794,7 @@
       "handler": "images::batches::delete",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 498
+      "line": 225
     },
     {
       "surface": "gateway",
@@ -2803,7 +2803,7 @@
       "handler": "images::batches::get",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 498
+      "line": 225
     },
     {
       "surface": "gateway",
@@ -2812,7 +2812,7 @@
       "handler": "images::batches::get",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 498
+      "line": 225
     },
     {
       "surface": "gateway",
@@ -2821,7 +2821,7 @@
       "handler": "images::batches::cancel",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 502
+      "line": 229
     },
     {
       "surface": "gateway",
@@ -2830,7 +2830,7 @@
       "handler": "images::batches::content",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 514
+      "line": 241
     },
     {
       "surface": "gateway",
@@ -2839,7 +2839,7 @@
       "handler": "images::batches::content",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 514
+      "line": 241
     },
     {
       "surface": "gateway",
@@ -2848,7 +2848,7 @@
       "handler": "images::batches::download",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 510
+      "line": 237
     },
     {
       "surface": "gateway",
@@ -2857,7 +2857,7 @@
       "handler": "images::batches::download",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 510
+      "line": 237
     },
     {
       "surface": "gateway",
@@ -2866,7 +2866,7 @@
       "handler": "images::batches::items",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 506
+      "line": 233
     },
     {
       "surface": "gateway",
@@ -2875,7 +2875,7 @@
       "handler": "images::batches::items",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 506
+      "line": 233
     },
     {
       "surface": "gateway",
@@ -2884,7 +2884,7 @@
       "handler": "images::edits",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 518
+      "line": 245
     },
     {
       "surface": "gateway",
@@ -2893,7 +2893,7 @@
       "handler": "images::tasks::edits",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 523
+      "line": 250
     },
     {
       "surface": "gateway",
@@ -2902,7 +2902,7 @@
       "handler": "images::images",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 490
+      "line": 217
     },
     {
       "surface": "gateway",
@@ -2911,7 +2911,7 @@
       "handler": "images::tasks::generations",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 519
+      "line": 246
     },
     {
       "surface": "gateway",
@@ -2920,7 +2920,7 @@
       "handler": "images::tasks::get",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 524
+      "line": 251
     },
     {
       "surface": "gateway",
@@ -2929,7 +2929,7 @@
       "handler": "images::tasks::get",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 524
+      "line": 251
     },
     {
       "surface": "gateway",
@@ -2938,7 +2938,7 @@
       "handler": "images::tasks::cancel",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 525
+      "line": 252
     },
     {
       "surface": "gateway",
@@ -2947,7 +2947,7 @@
       "handler": "images::tasks::content",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 529
+      "line": 256
     },
     {
       "surface": "gateway",
@@ -2956,7 +2956,7 @@
       "handler": "images::tasks::content",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 529
+      "line": 256
     },
     {
       "surface": "gateway",
@@ -2965,7 +2965,7 @@
       "handler": "chat::messages",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 476
+      "line": 203
     },
     {
       "surface": "gateway",
@@ -2974,7 +2974,7 @@
       "handler": "chat::messages_count_tokens",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 472
+      "line": 199
     },
     {
       "surface": "gateway",
@@ -2983,7 +2983,7 @@
       "handler": "models::list_models",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 556
+      "line": 283
     },
     {
       "surface": "gateway",
@@ -2992,7 +2992,7 @@
       "handler": "models::list_models",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 556
+      "line": 283
     },
     {
       "surface": "gateway",
@@ -3001,7 +3001,7 @@
       "handler": "realtime::realtime",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 540
+      "line": 267
     },
     {
       "surface": "gateway",
@@ -3010,7 +3010,7 @@
       "handler": "realtime::realtime",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 540
+      "line": 267
     },
     {
       "surface": "gateway",
@@ -3019,7 +3019,7 @@
       "handler": "embeddings::rerank",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 539
+      "line": 266
     },
     {
       "surface": "gateway",
@@ -3028,7 +3028,7 @@
       "handler": "chat::websocket::upgrade",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 477
+      "line": 204
     },
     {
       "surface": "gateway",
@@ -3037,7 +3037,7 @@
       "handler": "chat::websocket::upgrade",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 477
+      "line": 204
     },
     {
       "surface": "gateway",
@@ -3046,7 +3046,7 @@
       "handler": "chat::responses",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 477
+      "line": 204
     },
     {
       "surface": "gateway",
@@ -3055,7 +3055,7 @@
       "handler": "chat::responses_compact",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 481
+      "line": 208
     },
     {
       "surface": "gateway",
@@ -3064,7 +3064,7 @@
       "handler": "token_count::responses_input_tokens",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 482
+      "line": 209
     },
     {
       "surface": "gateway",
@@ -3073,7 +3073,7 @@
       "handler": "videos::create",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 541
+      "line": 268
     },
     {
       "surface": "gateway",
@@ -3082,7 +3082,7 @@
       "handler": "videos::get_task",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 542
+      "line": 269
     },
     {
       "surface": "gateway",
@@ -3091,7 +3091,7 @@
       "handler": "videos::get_task",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 542
+      "line": 269
     },
     {
       "surface": "gateway",
@@ -3100,7 +3100,7 @@
       "handler": "videos::get_content",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 543
+      "line": 270
     },
     {
       "surface": "gateway",
@@ -3109,7 +3109,7 @@
       "handler": "videos::get_content",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 543
+      "line": 270
     },
     {
       "surface": "gateway",
@@ -3118,7 +3118,7 @@
       "handler": "models::list_models_gemini",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 488
+      "line": 215
     },
     {
       "surface": "gateway",
@@ -3127,7 +3127,7 @@
       "handler": "models::list_models_gemini",
       "registration": "implicit_head",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 488
+      "line": 215
     },
     {
       "surface": "gateway",
@@ -3136,7 +3136,7 @@
       "handler": "chat::gemini_generate",
       "registration": "explicit",
       "source": "crates/okapi-gateway/src/lib.rs",
-      "line": 487
+      "line": 214
     }
   ]
 }

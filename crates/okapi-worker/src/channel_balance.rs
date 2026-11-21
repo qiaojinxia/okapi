@@ -13,8 +13,8 @@
 
 use crate::notify::Notifier;
 use futures::{StreamExt, stream};
-use okapi_gateway::channel_balance::{self, Balance, Probe};
-use okapi_gateway::state::AppState;
+use okapi_engine::channel_balance::{self, Balance, Probe};
+use okapi_engine::state::AppState;
 use okapi_kernel::policies::{
     CHANNEL_BALANCE_SETTING, ChannelBalancePolicy, LowBalance, LowBalanceAction,
 };

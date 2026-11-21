@@ -9,7 +9,7 @@ use okapi_store::channels::KeyFailure;
 
 /// 这次失败该不该换渠道重试：内置的重试矩阵（[`UpstreamError::retriable_before_first_token`]），加上请求策略里点名的状态码，
 /// 以及策略判成账号级故障（凭证失效 / 配额耗尽）的——问题在这把 key，不在请求，换一个就能成功。
-pub(crate) fn retriable(err: &UpstreamError) -> bool {
+pub fn retriable(err: &UpstreamError) -> bool {
     if err.retriable_before_first_token() {
         return true;
     }
@@ -26,7 +26,7 @@ pub(crate) fn retriable(err: &UpstreamError) -> bool {
 ///
 /// 请求策略（`settings.request_policy`）的状态码 / 关键词规则先于内置的表：站长点名「这个码 / 这句话就是凭证失效 / 配额耗尽」时，
 /// 以他说的为准。没有策略作用域（测试、worker）时取缺省策略，也就是只有内置的表。
-pub(crate) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
+pub fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
     if let UpstreamError::Status { status, body, .. } = err {
         match super::request_policy::current().classify(*status, body) {
             PolicyVerdict::Invalid => return KeyFailure::Invalid,
@@ -158,7 +158,7 @@ fn body_says_insufficient_quota(body: &Bytes) -> bool {
 ///
 /// 站点的网页前端、网关的错误页对任何未知路径回 `200 text/html` 是常态：渠道地址缺了版本段（`/v1`）、
 /// 指到了网页端口时就是这样。把它当成功转给客户端再按估算计费是错的。UTF-8 BOM 与前导空白不算错。
-pub(crate) fn non_json_kind(body: &[u8]) -> Option<&'static str> {
+pub fn non_json_kind(body: &[u8]) -> Option<&'static str> {
     let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
     match body.iter().find(|b| !b.is_ascii_whitespace()) {
         None => Some("empty"),
@@ -170,7 +170,7 @@ pub(crate) fn non_json_kind(body: &[u8]) -> Option<&'static str> {
 }
 
 /// [`non_json_kind`] 在诊断里的样子：种类 + 长度。
-pub(crate) fn non_json_failure(kind: &str, len: usize) -> UpstreamError {
+pub fn non_json_failure(kind: &str, len: usize) -> UpstreamError {
     UpstreamError::Stream(format!("upstream_not_json ({kind}, {len} bytes)"))
 }
 

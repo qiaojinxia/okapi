@@ -353,7 +353,7 @@ pub async fn manual_queues_and_notify(
             .await;
     }
     let quarantined: i64 = redis
-        .hlen(okapi_gateway::settlement_retry::QUARANTINE)
+        .hlen(okapi_engine::settlement_retry::QUARANTINE)
         .await?;
     if quarantined > 0 {
         notifier

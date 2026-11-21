@@ -4,11 +4,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::permissions;
-use okapi_gateway::channel_probe::{
+use okapi_engine::channel_probe::{
     azure_deployments_url, credential_header, probe_body_problem, probe_request,
     with_protocol_headers,
 };
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;

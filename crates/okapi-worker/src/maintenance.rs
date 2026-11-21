@@ -290,7 +290,7 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
 
 // Provider latency and a PG outage must not block the other maintenance clocks.
 pub(super) async fn run_recovery(
-    state: okapi_gateway::state::AppState,
+    state: okapi_engine::state::AppState,
     mut stop: tokio::sync::watch::Receiver<bool>,
     video: bool,
 ) {
@@ -305,8 +305,8 @@ pub(super) async fn run_recovery(
             _=stop.changed()=>return,
             _=tick.tick()=>{
                 let work=async {
-                    if video {okapi_gateway::videos::poll_pending(&state).await}
-                    else {okapi_gateway::settlement_retry::recover(&state).await.map(|_|())}
+                    if video {okapi_engine::videos::poll_pending(&state).await}
+                    else {okapi_engine::settlement_retry::recover(&state).await.map(|_|())}
                 };
                 tokio::select! {
                     _=stop.changed()=>return,

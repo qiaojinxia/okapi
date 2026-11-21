@@ -5,7 +5,7 @@
 
 use axum::http::StatusCode;
 use bytes::Bytes;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_providers::UpstreamError;
 use okapi_providers::anthropic::MessagesResponse;
@@ -42,7 +42,7 @@ pub(super) async fn probe(
         .get("aws_region")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
-    let oauth_key = okapi_gateway::oauth_cred::OAuthKey {
+    let oauth_key = okapi_engine::oauth_cred::OAuthKey {
         channel_key_id,
         provider,
         token_url: settings
@@ -54,12 +54,12 @@ pub(super) async fn probe(
     let started = std::time::Instant::now();
     let outcome: Result<u16, UpstreamError> = match (provider, upstream_model) {
         ("anthropic_max" | "codex", None) => {
-            okapi_gateway::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
+            okapi_engine::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
                 .await
                 .map(|_| 200)
         }
         ("anthropic_max", Some(m)) => {
-            match okapi_gateway::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
+            match okapi_engine::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
                 .await
             {
                 Ok(cred) => {
@@ -86,7 +86,7 @@ pub(super) async fn probe(
             }
         }
         ("codex", Some(m)) => {
-            match okapi_gateway::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
+            match okapi_engine::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
                 .await
             {
                 Ok(cred) => {
@@ -228,7 +228,7 @@ pub(super) async fn fetch_models(
         }
         "codex" => {
             // 模型目录要订阅 token，过期先刷新（OAuthKey 依赖 channel_key_id）
-            let oauth_key = okapi_gateway::oauth_cred::OAuthKey {
+            let oauth_key = okapi_engine::oauth_cred::OAuthKey {
                 channel_key_id,
                 provider,
                 token_url: settings
@@ -238,7 +238,7 @@ pub(super) async fn fetch_models(
                 proxy_url: outbound.proxy_url.as_deref(),
             };
             let cred =
-                okapi_gateway::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
+                okapi_engine::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
                     .await
                     .map_err(upstream_error)?;
             okapi_providers::oauth::codex::list_models(

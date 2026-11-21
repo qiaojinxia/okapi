@@ -8,7 +8,7 @@ description = "Okapi 异步面：结算补写、统计落库、对账告警、�
 
 [dependencies]
 okapi-kernel = { workspace = true }
-okapi-gateway = { workspace = true }
+okapi-engine = { workspace = true }
 okapi-domain = { workspace = true }
 okapi-ledger = { workspace = true }
 okapi-providers = { workspace = true }
@@ -30,6 +30,7 @@ chrono.workspace = true
 reqwest = { workspace = true }
 
 [dev-dependencies]
+okapi-gateway = { workspace = true }
 okapi-store = { workspace = true, features = ["test-support"] }
 base64 = { workspace = true }
 okapi-pricing = { workspace = true }

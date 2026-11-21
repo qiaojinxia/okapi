@@ -11,8 +11,8 @@
 //! 多副本：每把 key 的探测由 Redis 占位（SET NX EX，TTL = 探测间隔）选出一个副本，占位同时是「最近探过」的标记。
 
 use futures::{StreamExt, stream};
-use okapi_gateway::channel_probe::{PROBEABLE_PROVIDERS, ProbeTarget, failure_kind, probe_model};
-use okapi_gateway::state::AppState;
+use okapi_engine::channel_probe::{PROBEABLE_PROVIDERS, ProbeTarget, failure_kind, probe_model};
+use okapi_engine::state::AppState;
 use okapi_kernel::policies::{CHANNEL_PROBE_SETTING, ChannelProbeMode, ChannelProbePolicy};
 use okapi_store::channels::{self, KeyFailure, ProbeKey};
 use serde_json::{Value, json};

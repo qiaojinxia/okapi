@@ -10,7 +10,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use okapi_gateway as gateway;
+use okapi_engine as gateway;
 use okapi_kernel::policies::{ChannelBalancePolicy, LowBalanceAction};
 use okapi_store::provision::{ChannelCreate, create_channel_configured};
 use okapi_worker::channel_balance::{RoundReport, refresh_round};

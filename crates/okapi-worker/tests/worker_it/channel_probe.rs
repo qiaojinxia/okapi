@@ -9,7 +9,7 @@ use axum::extract::{Json as ExtractJson, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use okapi_gateway as gateway;
+use okapi_engine as gateway;
 use okapi_kernel::policies::{ChannelProbeMode, ChannelProbePolicy};
 use okapi_worker::channel_probe::{RoundReport, probe_round};
 use serde_json::{Value, json};

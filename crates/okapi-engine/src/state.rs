@@ -44,6 +44,7 @@ pub struct AppState {
     pub health: HealthMarks,
     pub flow: FlowControl,
     pub media: Media,
+    pub data_plane: Option<Arc<dyn crate::bridge::DataPlaneBridge>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -476,7 +477,28 @@ impl AppState {
             health: self.health.clone(),
             flow: super::flow_control_for_pool(pg_pool_max),
             media: self.media.clone(),
+            data_plane: self.data_plane.clone(),
         }
+    }
+
+    /// Attach the in-process data-plane bridge used by control-plane relay endpoints.
+    #[must_use]
+    pub fn with_data_plane(mut self, bridge: Arc<dyn crate::bridge::DataPlaneBridge>) -> Self {
+        self.data_plane = Some(bridge);
+        self
+    }
+
+    /// Borrow the in-process data-plane bridge, failing closed with 503 if unattached.
+    pub fn data_plane(
+        &self,
+    ) -> Result<&dyn crate::bridge::DataPlaneBridge, okapi_kernel::error::AppError> {
+        self.data_plane.as_deref().ok_or_else(|| {
+            okapi_kernel::error::AppError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                okapi_api::codes::OVERLOADED,
+            )
+            .with_param("data_plane_unavailable")
+        })
     }
 
     /// 只失效本进程（广播的接收端用；避免收到自己的广播再转发出去打环）。
@@ -566,6 +588,7 @@ mod tests {
                     crate::images::tasks::objects::Storage::from_env().expect("storage"),
                 ),
             },
+            data_plane: None,
         };
 
         let bg = gw.with_isolated_pg(bg_pg, 4);

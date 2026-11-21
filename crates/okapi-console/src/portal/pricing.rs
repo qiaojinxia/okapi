@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, Method, header},
     response::{IntoResponse, Response},
 };
-use okapi_gateway::ingress::Ingress;
+use okapi_engine::ingress::Ingress;
 use serde::Serialize;
 use serde_json::{
     Value,

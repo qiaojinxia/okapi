@@ -1,7 +1,7 @@
 //! 写工具（需开启 mcp_write）：渠道创建 / 启停 / 测活、用户调余额 / 封禁、定价试算与发布、死信重投、兑换码、缓存清理。
 use super::mcp_audit;
 use okapi_api::permissions;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_store::auth::{AuthedKey, PermScope};
 use serde_json::{Value, json};

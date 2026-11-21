@@ -80,7 +80,7 @@ impl Ingress {
 
 /// 流内错误事件：错误发生在已经开始写 SSE 之后，按客户端所用的入口协议给出对应形状的 `error` 事件
 /// （Responses 带 sequence_number，Anthropic / Gemini / OpenAI 各用自己的错误壳）。
-pub(crate) fn stream_error_event(
+pub fn stream_error_event(
     ingress: Ingress,
     error: &AppError,
     request_id: Uuid,

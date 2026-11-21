@@ -14,7 +14,7 @@ use okapi_store::{AuthedKey, ChannelCandidate};
 use std::sync::Arc;
 
 /// 模型解析（60s 进程缓存；miss 回源 PG）。
-pub(crate) async fn resolve_model_cached(
+pub async fn resolve_model_cached(
     state: &AppState,
     requested: &str,
 ) -> Result<Arc<Option<okapi_store::channels::ResolvedModel>>, AppError> {
@@ -32,7 +32,7 @@ pub(crate) async fn resolve_model_cached(
 
 /// 模型在池链上的候选渠道。5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL
 /// 收敛）；缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户。
-pub(crate) async fn cached_candidates(
+pub async fn cached_candidates(
     state: &AppState,
     model: &str,
     pool_chain: &[&str],
@@ -62,7 +62,7 @@ pub(crate) async fn cached_candidates(
 /// 按池的选路策略排出 failover 序（只在同一优先级层内排）：时延 / 用量 / 在途数从 Redis 读，
 /// 其余加权随机；`least_concurrency` 池发出的候选要登记在途。soonest_reset 的先后要读额度观测，
 /// 由准入筛选排（`QuotaOrder::SoonestReset`），这里的加权随机只管同一时刻的并列。
-pub(crate) async fn queue(
+pub async fn queue(
     state: &AppState,
     raw: Arc<Vec<ChannelCandidate>>,
     strategy: Strategy,
@@ -88,7 +88,7 @@ pub(crate) async fn queue(
 /// 媒体端点的候选：模型在池链上的候选按池的选路策略排好 failover 序（同对话，见 [`queue`]），
 /// 只留能接 `surface` 的，再过额度与毛利护栏。一个都不剩时回 503（`no_candidates_code` 区分是不是
 /// 护栏筛掉的）。取出时每个候选重抽一次出口轮换组，`least_concurrency` 池的候选带上在途登记。
-pub(crate) async fn media(
+pub async fn media(
     state: &AppState,
     key: &AuthedKey,
     model: &str,
@@ -117,7 +117,7 @@ pub(crate) async fn media(
 }
 
 /// 渠道能不能接这一面：provider 在注册表里声明了它，渠道的 `capabilities` 也没把它关掉。
-pub(crate) fn serves(c: &ChannelCandidate, surface: MediaSurface) -> bool {
+pub fn serves(c: &ChannelCandidate, surface: MediaSurface) -> bool {
     registry::lookup(&c.provider).is_some_and(|adapter| adapter.serves(surface))
         && !switches(surface)
             .iter()

@@ -868,6 +868,7 @@ mod tests {
                     crate::images::tasks::objects::Storage::from_env().expect("storage"),
                 ),
             },
+            data_plane: None,
         }
     }
 

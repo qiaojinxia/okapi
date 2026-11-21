@@ -8,7 +8,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
@@ -220,7 +220,7 @@ pub(super) async fn oauth_key_extras(
         .filter(|k| k.credential_kind == okapi_store::admin::CREDENTIAL_KIND_OAUTH)
     {
         let mut fields = serde_json::Map::new();
-        if let Some(health) = okapi_gateway::credentials::health::read(state, k.id).await {
+        if let Some(health) = okapi_engine::credentials::health::read(state, k.id).await {
             fields.insert(
                 "oauth_refresh".into(),
                 serde_json::to_value(health).unwrap_or_default(),
@@ -240,7 +240,7 @@ pub(super) async fn oauth_key_extras(
             }
             if let Some(provider) = providers.get(&k.channel_id)
                 && let Some(plan) =
-                    okapi_gateway::account_control::quota::plan(state, k.id, provider, &plain).await
+                    okapi_engine::account_control::quota::plan(state, k.id, provider, &plain).await
             {
                 fields.insert("account_plan".into(), json!(plan));
             }
@@ -407,8 +407,8 @@ pub async fn channel_providers(
 
 #[derive(Deserialize)]
 pub struct ChannelUsageQuery {
-    token_period: Option<okapi_gateway::account_control::policy::LocalPeriod>,
-    cost_period: Option<okapi_gateway::account_control::policy::LocalPeriod>,
+    token_period: Option<okapi_engine::account_control::policy::LocalPeriod>,
+    cost_period: Option<okapi_engine::account_control::policy::LocalPeriod>,
 }
 
 /// GET /admin/channels/{id}/usage：这条渠道的账号控制策略、订阅额度观测，以及本地已记录的用量。
@@ -420,7 +420,7 @@ pub async fn channel_usage(
     Path(channel): Path<i64>,
     Query(query): Query<ChannelUsageQuery>,
 ) -> Result<Json<Value>, AppError> {
-    use okapi_gateway::account_control::policy::LocalPeriod;
+    use okapi_engine::account_control::policy::LocalPeriod;
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
     ensure_channel_owner(&state, channel, &actor, scope).await?;
     let settings: Value =
@@ -430,7 +430,7 @@ pub async fn channel_usage(
             .await
             .map_err(okapi_store::StoreError::from)?
             .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
-    let policy = okapi_gateway::account_control::policy::Policy::parse(&settings)
+    let policy = okapi_engine::account_control::policy::Policy::parse(&settings)
         .map_err(|param| AppError::bad_request().with_param(param))?;
     let token_period = query
         .token_period
@@ -455,7 +455,7 @@ pub async fn channel_usage(
             .map_err(okapi_store::StoreError::from)?;
     let mut quotas = Vec::new();
     for key in keys {
-        quotas.push(json!({"key_id":key,"quota":okapi_gateway::account_control::quota::read(&state,key).await}));
+        quotas.push(json!({"key_id":key,"quota":okapi_engine::account_control::quota::read(&state,key).await}));
     }
     Ok(Json(json!({
         "policy": policy,

@@ -144,7 +144,7 @@ def extract(source, surface, filename):
 
 
 # 各角色 crate（IMPLEMENTATION §11.60）；路由只许出现在 gateway / console 两个 crate 里。
-ROLE_CRATES = ('kernel', 'gateway', 'console', 'worker')
+ROLE_CRATES = ('kernel', 'engine', 'gateway', 'console', 'worker')
 ROUTER_SURFACES = ('gateway', 'console')
 
 

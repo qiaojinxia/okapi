@@ -2,7 +2,7 @@
 use okapi_domain::Money;
 use serde_json::{Value, json};
 
-pub(super) fn snapshot(
+pub fn snapshot(
     mut snapshot: Option<Value>,
     channel: i64,
     cost_milli: i64,
@@ -14,11 +14,11 @@ pub(super) fn snapshot(
     snapshot
 }
 
-pub(super) fn pin(value: &mut Value, channel: i64, cost_milli: i64, list_price: Money) {
+pub fn pin(value: &mut Value, channel: i64, cost_milli: i64, list_price: Money) {
     pin_source(value, channel, cost_milli, list_price, "selected_channel");
 }
 
-pub(super) fn pin_legacy(value: &mut Value, channel: i64, cost_milli: i64, list_price: Money) {
+pub fn pin_legacy(value: &mut Value, channel: i64, cost_milli: i64, list_price: Money) {
     pin_source(
         value,
         channel,
@@ -39,7 +39,7 @@ fn pin_source(value: &mut Value, channel: i64, cost_milli: i64, price: Money, so
 }
 
 /// Existing but invalid provenance never authorizes a lookup of newer configuration.
-pub(super) fn estimate(snapshot: &Value, channel: i64, price: Money) -> Option<Money> {
+pub fn estimate(snapshot: &Value, channel: i64, price: Money) -> Option<Money> {
     let basis = snapshot.get("upstream_cost_basis")?;
     if basis.get("version").and_then(Value::as_u64) != Some(1)
         || !matches!(
@@ -55,7 +55,7 @@ pub(super) fn estimate(snapshot: &Value, channel: i64, price: Money) -> Option<M
     estimated_cost(price, basis.get("relative_cost_milli")?.as_i64()?)
 }
 
-pub(super) fn estimated_cost(list_price: Money, cost_milli: i64) -> Option<Money> {
+pub fn estimated_cost(list_price: Money, cost_milli: i64) -> Option<Money> {
     if list_price.is_negative() || cost_milli < 0 {
         return None;
     }

@@ -1,4 +1,4 @@
-//! 上游余额查询的控制台入口（IMPLEMENTATION §11.33）；探针、解析与请求在 `okapi_gateway::channel_balance`，
+//! 上游余额查询的控制台入口（IMPLEMENTATION §11.33）；探针、解析与请求在 `okapi_engine::channel_balance`，
 //! 定时刷新的 worker 任务（§11.73）共用同一套。
 
 use super::admin::{ensure_channel_owner, guard_scoped};
@@ -6,8 +6,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::permissions;
-use okapi_gateway::channel_balance::{BalanceError, Probe};
-use okapi_gateway::state::AppState;
+use okapi_engine::channel_balance::{BalanceError, Probe};
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Path;
 use serde_json::Value;
@@ -53,11 +53,10 @@ pub async fn fetch_channel_balance(
         super::egress::key_proxy(&state, row.key_id).await?,
     );
 
-    let balance =
-        okapi_gateway::channel_balance::fetch(&state, probe, base, &credential, &outbound)
-            .await
-            .map_err(balance_error)?;
-    let result = okapi_gateway::channel_balance::record(channel_id, probe, &balance);
+    let balance = okapi_engine::channel_balance::fetch(&state, probe, base, &credential, &outbound)
+        .await
+        .map_err(balance_error)?;
+    let result = okapi_engine::channel_balance::record(channel_id, probe, &balance);
     state
         .sched
         .channel_balance_record(channel_id, &result)

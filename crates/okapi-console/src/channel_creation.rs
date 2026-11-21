@@ -1,6 +1,6 @@
 //! Validated creation settings shared by API keys and account authorization plugins.
 use super::admin::{self, PoolMemberReq};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use serde::Deserialize;
 use serde_json::{Value, json};

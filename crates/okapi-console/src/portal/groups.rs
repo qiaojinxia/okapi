@@ -3,7 +3,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::auth::authenticate;
 use okapi_kernel::error::AppError;
 use serde_json::{Value, json};
@@ -27,7 +27,7 @@ pub(crate) async fn selectable_groups(
 ) -> Result<Vec<SelectableGroup>, AppError> {
     let rows = okapi_store::admin::selectable_groups(&state.pg, user_id).await?;
     // 本进程价簿可能落后（console 只订阅广播）：先追一次最新 epoch，免得把刚发布的组漏掉
-    if let Err(err) = okapi_gateway::refresh_pricebook_if_newer(state).await {
+    if let Err(err) = okapi_engine::refresh_pricebook_if_newer(state).await {
         tracing::warn!(error = %err, "列可选分组前刷新价簿失败，按当前价簿过滤");
     }
     let book = state.pricebook.load();

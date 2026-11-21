@@ -10,7 +10,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
@@ -388,7 +388,7 @@ pub async fn exchange(
         .await?
     };
     state.invalidate_routing_caches();
-    okapi_gateway::credentials::health::record(&state, channel_key_id, None).await;
+    okapi_engine::credentials::health::record(&state, channel_key_id, None).await;
     audit(
         &state,
         &actor,
@@ -429,9 +429,9 @@ pub async fn refresh(
         okapi_kernel::ssrf::validate_api_base(&state.pg, url).await?;
     }
     let proxy = super::egress::key_proxy(&state, key).await?;
-    let credential = okapi_gateway::credentials::oauth::force_refresh_for(
+    let credential = okapi_engine::credentials::oauth::force_refresh_for(
         &state,
-        &okapi_gateway::credentials::oauth::OAuthKey {
+        &okapi_engine::credentials::oauth::OAuthKey {
             channel_key_id: key,
             provider: &row.provider,
             token_url,

@@ -2,7 +2,7 @@
 
 use chrono::{Datelike, Duration as ChronoDuration, Utc};
 use okapi_domain::Money;
-use okapi_gateway as gateway;
+use okapi_engine as gateway;
 use okapi_ledger::{BalanceLedger, LimitCaps, ReserveOutcome};
 use okapi_worker as worker;
 use sqlx::PgPool;

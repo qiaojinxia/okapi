@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
-use okapi_gateway::state::AppState;
+use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
@@ -104,7 +104,7 @@ pub async fn upsert_group(
 /// 追到最新已发布的价簿再读：本进程价簿可能落后（console 只订阅广播、未配 NATS 时从不刷新），
 /// 落后只会造成误拒，不会放进坏状态。
 pub(super) async fn fresh_pricebook(state: &AppState) -> Arc<okapi_pricing::PriceBook> {
-    if let Err(err) = okapi_gateway::refresh_pricebook_if_newer(state).await {
+    if let Err(err) = okapi_engine::refresh_pricebook_if_newer(state).await {
         tracing::warn!(error = %err, "刷新价簿失败，按当前价簿校验");
     }
     state.pricebook.load()

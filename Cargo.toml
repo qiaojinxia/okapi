@@ -8,6 +8,7 @@ members = [
     "crates/okapi-store",
     "crates/okapi-api",
     "crates/okapi-kernel",
+    "crates/okapi-engine",
     "crates/okapi-gateway",
     "crates/okapi-console",
     "crates/okapi-worker",
@@ -28,6 +29,7 @@ okapi-providers = { path = "crates/okapi-providers" }
 okapi-store = { path = "crates/okapi-store" }
 okapi-api = { path = "crates/okapi-api" }
 okapi-kernel = { path = "crates/okapi-kernel" }
+okapi-engine = { path = "crates/okapi-engine" }
 okapi-gateway = { path = "crates/okapi-gateway" }
 okapi-console = { path = "crates/okapi-console" }
 okapi-worker = { path = "crates/okapi-worker" }
