@@ -74,42 +74,14 @@ pub(super) async fn attempt_stream(
         });
     };
 
-    // 首字前只缓冲：窗口内失败/空回复对客户端无痕（§3.7-1/2）
-    // 窗口分两段：一个事件都没有按渠道的首字窗口判挂死；上游已经开始回事件（message_start、
-    // ping）说明在处理，长上下文的预填充与思考常超过 30 秒，改按空闲计、每来一个事件重新计时。
     let mut buffered: Vec<ChatEvent> = Vec::new();
     let mut note: Option<String> = None;
-    let first: Result<Result<bool, UpstreamError>, tokio::time::error::Elapsed> = async {
-        let mut window = first_output_window;
-        loop {
-            match tokio::time::timeout(window, handle.events.next()).await? {
-                Some(Ok(event @ ChatEvent::Data { .. })) => {
-                    window = first_output_window.max(STARTED_IDLE_WINDOW);
-                    let has_output = matches!(
-                        event,
-                        ChatEvent::Data {
-                            has_output: true,
-                            ..
-                        }
-                    );
-                    if let Some(error) = stream_failure_in(&event, &mut note) {
-                        return Ok(Err(error));
-                    }
-                    if first_output_buffer_full(&buffered) {
-                        return Ok(Err(UpstreamError::Stream(
-                            "first_output_buffer_limit".into(),
-                        )));
-                    }
-                    buffered.push(event);
-                    if has_output {
-                        return Ok(Ok(true));
-                    }
-                }
-                Some(Ok(ChatEvent::Done)) | None => return Ok(Ok(false)),
-                Some(Err(err)) => return Ok(Err(err)),
-            }
-        }
-    }
+    let first = wait_first_output(
+        &mut handle.events,
+        first_output_window,
+        &mut buffered,
+        &mut note,
+    )
     .await;
 
     match first {
@@ -125,8 +97,10 @@ pub(super) async fn attempt_stream(
             })
         }
         Ok(Err(err)) => Err(classify_fatal(err, failover, channel)),
-        Ok(Ok(false)) => Err(empty_stream(bill, &buffered, note)),
-        Ok(Ok(true)) => {
+        Ok(Ok(FirstOutput::Empty { completed })) => {
+            Err(empty_stream(bill, &buffered, note, completed))
+        }
+        Ok(Ok(FirstOutput::Output)) => {
             let mut writer = response_writer(bill, cand);
             for event in &buffered {
                 capture_response_event(&mut writer, bill, event)
@@ -222,29 +196,121 @@ pub(super) fn stream_failure_in(
     }
 }
 
-/// 空流的收尾：诊断里写上游在流里留下的说明（有的话），其余照旧按空回复处理。
+/// 首字前只缓冲：窗口内失败/空回复对客户端无痕（§3.7-1/2）
+/// 窗口分两段：一个事件都没有按渠道的首字窗口判挂死；上游已经开始回事件（message_start、
+/// ping）说明在处理，长上下文的预填充与思考常超过 30 秒，改按空闲计、每来一个事件重新计时。
+async fn wait_first_output<S>(
+    events: &mut S,
+    first_output_window: std::time::Duration,
+    buffered: &mut Vec<ChatEvent>,
+    note: &mut Option<String>,
+) -> Result<Result<FirstOutput, UpstreamError>, tokio::time::error::Elapsed>
+where
+    S: futures::Stream<Item = Result<ChatEvent, UpstreamError>> + Unpin,
+{
+    let mut window = first_output_window;
+    loop {
+        match tokio::time::timeout(window, events.next()).await? {
+            Some(Ok(event @ ChatEvent::Data { .. })) => {
+                window = first_output_window.max(STARTED_IDLE_WINDOW);
+                let has_output = matches!(
+                    event,
+                    ChatEvent::Data {
+                        has_output: true,
+                        ..
+                    }
+                );
+                if let Some(error) = stream_failure_in(&event, note) {
+                    return Ok(Err(error));
+                }
+                if first_output_buffer_full(buffered) {
+                    return Ok(Err(UpstreamError::Stream(
+                        "first_output_buffer_limit".into(),
+                    )));
+                }
+                buffered.push(event);
+                if has_output {
+                    return Ok(Ok(FirstOutput::Output));
+                }
+            }
+            end @ (Some(Ok(ChatEvent::Done)) | None) => {
+                return Ok(Ok(FirstOutput::Empty {
+                    completed: end.is_some(),
+                }));
+            }
+            Some(Err(err)) => return Ok(Err(err)),
+        }
+    }
+}
+
+/// 首字等待的结局：有输出；或一个字没出就结束了——`completed` 区分上游正常收尾（发了终止事件：
+/// Anthropic `message_stop`、OpenAI `[DONE]`）与流直接断掉（截断），两者对 key 健康的含义不同（见 `empty_completion`）。
+enum FirstOutput {
+    Output,
+    Empty { completed: bool },
+}
+
+/// 空流的收尾：诊断里写上游在流里留下的说明（有的话），以及是否正常收尾、收尾原因——
+/// 不写的话「上游到底回了什么」事后无从查（2026-11-21 线上一次空回复连发就卡在这里）。
 pub(super) fn empty_stream(
     bill: &RequestBilling,
     buffered: &[ChatEvent],
     note: Option<String>,
+    completed: bool,
 ) -> AttemptError {
     bill.trace.failure(&UpstreamError::Stream(
         note.unwrap_or_else(|| codes::EMPTY_COMPLETION.into()),
     ));
-    empty_completion(bill.ingress, buffered)
+    bill.trace.set(
+        "empty_stream",
+        serde_json::json!({
+            "completed": completed,
+            "stop_reason": stop_reason(buffered),
+            "events": buffered.len(),
+        }),
+    );
+    empty_completion(bill.ingress, buffered, completed)
 }
 
-/// 空流照旧换渠道、不计费；只有说不出原因的空流才记成这把 key 的瞬态失败。
-pub(super) fn empty_completion(ingress: Ingress, buffered: &[ChatEvent]) -> AttemptError {
+/// 空流照旧换渠道、不计费；只有**被截断**、又说不出原因的空流才记成这把 key 的瞬态失败。
+///
+/// 上游正常收尾的空回复（HTTP 200、流以终止事件结束，只是没有正文——如 Anthropic 对某些对话回空的 `end_turn`）
+/// 是这一个请求的结果，同一个请求重发多少次都一样，说明不了凭证好坏。记成瞬态失败的话，客户端对它的
+/// 自动重试连着几次就把整把 key 打进冷却；渠道里只有这一把可用时，所有请求跟着 503（2026-11-21 线上）。
+pub(super) fn empty_completion(
+    ingress: Ingress,
+    buffered: &[ChatEvent],
+    completed: bool,
+) -> AttemptError {
     AttemptError::Retriable {
         code: codes::EMPTY_COMPLETION,
         upstream_status: None,
-        failure_kind: if request_caused_stop(ingress, buffered) {
+        failure_kind: if completed || request_caused_stop(ingress, buffered) {
             KeyFailure::Request
         } else {
             KeyFailure::Transient
         },
     }
+}
+
+/// 缓冲事件里上游给的收尾原因（各方言的位置不同）；没有返回 None。只用于诊断。
+fn stop_reason(events: &[ChatEvent]) -> Option<String> {
+    use serde_json::Value;
+    events.iter().rev().find_map(|event| {
+        let ChatEvent::Data { raw, .. } = event else {
+            return None;
+        };
+        let value = serde_json::from_str::<Value>(raw).ok()?;
+        [
+            "/delta/stop_reason",
+            "/choices/0/finish_reason",
+            "/response/incomplete_details/reason",
+            "/candidates/0/finishReason",
+        ]
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .map(str::to_owned)
+    })
 }
 
 /// 空流是不是请求自己收的尾：输出预算耗尽（推理模型把 max_tokens 全花在思考上）或
@@ -378,5 +444,48 @@ mod empty_stop_tests {
             assert!(!request_caused_stop(ingress, &[data(&raw)]), "{raw}");
         }
         assert!(!request_caused_stop(Ingress::OpenAi, &[ChatEvent::Done]));
+    }
+
+    /// 上游正常收尾的空回复（如 Anthropic 回空的 `end_turn`）只算这个请求的失败；被截断又说不出原因的才算 key 的瞬态失败。
+    #[test]
+    fn only_a_truncated_unexplained_empty_stream_is_transient() {
+        let kind = |completed: bool, events: &[ChatEvent]| match empty_completion(
+            Ingress::Anthropic,
+            events,
+            completed,
+        ) {
+            AttemptError::Retriable { failure_kind, .. } => failure_kind,
+            AttemptError::Fatal(_) => panic!("empty completion is retriable"),
+        };
+        let end_turn = data(
+            &serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        );
+        assert!(matches!(
+            kind(true, std::slice::from_ref(&end_turn)),
+            KeyFailure::Request
+        ));
+        assert!(
+            matches!(kind(true, &[]), KeyFailure::Request),
+            "正常收尾就够了，不看原因"
+        );
+        assert!(
+            matches!(kind(false, &[]), KeyFailure::Transient),
+            "截断又说不出原因"
+        );
+        let refusal = data(
+            &serde_json::json!({"type": "message_delta", "delta": {"stop_reason": "refusal"}}),
+        );
+        assert!(
+            matches!(kind(false, &[refusal]), KeyFailure::Request),
+            "截断但上游说了是请求的原因"
+        );
+        assert_eq!(stop_reason(&[end_turn]), Some("end_turn".to_owned()));
+        assert_eq!(
+            stop_reason(&[data(
+                &serde_json::json!({"choices": [{"finish_reason": "stop"}]})
+            )]),
+            Some("stop".to_owned())
+        );
+        assert_eq!(stop_reason(&[ChatEvent::Done]), None);
     }
 }

@@ -92,6 +92,11 @@ async fn mock_empty(_body: axum::body::Bytes) -> axum::response::Response {
     sse_response(sse_body(&[role_chunk()], true))
 }
 
+/// 流被截断：发了开头就断，没有 `[DONE]`。
+async fn mock_truncated(_body: axum::body::Bytes) -> axum::response::Response {
+    sse_response(sse_body(&[role_chunk()], false))
+}
+
 async fn mock_fail(_body: axum::body::Bytes) -> axum::response::Response {
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -105,6 +110,7 @@ async fn spawn_mock() -> SocketAddr {
         .route("/ok/v1/chat/completions", post(mock_ok))
         .route("/cache/v1/chat/completions", post(mock_cache))
         .route("/empty/v1/chat/completions", post(mock_empty))
+        .route("/truncated/v1/chat/completions", post(mock_truncated))
         .route("/fail/v1/chat/completions", post(mock_fail));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -317,6 +323,47 @@ async fn empty_completion_is_free_and_clean_error() {
     assert_eq!(rec.log_type, 5, "错误日志");
     let balance = env.ledger.balance(env.user_id).await.unwrap();
     assert_eq!(balance.as_micros(), 10_000_000, "余额分毫未动");
+}
+
+/// 空回复对 key 健康的两种含义：上游正常收尾（带 `[DONE]`）的空回复是这个请求自己的结果，
+/// 客户端重发多少次都一样，不能把 key 打进冷却——渠道里只有这一把时，那会让所有请求 503（2026-11-21 线上）；
+/// 流被截断（没有终止事件）的空回复才按瞬态失败连续计数、到阈值冷却。
+#[tokio::test]
+async fn only_a_truncated_empty_stream_counts_against_the_key() {
+    async fn key_state(env: &TestEnv) -> (i16, i32, bool) {
+        sqlx::query_as(
+            "SELECT k.status, k.failed_count, k.cooldown_until IS NOT NULL FROM channel_keys k \
+             JOIN channels c ON c.id = k.channel_id WHERE c.models @> $1",
+        )
+        .bind(json!([env.model]))
+        .fetch_one(&env.pg)
+        .await
+        .unwrap()
+    }
+    for (path, cooled) in [("/empty/v1", false), ("/truncated/v1", true)] {
+        let env = setup(
+            ("1", "1", "1"),
+            Money::from_micros(10_000_000),
+            &[(path, 0)],
+        )
+        .await;
+        for _ in 0..3 {
+            let resp = post_chat(&env, true).await;
+            assert_eq!(resp.status(), 502, "{path}");
+            let body: Value = resp.json().await.unwrap();
+            assert_eq!(body["error"]["code"], "empty_completion", "{path}");
+        }
+        let (status, failed, cooling) = key_state(&env).await;
+        if cooled {
+            assert_eq!((status, cooling), (2, true), "{path}: 截断三次 → 冷却");
+        } else {
+            assert_eq!(
+                (status, failed, cooling),
+                (1, 0, false),
+                "{path}: 正常收尾的空回复不动 key"
+            );
+        }
+    }
 }
 
 /// 首字前失败 failover：客户端无感拿到完整流，failover_count=1。

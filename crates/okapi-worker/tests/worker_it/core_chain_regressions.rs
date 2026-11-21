@@ -261,10 +261,12 @@ async fn token_rejected(State(mock): State<Mock>) -> Response {
 }
 
 /// 坏中转：没有任何原因的空流。
+/// 坏掉的上游：发了开头就断流（没有 `[DONE]`），也说不出原因。正常收尾、只是没内容的空回复不算 key 故障
+/// （gateway_m1 的 `only_a_truncated_empty_stream_counts_against_the_key`）。
 async fn broken_empty(_body: Bytes) -> Response {
     sse(Body::from(frames(
         &[chunk(&json!({"role":"assistant"}), None)],
-        true,
+        false,
     )))
 }
 
@@ -1212,7 +1214,7 @@ async fn concurrent_failures_trigger_one_base_pause() {
     assert!(pause <= 60, "one base pause, not an escalated one: {pause}");
 }
 
-/// 预算耗尽的空流照旧不计费、换渠道，但不记成 key 故障；无原因的空流仍然计数。
+/// 预算耗尽的空流照旧不计费、换渠道，但不记成 key 故障；被截断又说不出原因的空流仍然计数。
 #[tokio::test]
 async fn request_caused_empty_stream_does_not_penalize_the_key() {
     let env = setup("length", None).await;
@@ -1230,6 +1232,6 @@ async fn request_caused_empty_stream_does_not_penalize_the_key() {
     assert_eq!(
         key_state(&broken.pg, broken.channel_key).await,
         (1, 1),
-        "an unexplained empty stream still counts"
+        "a truncated, unexplained empty stream still counts"
     );
 }
