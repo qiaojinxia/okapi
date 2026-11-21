@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# 钉版本：CI、服务器镜像构建（rust:1 基础镜像按本文件装工具链）、本机用同一个编译器。
+# 跟 stable 走时，每次新版加严 clippy 都会让 CI 突然变红（2026-11 的 1.100）；升级时单独一笔，先在本机跑全量
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]

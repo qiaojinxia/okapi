@@ -1,5 +1,10 @@
 [advisories]
 version = 2
+# chrono 被标为不再维护（2026-11），没有可升级的版本：全仓的时间类型（sqlx 映射、lettre、账单与日志时间戳）
+# 都建在它上面，换库是单独的一件事。只放行这一条公告；漏洞类公告照常拦
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained but has no maintained drop-in yet; replacing it is tracked separately" },
+]
 
 [licenses]
 version = 2

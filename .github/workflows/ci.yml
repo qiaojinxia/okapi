@@ -101,6 +101,8 @@ jobs:
           fi
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
+          # 与 rust-toolchain.toml 一致：版本钉死，升级时单独改
+          toolchain: 1.99.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: 格式检查
