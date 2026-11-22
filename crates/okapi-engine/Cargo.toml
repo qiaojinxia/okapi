@@ -25,9 +25,11 @@ chrono = { workspace = true }
 fred = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
+lmfpd = { workspace = true }
 memchr = "2.8"
 moka = { workspace = true }
 rand = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -18,6 +18,7 @@ mod channel_creation;
 mod channel_credentials;
 pub mod channel_oauth;
 pub mod channel_try;
+pub mod channel_verify;
 mod cloud_probe;
 mod console_auth;
 mod core_source;
@@ -299,6 +300,18 @@ fn channel_routes() -> ConsoleRouter {
         .route("/admin/channels/{id}/test", post(admin::test_channel))
         .route("/admin/channels/{id}/try", post(channel_try::try_channel))
         .route(
+            "/admin/channels/{id}/verify",
+            post(channel_verify::verify_channel),
+        )
+        .route(
+            "/admin/channels/verify/bank",
+            get(channel_verify::verify_bank_status),
+        )
+        .route(
+            "/admin/channels/verify/bank/refresh",
+            post(channel_verify::refresh_verify_bank),
+        )
+        .route(
             "/admin/channels/{id}/fetch-models",
             get(admin::fetch_channel_models),
         )
@@ -317,7 +330,12 @@ fn channel_routes() -> ConsoleRouter {
             post(channel_oauth::exchange),
         )
         .route("/admin/diagnose/route", get(manage::diagnose_route))
-        // 出口代理（§11.41）：代理 / 代理组 / 全局默认出口 / 渠道出口绑定
+        .merge(egress_routes())
+}
+
+/// 出口代理（§11.41）：代理 / 代理组 / 全局默认出口 / 渠道出口绑定。
+fn egress_routes() -> ConsoleRouter {
+    Router::new()
         .route(
             "/admin/proxies",
             get(egress::list_proxies).post(egress::create_proxy),

@@ -26,7 +26,13 @@ interface MenuProps {
 /// 认不出谁是谁，折进菜单给文字。方向键定位，Enter / Space 选择，Esc 返回触发器。
 export function Menu({ trigger, align = 'end', strategy = 'absolute', className, children }: MenuProps) {
   const [open, setOpen] = useState(false)
-  const [place, setPlace] = useState<{ top?: number; bottom?: number; left?: number; right?: number }>({})
+  const [place, setPlace] = useState<{
+    top?: number
+    bottom?: number
+    left?: number
+    right?: number
+    maxHeight?: number
+  }>({})
   const root = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const startAtEnd = useRef(false)
@@ -52,17 +58,22 @@ export function Menu({ trigger, align = 'end', strategy = 'absolute', className,
   }, [open])
 
   // fixed 浮层：打开时按触发器位置定位（绘制前完成，不闪）；
-  // 下方放不下而上方放得下，就翻到触发器上方。
+  // 下方放不下时优先翻到更宽敞的上方，若两侧均略紧则限制最大高度并内部滚动，绝不裁出视口。
   useLayoutEffect(() => {
     if (!open || strategy !== 'fixed') return
     const anchor = root.current?.getBoundingClientRect()
     if (!anchor) return
     const height = panel.current?.getBoundingClientRect().height ?? 0
     const gap = 6
-    const flip = window.innerHeight - anchor.bottom < height + gap + 8 && anchor.top > height + gap + 8
+    const margin = 8
+    const spaceBelow = window.innerHeight - anchor.bottom - gap - margin
+    const spaceAbove = anchor.top - gap - margin
+    const flip = spaceBelow < height && spaceAbove > spaceBelow
+    const available = flip ? spaceAbove : spaceBelow
     setPlace({
       ...(flip ? { bottom: window.innerHeight - anchor.top + gap } : { top: anchor.bottom + gap }),
       ...(align === 'end' ? { right: window.innerWidth - anchor.right } : { left: anchor.left }),
+      ...(available < height ? { maxHeight: Math.max(available, 80) } : {}),
     })
   }, [open, strategy, align])
 
@@ -147,7 +158,7 @@ export function Menu({ trigger, align = 'end', strategy = 'absolute', className,
             }}
             style={strategy === 'fixed' ? place : undefined}
             className={cn(
-              'z-50 flex min-w-48 flex-col gap-0.5 rounded-xl border border-border/85 bg-popover p-1.5 shadow-popover animate-zoom-in',
+              'z-50 flex min-w-48 flex-col gap-0.5 overflow-y-auto rounded-xl border border-border/85 bg-popover p-1.5 shadow-popover animate-zoom-in',
               strategy === 'fixed' ? 'fixed' : cn('absolute top-full mt-1.5', align === 'end' ? 'right-0' : 'left-0'),
               strategy === 'fixed' && place.bottom !== undefined
                 ? align === 'end' ? 'origin-bottom-right' : 'origin-bottom-left'

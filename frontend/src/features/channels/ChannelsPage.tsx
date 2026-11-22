@@ -17,6 +17,7 @@ import {
   Power,
   PowerOff,
   Server,
+  ShieldCheck,
   Trash2,
   Wallet,
 } from 'lucide-react'
@@ -31,6 +32,7 @@ import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQu
 import { ChannelDrawer, type ChannelEditFocus } from '@/features/channels/ChannelDrawer'
 import { ChannelGridCard } from '@/features/channels/ChannelGridCard'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
+import { ChannelVerifyDrawer } from '@/features/channels/ChannelVerifyDrawer'
 import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -134,6 +136,7 @@ export function ChannelsPage() {
   >(null)
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
+  const [verifying, setVerifying] = useState<ChannelRow | null>(null)
   const [batchEgress, setBatchEgress] = useState(false)
   const proxies = useQuery(proxyOptions())
   const proxyGroups = useQuery(proxyGroupOptions())
@@ -594,6 +597,7 @@ export function ChannelsPage() {
                             onBalance={() => balance.mutate(c)}
                             onEdit={(focus) => openEdit(c, focus)}
                             onTry={() => setTrying(c)}
+                            onVerify={() => setVerifying(c)}
                             onDuplicate={() => duplicate.mutate(c)}
                             onDelete={() =>
                               confirm({
@@ -791,6 +795,9 @@ export function ChannelsPage() {
                                       <MenuItem icon={MessageSquareText} onSelect={() => setTrying(c)}>
                                         {t('admin:channelTryAction')}
                                       </MenuItem>
+                                      <MenuItem icon={ShieldCheck} onSelect={() => setVerifying(c)}>
+                                        {t('admin:channelVerifyAction')}
+                                      </MenuItem>
                                       {balanceSupported(c.provider) && (
                                         <MenuItem
                                           icon={Wallet}
@@ -976,6 +983,7 @@ export function ChannelsPage() {
         />
       )}
       {trying !== null && <ChannelTryDrawer channel={trying} onClose={() => setTrying(null)} />}
+      {verifying !== null && <ChannelVerifyDrawer channel={verifying} onClose={() => setVerifying(null)} />}
       {diagnosing && <RouteDiagnosisDrawer onClose={() => setDiagnosing(false)} />}
       {batchEgress && (
         <BatchEgressDrawer

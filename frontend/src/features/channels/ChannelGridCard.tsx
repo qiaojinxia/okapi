@@ -10,6 +10,7 @@ import {
   MessageSquareText,
   Pencil,
   Pin,
+  ShieldCheck,
   Trash2,
   Wallet,
 } from 'lucide-react'
@@ -74,6 +75,7 @@ export interface ChannelGridCardProps {
   onBalance: () => void
   onEdit: (focus?: ChannelEditFocus) => void
   onTry: () => void
+  onVerify: () => void
   onDuplicate: () => void
   onDelete: () => void
 }
@@ -101,6 +103,7 @@ export function ChannelGridCard({
   onBalance,
   onEdit,
   onTry,
+  onVerify,
   onDuplicate,
   onDelete,
 }: ChannelGridCardProps) {
@@ -259,6 +262,9 @@ export function ChannelGridCard({
               >
                 <MenuItem icon={MessageSquareText} onSelect={onTry}>
                   {t('admin:channelTryAction')}
+                </MenuItem>
+                <MenuItem icon={ShieldCheck} onSelect={onVerify}>
+                  {t('admin:channelVerifyAction')}
                 </MenuItem>
                 {balanceSupported(c.provider) && (
                   <MenuItem icon={Wallet} disabled={balancing} onSelect={onBalance}>

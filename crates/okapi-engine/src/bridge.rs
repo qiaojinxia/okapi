@@ -26,6 +26,8 @@ pub trait DataPlaneBridge: Send + Sync {
 
     async fn responses(&self, state: AppState, headers: HeaderMap, body: Bytes) -> Response;
 
+    async fn messages(&self, state: AppState, headers: HeaderMap, body: Bytes) -> Response;
+
     async fn playground_parameters(
         &self,
         state: &AppState,
@@ -278,6 +280,11 @@ impl DataPlaneBridge for HttpDataPlaneBridge {
 
     async fn responses(&self, state: AppState, headers: HeaderMap, body: Bytes) -> Response {
         self.relay_post(&state, "/v1/responses", &headers, body)
+            .await
+    }
+
+    async fn messages(&self, state: AppState, headers: HeaderMap, body: Bytes) -> Response {
+        self.relay_post(&state, "/v1/messages", &headers, body)
             .await
     }
 

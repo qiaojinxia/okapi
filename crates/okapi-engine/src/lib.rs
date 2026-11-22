@@ -23,6 +23,7 @@ pub mod images;
 pub mod ingress;
 pub mod key_gate;
 pub mod key_health;
+pub mod model_verify;
 pub mod oauth_cred;
 pub mod openai_dialect;
 pub mod policy_pipeline;

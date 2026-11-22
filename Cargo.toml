@@ -97,6 +97,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
+# 模型验真：MIT 协议行为指纹识别（ModelTrace / Ikaleio/lm-detector 同源算法与参考库）
+lmfpd = "0.2"
+regex = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

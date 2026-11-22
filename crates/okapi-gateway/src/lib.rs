@@ -57,6 +57,10 @@ impl bridge::DataPlaneBridge for GatewayDataPlane {
         chat::responses(State(state), headers, body).await
     }
 
+    async fn messages(&self, state: AppState, headers: HeaderMap, body: Bytes) -> Response {
+        chat::messages(State(state), headers, body).await
+    }
+
     async fn playground_parameters(
         &self,
         state: &AppState,
