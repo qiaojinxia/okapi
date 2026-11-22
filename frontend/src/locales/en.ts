@@ -5,6 +5,7 @@ export default {
     all: 'All',
     count: 'Count',
     copy: 'Copy',
+    deleted: 'Deleted',
     expandRow: 'Expand details for {{name}}',
     collapseRow: 'Collapse details for {{name}}',
     table: 'Table',

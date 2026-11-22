@@ -125,7 +125,7 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
   const [page, setPage] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
   const archivePolicy = useQuery({
-    queryKey: ['portal', 'conversation-policy'],
+    queryKey: qk.portalConversationPolicy,
     queryFn: fetchPortalArchivePolicy,
     enabled: ready,
     staleTime: 60_000,

@@ -20,6 +20,7 @@ import {
   fetchAdminConversations,
 } from '@/features/logs/conversation-api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 
 const HOURS_OPTIONS = [
   { value: '24', key: 'admin:archiveRange24h' },
@@ -41,7 +42,7 @@ export function AdminConversationsTab() {
   const [selected, setSelected] = useState<ArchiveSummary | null>(null)
 
   const query = useQuery({
-    queryKey: ['admin', 'conversations', applied],
+    queryKey: qk.adminConversationList(applied),
     queryFn: () => {
       const p = new URLSearchParams({ limit: '50', offset: String(applied.offset) })
       if (applied.search.trim()) p.set('search', applied.search.trim())
@@ -52,7 +53,7 @@ export function AdminConversationsTab() {
   })
 
   const detail = useQuery({
-    queryKey: ['admin', 'conversation-archive', selected?.request_id ?? ''],
+    queryKey: qk.adminConversation(selected?.request_id ?? ''),
     queryFn: () => fetchAdminConversation(selected!.request_id),
     enabled: selected !== null,
   })
@@ -62,8 +63,7 @@ export function AdminConversationsTab() {
     onSuccess: () => {
       toast.success(t('common:deleted'))
       setSelected(null)
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'conversations'] })
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'conversation-archive-stats'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminConversations })
     },
     onError: (err) => toast.error(describeError(err)),
   })

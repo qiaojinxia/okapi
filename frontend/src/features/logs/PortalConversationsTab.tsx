@@ -16,6 +16,7 @@ import {
   fetchPortalConversations,
 } from '@/features/logs/conversation-api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 
 /// 门户「我的对话存档」列表视图（仅在站点管理员开启 `allow_user_view` 后显示，兼容 ClickHouse 与纯 PG 模式）。
 export function PortalConversationsTab({ scope, keyId }: { scope: 'key' | 'user'; keyId: string }) {
@@ -26,7 +27,7 @@ export function PortalConversationsTab({ scope, keyId }: { scope: 'key' | 'user'
   const [selected, setSelected] = useState<ArchiveSummary | null>(null)
 
   const query = useQuery({
-    queryKey: ['portal', 'conversations', scope, keyId, applied],
+    queryKey: qk.portalConversationList(scope, keyId, applied),
     queryFn: () => {
       const p = new URLSearchParams({ scope, limit: '50', offset: String(applied.offset) })
       if (scope === 'user' && keyId) p.set('api_key_id', keyId)
@@ -37,7 +38,7 @@ export function PortalConversationsTab({ scope, keyId }: { scope: 'key' | 'user'
   })
 
   const detail = useQuery({
-    queryKey: ['portal', 'conversation-archive', selected?.request_id ?? ''],
+    queryKey: qk.portalConversation(selected?.request_id ?? ''),
     queryFn: () => fetchPortalConversation(selected!.request_id),
     enabled: selected !== null,
   })

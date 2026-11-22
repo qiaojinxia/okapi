@@ -4,6 +4,7 @@
 pub mod auth_find_key;
 pub mod channel_pools;
 pub mod clickhouse_streaming_error;
+pub mod conversation_archive;
 pub mod migrations;
 pub mod model_config;
 pub mod refund_measurements;

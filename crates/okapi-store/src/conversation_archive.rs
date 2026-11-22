@@ -259,6 +259,10 @@ pub async fn get_by_request_id(
     get_pg(pg, request_id, owner_user_id).await
 }
 
+// ClickHouse 的 SELECT 别名在 WHERE / ORDER BY 里同样可见：取列的文本形式（`toString(created_at)` /
+// `toString(request_id)`）时别名不能和列同名，否则 `created_at >= now64(3) - …`、`request_id = toUUID(…)`
+// 比较的是字符串，整条查询报 ILLEGAL_TYPE_OF_ARGUMENT，于是回退到（ClickHouse 在用时为空的）PG 表，
+// 列表「暂无数据」、详情 404。文本列一律叫 `*_text`。
 fn ch_i64(v: &Value, key: &str) -> i64 {
     v.get(key).map_or(0, |x| {
         x.as_str()
@@ -283,7 +287,7 @@ async fn get_ch(
 ) -> Result<Option<ArchiveRecord>, StoreError> {
     ensure_ch_table(ch).await?;
     let mut sql = String::from(
-        "SELECT toString(created_at) AS created_at, toString(request_id) AS request_id, \
+        "SELECT toString(created_at) AS created_at_text, toString(request_id) AS request_id_text, \
          user_id, api_key_id, channel_id, model, requested_model, endpoint, is_stream, \
          status_code, error_code, request_body, response_body, response_text, \
          reasoning_text, tool_calls, truncated \
@@ -303,7 +307,7 @@ async fn get_ch(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    let parsed_id = Uuid::parse_str(&ch_str(row, "request_id")).unwrap_or(request_id);
+    let parsed_id = Uuid::parse_str(&ch_str(row, "request_id_text")).unwrap_or(request_id);
     Ok(Some(ArchiveRecord {
         request_id: parsed_id,
         user_id: ch_i64(row, "user_id"),
@@ -321,7 +325,7 @@ async fn get_ch(
         reasoning_text: ch_str(row, "reasoning_text"),
         tool_calls: ch_str(row, "tool_calls"),
         truncated: ch_i64(row, "truncated") != 0,
-        created_at: parse_ch_ts(&ch_str(row, "created_at")),
+        created_at: parse_ch_ts(&ch_str(row, "created_at_text")),
         storage: "clickhouse".into(),
     }))
 }
@@ -386,10 +390,7 @@ pub async fn list(
     list_pg(pg, filter).await
 }
 
-async fn list_ch(
-    ch: &ChClient,
-    filter: &ArchiveFilter,
-) -> Result<Vec<ArchiveSummary>, StoreError> {
+async fn list_ch(ch: &ChClient, filter: &ArchiveFilter) -> Result<Vec<ArchiveSummary>, StoreError> {
     ensure_ch_table(ch).await?;
     let mut clauses = vec!["1 = 1".to_owned()];
     let mut owned_params: Vec<(&'static str, String)> = Vec::new();
@@ -435,7 +436,7 @@ async fn list_ch(
     let limit = filter.limit.clamp(1, 200);
     let offset = filter.offset.min(10_000);
     let sql = format!(
-        "SELECT toString(created_at) AS created_at, toString(request_id) AS request_id, \
+        "SELECT toString(created_at) AS created_at_text, toString(request_id) AS request_id_text, \
          user_id, api_key_id, channel_id, model, requested_model, endpoint, is_stream, \
          status_code, error_code, truncated, \
          substringUTF8(request_body, 1, 600) AS req_snip, \
@@ -446,15 +447,12 @@ async fn list_ch(
          LIMIT {limit} OFFSET {offset}",
         clauses.join(" AND ")
     );
-    let params: Vec<(&str, &str)> = owned_params
-        .iter()
-        .map(|(k, v)| (*k, v.as_str()))
-        .collect();
+    let params: Vec<(&str, &str)> = owned_params.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let rows = ch.query_with_params(&sql, &params).await?;
     Ok(rows
         .iter()
         .filter_map(|row| {
-            let req_id = Uuid::parse_str(&ch_str(row, "request_id")).ok()?;
+            let req_id = Uuid::parse_str(&ch_str(row, "request_id_text")).ok()?;
             Some(ArchiveSummary {
                 request_id: req_id,
                 user_id: ch_i64(row, "user_id"),
@@ -469,7 +467,7 @@ async fn list_ch(
                 request_preview: preview_text(&ch_str(row, "req_snip")),
                 response_preview: preview_text(&ch_str(row, "resp_snip")),
                 truncated: ch_i64(row, "truncated") != 0,
-                created_at: parse_ch_ts(&ch_str(row, "created_at")),
+                created_at: parse_ch_ts(&ch_str(row, "created_at_text")),
                 storage: "clickhouse".into(),
             })
         })

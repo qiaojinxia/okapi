@@ -15,6 +15,7 @@ import {
   prettyJson,
 } from '@/features/logs/conversation-api'
 import { ApiError } from '@/lib/api'
+import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 /// 内嵌于管理员/门户日志详情抽屉中的「对话存档」区块。
@@ -29,7 +30,7 @@ export function ConversationArchiveSection({
   const { t } = useTranslation()
 
   const portalPolicy = useQuery({
-    queryKey: ['portal', 'conversation-policy'],
+    queryKey: qk.portalConversationPolicy,
     queryFn: fetchPortalArchivePolicy,
     enabled: mode === 'portal',
     staleTime: 60_000,

@@ -85,7 +85,7 @@ function ConversationArchiveCard() {
   })
 
   const statsQuery = useQuery({
-    queryKey: ['admin', 'conversation-archive-stats'],
+    queryKey: qk.adminConversationStats,
     queryFn: fetchArchiveStats,
     retry: false,
   })
@@ -134,7 +134,7 @@ function ConversationArchiveCard() {
     onSuccess: () => {
       toast.success(t('admin:saved'))
       void invalidateSetting(queryClient, 'conversation_archive')
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'conversation-archive-stats'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminConversations })
     },
     onError: (err) => toast.error(describeError(err)),
   })
@@ -148,7 +148,7 @@ function ConversationArchiveCard() {
           days: res.retention_days,
         }),
       )
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'conversation-archive-stats'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminConversations })
     },
     onError: (err) => toast.error(describeError(err)),
   })

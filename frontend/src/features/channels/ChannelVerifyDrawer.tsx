@@ -43,6 +43,7 @@ import {
 import { ApiError, getKey } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { maskAccount, maskChannelName } from '@/lib/mask'
+import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 type Phase = 'idle' | 'running' | 'done' | 'failed'
@@ -140,7 +141,7 @@ export function ChannelVerifyDrawer({ channel, onClose }: { channel: ChannelRow;
   useEffect(() => () => stopRef.current?.(), [])
 
   const bank = useQuery({
-    queryKey: ['admin', 'verify-bank'],
+    queryKey: qk.verifyBank,
     queryFn: fetchVerifyBank,
     staleTime: 60_000,
   })
@@ -148,7 +149,7 @@ export function ChannelVerifyDrawer({ channel, onClose }: { channel: ChannelRow;
   const refreshBank = useMutation({
     mutationFn: refreshVerifyBank,
     onSuccess: (next) => {
-      queryClient.setQueryData(['admin', 'verify-bank'], next)
+      queryClient.setQueryData(qk.verifyBank, next)
       toast.success(t('admin:channelVerifyBankRefreshed'))
     },
     onError: (err) => toast.error(describeError(err)),
@@ -161,7 +162,7 @@ export function ChannelVerifyDrawer({ channel, onClose }: { channel: ChannelRow;
       case 'init':
         setUpstreamModel(ev.upstream_model)
         setMimicActive(ev.mimic_profile_active)
-        queryClient.setQueryData(['admin', 'verify-bank'], ev.bank)
+        queryClient.setQueryData(qk.verifyBank, ev.bank)
         break
       case 'stage': {
         const label = t(`admin:channelVerifyStage_${ev.stage}`, { defaultValue: ev.stage })
@@ -198,7 +199,7 @@ export function ChannelVerifyDrawer({ channel, onClose }: { channel: ChannelRow;
       case 'fingerprint_result':
         setFingerprint(ev.result)
         setSamples(ev.result.samples)
-        void queryClient.invalidateQueries({ queryKey: ['admin', 'verify-bank'] })
+        void queryClient.invalidateQueries({ queryKey: qk.verifyBank })
         break
       case 'error':
         setStageErrors((prev) => [...prev, { stage: ev.stage, message: ev.message }])

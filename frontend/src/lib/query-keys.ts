@@ -75,6 +75,17 @@ export const qk = {
   poolDetail: (code: string) => ['admin', 'pools', 'detail', code] as const,
   audit: (params: string) => ['admin', 'audit', params] as const,
   auditActions: ['admin', 'audit', 'actions'] as const,
+  /// 对话存档：列表 / 单条 / 存储统计同挂一个前缀，删一条或改策略后按前缀一起失效。
+  adminConversations: ['admin', 'conversations'] as const,
+  adminConversationList: (filters: Record<string, string | number>) => ['admin', 'conversations', 'list', filters] as const,
+  adminConversation: (requestId: string) => ['admin', 'conversations', 'detail', requestId] as const,
+  adminConversationStats: ['admin', 'conversations', 'stats'] as const,
+  portalConversationPolicy: ['portal', 'conversations', 'policy'] as const,
+  portalConversationList: (scope: string, keyId: string, filters: Record<string, string | number>) =>
+    ['portal', 'conversations', 'list', scope, keyId, filters] as const,
+  portalConversation: (requestId: string) => ['portal', 'conversations', 'detail', requestId] as const,
+  /// 模型验真的参考库（渠道验真抽屉）。
+  verifyBank: ['admin', 'verify-bank'] as const,
   myLogins: ['me', 'logins'] as const,
   mySessions: ['me', 'sessions'] as const,
   myGroups: ['me', 'groups'] as const,
