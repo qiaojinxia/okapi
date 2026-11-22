@@ -9,6 +9,7 @@ import { LogBillingDetails } from '@/features/logs/LogBillingDetails'
 import { billingStatus } from '@/features/logs/types'
 import { formatCount, formatMoney } from '@/lib/money'
 import { TokenBreakdown } from '@/features/logs/TokenBreakdown'
+import { ConversationArchiveSection } from '@/features/logs/ConversationArchiveSection'
 import type { Snapshot } from '@/features/logs/types'
 import { maskEmails } from '@/lib/mask'
 import { RefundInline } from './RefundInline'
@@ -101,6 +102,7 @@ export function RowDetail({ row }: { row: LogRow }) {
       <LogPerformanceDetails row={row} />
       <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
       <LogBillingDetails row={{ ...row, pricing_snapshot: parseSnapshot(row.ratio_snapshot) }} status={row.status} />
+      <ConversationArchiveSection mode="admin" requestId={row.request_id} />
       <RefundInline row={row} />
     </DetailBody>
   )

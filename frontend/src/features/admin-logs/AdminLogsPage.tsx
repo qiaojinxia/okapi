@@ -1,14 +1,16 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Download, RotateCw } from 'lucide-react'
+import { Download, FileText, MessageSquareText, RotateCw } from 'lucide-react'
 import type { LogSearch } from '@/routes/admin.logs'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page'
+import { Segmented } from '@/components/ui/segmented'
 import type { EntityKind, EntityOption } from '@/features/entity-search/EntitySearchInput'
 import { DEFAULT_PAGE_SIZE, PAGE_SIZES, usePagination } from '@/hooks/use-pagination'
 import { maskEmails } from '@/lib/mask'
 import { qk } from '@/lib/query-keys'
+import { AdminConversationsTab } from './AdminConversationsTab'
 import { FilterBar } from './FilterBar'
 import { LogTable } from './LogTable'
 import { RangePicker } from './RangePicker'
@@ -30,6 +32,7 @@ export function AdminLogsPage() {
   const navigate = routeApi.useNavigate()
   const applied = fromSearch(search)
   const [draft, setDraft] = useState<Draft>(applied)
+  const [view, setView] = useState<'logs' | 'conversations'>('logs')
 
   // 地址变了（看板深链跳过来、浏览器前进后退）→ 表单跟着地址走。
   // 依赖用序列化后的字符串：search 对象每次渲染都是新引用；只看过滤条件，翻页不算。
@@ -69,26 +72,46 @@ export function AdminLogsPage() {
         compact
         className="[&_p]:text-xs [&_p]:leading-5"
         action={<>
-          <Button size="sm" variant="outline" disabled={rows.length === 0 || logs.isFetching} title={t('logs:exportPageHint', { n: rows.length })} onClick={() => exportCsv(rows)}>
-            <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
-          </Button>
-          <Button size="sm" variant="outline" loading={logs.isFetching} onClick={() => {
-            void logs.refetch()
-            void client.invalidateQueries({ queryKey: qk.adminLogStat(toParams(applied, 0, DEFAULT_PAGE_SIZE)) })
-          }}>
-            {!logs.isFetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
-          </Button>
+          <Segmented
+            size="sm"
+            ariaLabel={t('admin:logsNav')}
+            value={view}
+            onChange={(v) => setView(v as 'logs' | 'conversations')}
+            options={[
+              { value: 'logs', label: t('admin:logsNav'), icon: FileText },
+              { value: 'conversations', label: t('admin:archiveTabLabel'), icon: MessageSquareText },
+            ]}
+          />
+          {view === 'logs' && (
+            <>
+              <Button size="sm" variant="outline" disabled={rows.length === 0 || logs.isFetching} title={t('logs:exportPageHint', { n: rows.length })} onClick={() => exportCsv(rows)}>
+                <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
+              </Button>
+              <Button size="sm" variant="outline" loading={logs.isFetching} onClick={() => {
+                void logs.refetch()
+                void client.invalidateQueries({ queryKey: qk.adminLogStat(toParams(applied, 0, DEFAULT_PAGE_SIZE)) })
+              }}>
+                {!logs.isFetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
+              </Button>
+            </>
+          )}
         </>}
       />
-      <FilterBar draft={draft} applied={applied} onChange={setDraft} onApply={() => commit(draft)} onCommit={commit} known={known}
-        range={<RangePicker
-          draft={draft}
-          onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
-          onRange={(from, to) => setDraft({ ...draft, from, to })}
-          onApplyRange={() => commit(draft)}
-        />} />
-      <StatBar applied={applied} />
-      <LogTable applied={applied} pager={pager} q={logs} />
+      {view === 'conversations' ? (
+        <AdminConversationsTab />
+      ) : (
+        <>
+          <FilterBar draft={draft} applied={applied} onChange={setDraft} onApply={() => commit(draft)} onCommit={commit} known={known}
+            range={<RangePicker
+              draft={draft}
+              onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
+              onRange={(from, to) => setDraft({ ...draft, from, to })}
+              onApplyRange={() => commit(draft)}
+            />} />
+          <StatBar applied={applied} />
+          <LogTable applied={applied} pager={pager} q={logs} />
+        </>
+      )}
     </div>
   )
 }

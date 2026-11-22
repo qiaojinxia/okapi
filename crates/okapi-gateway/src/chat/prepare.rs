@@ -364,6 +364,13 @@ pub(super) async fn prepare_chat(
         );
     }
     let effective_strategy = Some(effective_policy.strategy.clone());
+    let archive_policy = state.conversation_archive_policy().await;
+    let archive = (archive_policy.enabled && pin.is_none()).then(|| {
+        Arc::new(okapi_engine::conversation_archive::prepare_request(
+            body,
+            archive_policy.max_body_bytes(),
+        ))
+    });
     let bill = RequestBilling {
         trace,
         state: state.clone(),
@@ -412,6 +419,7 @@ pub(super) async fn prepare_chat(
         reservation_snapshot,
         downgraded_from: None,
         settlement: SettlementHandoff::default(),
+        archive,
     };
 
     Ok(bill)

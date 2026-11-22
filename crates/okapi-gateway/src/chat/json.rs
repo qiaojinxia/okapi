@@ -171,6 +171,7 @@ pub(super) async fn attempt_json(
             };
             // Preserve the independently tracked settlement if the client disconnects,
             // and wait for it before returning a complete JSON response.
+            archive_non_stream_response(bill, info.channel, status, &body);
             let bill_bg = bill.clone();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             bill.settlement.hand_off();
@@ -200,6 +201,34 @@ pub(super) async fn attempt_json(
         }),
         Err(err) => Err(classify_fatal(err, failover, channel)),
     }
+}
+
+fn archive_non_stream_response(bill: &RequestBilling, channel: i64, status: u16, body: &Bytes) {
+    let Some(archive) = bill.archive.as_ref() else {
+        return;
+    };
+    let captured = okapi_engine::conversation_archive::extract_non_stream(
+        bill.ingress,
+        body,
+        archive.max_body_bytes,
+    );
+    okapi_engine::conversation_archive::spawn_persist(
+        &bill.state,
+        okapi_engine::conversation_archive::ArchiveMeta {
+            request_id: bill.request_id,
+            user_id: bill.user_id,
+            api_key_id: bill.key_id,
+            channel_id: channel,
+            model: bill.model.clone(),
+            requested_model: bill.requested_model.clone(),
+            endpoint: bill.ingress.endpoint().to_owned(),
+            is_stream: false,
+            status_code: i16::try_from(status).unwrap_or(200),
+            error_code: String::new(),
+        },
+        (**archive).clone(),
+        captured,
+    );
 }
 
 pub(super) fn non_stream_content_chars(ingress: Ingress, body: &Bytes) -> usize {

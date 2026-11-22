@@ -11,7 +11,7 @@ export interface SettingRow {
 export const SETTINGS_TABS = ['registration', 'notice', 'notify', 'smtp', 'privacy', 'timezone', 'ai', 'egress', 'values'] as const
 export type SettingsTab = (typeof SETTINGS_TABS)[number]
 /// 有专用表单的页签：高级设置里对应的键给「前往设置」而不是通用编辑器。
-export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp' | 'timezone' | 'egress'
+export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp' | 'privacy' | 'timezone' | 'egress'
 export type SettingEditor = 'auto' | 'number' | 'price' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth' | 'oauth_refresh'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
@@ -55,6 +55,8 @@ const CATALOG: Record<string, SettingMeta> = {
   mcp_write_enabled: { label: 'admin:settingMcpWrite', description: 'admin:settingMcpWriteDesc', group: 'security', editor: 'auto' },
   web_session_limit: { label: 'admin:settingSessionLimit', description: 'admin:settingSessionLimitDesc', group: 'security', editor: 'number' },
   ssrf_policy: { label: 'admin:settingAccess', description: 'admin:settingAccessDesc', group: 'security', editor: 'ssrf' },
+  record_ip_log: { label: 'admin:recordIpLog', description: 'admin:recordIpLogHint', group: 'security', editor: 'auto', section: 'privacy' },
+  conversation_archive: { label: 'admin:archiveTitle', description: 'admin:archiveDesc', group: 'security', editor: 'auto', section: 'privacy' },
   reporting_timezone: { label: 'analytics:tzTitle', description: 'analytics:tzDesc', group: 'other', editor: 'auto', section: 'timezone' },
 }
 

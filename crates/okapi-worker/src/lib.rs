@@ -31,7 +31,8 @@ pub mod user_alerts;
 
 pub use self::housekeeping::{
     ExpiredBalance, drop_expired_partitions, ensure_next_month_partitions, expire_balances,
-    recover_cooled_keys, subscriptions_tick,
+    load_conversation_archive_policy, prune_conversation_archives, recover_cooled_keys,
+    subscriptions_tick,
 };
 use self::maintenance::{
     ChSink, JsSink, MaintenanceContext, MaintenanceJob, run_maintenance, run_recovery,
@@ -46,6 +47,8 @@ use std::time::Duration;
 const SWEEP_INTERVAL: Duration = Duration::from_mins(1);
 const RECONCILE_INTERVAL: Duration = Duration::from_mins(5);
 const PARTITION_INTERVAL: Duration = Duration::from_hours(6);
+/// 对话存档定时清理轮询间隔：内部按 `settings.conversation_archive.cleanup_interval_hours` 节流。
+const ARCHIVE_CLEANUP_POLL_INTERVAL: Duration = Duration::from_mins(15);
 const COOLDOWN_INTERVAL: Duration = Duration::from_secs(30);
 const BALANCE_EXPIRY_INTERVAL: Duration = Duration::from_mins(5);
 /// 人工队列（统计死信、结算隔离区）巡检：非零即告警。
@@ -257,6 +260,7 @@ where
         js,
         ch,
         reconcile: std::sync::Mutex::default(),
+        last_archive_cleanup: std::sync::Mutex::default(),
     });
     let mut workers = recovery_workers;
     workers.extend([
@@ -279,6 +283,10 @@ where
         (MaintenanceJob::margin, MARGIN_BREAKER_INTERVAL),
         (MaintenanceJob::balance_expiry, BALANCE_EXPIRY_INTERVAL),
         (MaintenanceJob::manual_queues, MANUAL_QUEUE_INTERVAL),
+        (
+            MaintenanceJob::conversation_archive,
+            ARCHIVE_CLEANUP_POLL_INTERVAL,
+        ),
     ] {
         workers.push(tokio::spawn(supervision::run(
             job.name(),

@@ -66,6 +66,14 @@ impl CoreState {
             != Some(false)
     }
 
+    /// 对话存档策略（`settings.conversation_archive`）。缺省关闭，热路径命中 60s 内存缓存。
+    pub async fn conversation_archive_policy(&self) -> crate::policies::ConversationArchivePolicy {
+        let value = self
+            .setting_cached(crate::policies::CONVERSATION_ARCHIVE_SETTING)
+            .await;
+        crate::policies::ConversationArchivePolicy::from_setting(value.as_ref().as_ref())
+    }
+
     /// 直接读库、不经缓存。认证链接用的站点地址、OAuth 与支付凭据这类设置，管理员改了要在每个
     /// 副本上立刻生效，不能吃缓存的 60 秒 TTL；[`Self::try_setting_cached`] 未命中时也走这里。
     pub async fn setting_fresh(&self, key: &str) -> Result<Option<serde_json::Value>, AppError> {

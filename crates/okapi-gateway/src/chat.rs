@@ -214,6 +214,8 @@ struct RequestBilling {
     downgraded_from: Option<String>,
     /// 预扣由谁收口：HTTP handler 持有，直到后台结算 / 流泵接手（克隆间共享）。
     settlement: SettlementHandoff,
+    /// 对话存档上下文（仅当 `settings.conversation_archive.enabled == true` 且非通道测试探针时非空）。
+    archive: Option<Arc<okapi_engine::conversation_archive::ArchiveCapture>>,
 }
 
 /// 预扣的收口责任。handler 在等上游时可能被丢弃（客户端断开），此时必须有人退款；

@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { InfiniteData } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { CircleHelp, Download, RotateCw, Search } from 'lucide-react'
+import { CircleHelp, Download, FileText, MessageSquareText, RotateCw, Search } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { RowExpander } from '@/components/ui/row-expander'
+import { Segmented } from '@/components/ui/segmented'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Switch } from '@/components/ui/switch'
@@ -31,7 +32,9 @@ import { LogDetail, LogStatus } from './LogDetail'
 import { LogSummary } from './LogSummary'
 import { LogPerformance } from './LogPerformance'
 import { LogTokenUsage } from './LogTokenUsage'
+import { PortalConversationsTab } from './PortalConversationsTab'
 import { PortalKeyFilter } from './PortalKeyFilter'
+import { fetchPortalArchivePolicy } from './conversation-api'
 import { billingStatus, cacheRead, cacheWrite, logMoney, netAmount } from './types'
 import type { LogRow, LogsResp, LogStats } from './types'
 
@@ -118,8 +121,17 @@ export function LogsPage() {
 function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; ready: boolean; limit: number; onLimit: (limit: number) => void; filters: ReactNode }) {
   const { t, i18n } = useTranslation(), locale = i18n.language
   const client = useQueryClient()
+  const [view, setView] = useState<'logs' | 'conversations'>('logs')
   const [page, setPage] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
+  const archivePolicy = useQuery({
+    queryKey: ['portal', 'conversation-policy'],
+    queryFn: fetchPortalArchivePolicy,
+    enabled: ready,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const allowUserConversations = archivePolicy.data?.allow_user_view === true
   const detailId = useId(), filterKey = params(filter)
   const queryKey = qk.logsPaged(params(filter, null, limit))
   const q = useInfiniteQuery({
@@ -163,13 +175,33 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
     <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} compact className="[&_p]:text-xs [&_p]:leading-5"
       meta={<span data-slot="log-window" className="text-xs">{!filter.range && <>{t(filter.requestId.trim() ? 'logs:allDatesShort' : 'logs:recentDaysShort')} · </>}{t('logs:displayTimezone', { timezone: filter.timezone })}</span>}
       action={<>
-          <Button size="sm" variant="outline" disabled={!rows.length || q.isFetching} onClick={() => exportCsv(rows, showKey)} title={t('logs:exportPageHint', { n: rows.length })}>
-            <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
-          </Button>
-          <Button size="sm" variant="outline" disabled={!ready || q.isFetching} loading={q.isRefetching || stats.isRefetching} onClick={refresh}>
-            {!q.isRefetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
-          </Button>
+          {allowUserConversations && (
+            <Segmented
+              size="sm"
+              ariaLabel={t('logs:title')}
+              value={view}
+              onChange={(v) => setView(v as 'logs' | 'conversations')}
+              options={[
+                { value: 'logs', label: t('logs:title'), icon: FileText },
+                { value: 'conversations', label: t('logs:conversationTitle'), icon: MessageSquareText },
+              ]}
+            />
+          )}
+          {view === 'logs' && (
+            <>
+              <Button size="sm" variant="outline" disabled={!rows.length || q.isFetching} onClick={() => exportCsv(rows, showKey)} title={t('logs:exportPageHint', { n: rows.length })}>
+                <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
+              </Button>
+              <Button size="sm" variant="outline" disabled={!ready || q.isFetching} loading={q.isRefetching || stats.isRefetching} onClick={refresh}>
+                {!q.isRefetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
+              </Button>
+            </>
+          )}
     </>} />
+    {allowUserConversations && view === 'conversations' ? (
+      <PortalConversationsTab scope={filter.scope} keyId={filter.keyId} />
+    ) : (
+      <>
     {filters}
     <LogSummary layout="strip" data={stats.data} loading={stats.isPending} error={stats.isError} onRetry={() => void stats.refetch()} />
     {q.isError && current && <Alert tone="destructive" action={<Button size="sm" variant="outline" onClick={() => q.isFetchNextPageError ? void changePage((page + 1) * limit) : refresh()}>{t('common:retry')}</Button>}>{describeError(q.error)}</Alert>}
@@ -202,6 +234,8 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
         <span>{t(stats.data?.records != null ? 'logs:pageRangeTotal' : 'logs:pageRange', { from: rows.length ? page * limit + 1 : 0, to: rows.length ? page * limit + rows.length : 0, total: stats.data?.records })}</span>
       </span>} />
     <LogDetail row={rows.find((row) => row.id === selected) ?? null} onClose={() => setSelected(null)} id={detailId} timezone={filter.timezone} />
+      </>
+    )}
   </div>
 }
 

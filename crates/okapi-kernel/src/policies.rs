@@ -409,6 +409,104 @@ impl LowBalance {
     }
 }
 
+/// `settings.conversation_archive`：对话内容存档开关、保留策略与隐私权限。
+///
+/// 缺省关闭（`enabled = false`），对热路径零开销；开启后 ClickHouse 可用时落 ClickHouse，
+/// 未启用 ClickHouse 时自动落 PostgreSQL。`retention_days = 0` 表示永久保留，大于 0 由 worker 定时清理。
+pub const CONVERSATION_ARCHIVE_SETTING: &str = "conversation_archive";
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConversationArchivePolicy {
+    pub enabled: bool,
+    /// 保留天数：0 = 永久保留；1..=3650 = N 天后由 worker 定时清理。
+    pub retention_days: u32,
+    /// 是否允许用户在门户查看自己的对话存档（缺省 false，仅管理员可见）。
+    pub allow_user_view: bool,
+    /// 单侧（请求体 / 响应体）截断上限（KB），范围 16..=4096，缺省 256 KB。
+    pub max_body_kb: u32,
+    /// 定时清理检查周期（小时），范围 1..=168，缺省 6 小时。
+    pub cleanup_interval_hours: u32,
+}
+
+impl Default for ConversationArchivePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_days: 30,
+            allow_user_view: false,
+            max_body_kb: 256,
+            cleanup_interval_hours: 6,
+        }
+    }
+}
+
+impl ConversationArchivePolicy {
+    #[must_use]
+    pub fn parse(value: &Value) -> Option<Self> {
+        let policy = if value.is_null() {
+            Self::default()
+        } else {
+            serde_json::from_value::<Self>(value.clone()).ok()?
+        };
+        (policy.retention_days <= 3650
+            && (16..=4096).contains(&policy.max_body_kb)
+            && (1..=168).contains(&policy.cleanup_interval_hours))
+        .then_some(policy)
+    }
+
+    #[must_use]
+    pub fn from_setting(value: Option<&Value>) -> Self {
+        value.and_then(Self::parse).unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn max_body_bytes(self) -> usize {
+        usize::try_from(self.max_body_kb)
+            .unwrap_or(256)
+            .saturating_mul(1024)
+    }
+}
+
+#[cfg(test)]
+mod conversation_archive_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn conversation_archive_policy_defaults_and_bounds() {
+        let def = ConversationArchivePolicy::from_setting(None);
+        assert!(!def.enabled);
+        assert_eq!(def.retention_days, 30);
+        assert!(!def.allow_user_view);
+        assert_eq!(def.max_body_kb, 256);
+        assert_eq!(def.cleanup_interval_hours, 6);
+
+        let perm = ConversationArchivePolicy::parse(&json!({
+            "enabled": true,
+            "retention_days": 0,
+            "allow_user_view": true,
+            "max_body_kb": 512,
+            "cleanup_interval_hours": 24
+        }))
+        .expect("permanent archive config parses");
+        assert!(perm.enabled && perm.allow_user_view && perm.retention_days == 0);
+        assert_eq!(perm.max_body_bytes(), 512 * 1024);
+
+        for bad in [
+            json!({"retention_days": 3651}),
+            json!({"max_body_kb": 8}),
+            json!({"max_body_kb": 8192}),
+            json!({"cleanup_interval_hours": 0}),
+            json!({"cleanup_interval_hours": 200}),
+            json!({"unknown_field": true}),
+            json!("enabled"),
+        ] {
+            assert!(ConversationArchivePolicy::parse(&bad).is_none(), "{bad}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

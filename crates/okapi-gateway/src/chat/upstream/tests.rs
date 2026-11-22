@@ -149,6 +149,7 @@ fn test_billing(ingress: Ingress, model: &str) -> (RequestBilling, ProbeInfo) {
         reservation_snapshot: Arc::new(serde_json::json!({})),
         downgraded_from: None,
         settlement: super::super::SettlementHandoff::default(),
+        archive: None,
     };
     let info = ProbeInfo {
         authenticated: None,

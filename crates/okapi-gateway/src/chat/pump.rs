@@ -119,11 +119,19 @@ pub(super) async fn spawn_stream_pump(
         // Observe the returned model independently of the opt-in billing policy.
         let mut resp_meta = RespMeta::default();
         let mut next_sequence = 0;
+        let mut archive_collector = bill.archive.as_ref().map(|a| {
+            okapi_engine::conversation_archive::StreamCollector::new(bill.ingress, a.max_body_bytes)
+        });
 
         let mut terminal = Vec::new();
         let mut terminal_gate = TerminalGate::new(bill.ingress, bill.choices);
         for event in buffered {
-            if let ChatEvent::Data { raw, .. } = &event { bill.trace.stream_event(raw); }
+            if let ChatEvent::Data { raw, .. } = &event {
+                bill.trace.stream_event(raw);
+                if let Some(collector) = archive_collector.as_mut() {
+                    collector.push(raw);
+                }
+            }
             if resp_meta.model.is_none() || (bill.has_tier_pricing && resp_meta.service_tier.is_none()) {
                 capture_chunk_meta(&event, &mut resp_meta);
             }
@@ -152,7 +160,12 @@ pub(super) async fn spawn_stream_pump(
                 .unwrap_or(Some(Err(UpstreamError::Timeout)));
             match next {
                 Some(Ok(event)) => {
-                    if let ChatEvent::Data { raw, .. } = &event { bill.trace.stream_event(raw); }
+                    if let ChatEvent::Data { raw, .. } = &event {
+                        bill.trace.stream_event(raw);
+                        if let Some(collector) = archive_collector.as_mut() {
+                            collector.push(raw);
+                        }
+                    }
                     if resp_meta.model.is_none() || (bill.has_tier_pricing && resp_meta.service_tier.is_none()) {
                         capture_chunk_meta(&event, &mut resp_meta);
                     }
@@ -218,6 +231,29 @@ pub(super) async fn spawn_stream_pump(
             resp_meta,
         )
         .await;
+        if let (Some(archive), Some(collector)) = (bill.archive.as_ref(), archive_collector) {
+            let (status_code, error_code) = info
+                .outcome
+                .as_ref()
+                .map_or((200i16, String::new()), |(s, e)| (*s, e.clone()));
+            okapi_engine::conversation_archive::spawn_persist(
+                &bill.state,
+                okapi_engine::conversation_archive::ArchiveMeta {
+                    request_id: bill.request_id,
+                    user_id: bill.user_id,
+                    api_key_id: bill.key_id,
+                    channel_id: info.channel,
+                    model: bill.model.clone(),
+                    requested_model: bill.requested_model.clone(),
+                    endpoint: bill.ingress.endpoint().to_owned(),
+                    is_stream: true,
+                    status_code,
+                    error_code,
+                },
+                (**archive).clone(),
+                collector.finish(),
+            );
+        }
         finish_settled_stream(tx, result, terminal, bill.ingress, request_id, next_sequence).await;
         // 结算完成后释放渠道 key 并发信号量（§3.5）
     });

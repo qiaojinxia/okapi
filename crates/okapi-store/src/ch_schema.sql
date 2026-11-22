@@ -326,3 +326,28 @@ PARTITION BY toYYYYMMDD(minute)
 ORDER BY (proxy_id, minute, node)
 TTL minute + INTERVAL 7 DAY
 SETTINGS non_replicated_deduplication_window = 1000;
+
+-- 对话内容存档：独立于 request_log_raw 避免宽文本拖慢分析物化视图；不设硬编码 TTL，
+-- 由 settings.conversation_archive（永久保留或按天定时清理）动态控制。
+CREATE TABLE IF NOT EXISTS conversation_archives (
+    created_at      DateTime64(3, 'UTC'),
+    request_id      UUID,
+    user_id         UInt64,
+    api_key_id      UInt64,
+    channel_id      UInt32 DEFAULT 0,
+    model           LowCardinality(String),
+    requested_model LowCardinality(String) DEFAULT '',
+    endpoint        LowCardinality(String) DEFAULT '',
+    is_stream       UInt8 DEFAULT 0,
+    status_code     UInt16 DEFAULT 200,
+    error_code      LowCardinality(String) DEFAULT '',
+    request_body    String CODEC(ZSTD(3)),
+    response_body   String CODEC(ZSTD(3)),
+    response_text   String CODEC(ZSTD(3)),
+    reasoning_text  String CODEC(ZSTD(3)),
+    tool_calls      String CODEC(ZSTD(3)),
+    truncated       UInt8 DEFAULT 0
+) ENGINE = ReplacingMergeTree(created_at)
+PARTITION BY toYYYYMMDD(created_at)
+ORDER BY (user_id, created_at, request_id)
+SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000;

@@ -11,6 +11,7 @@ pub mod ch;
 #[path = "channel_usage/mod.rs"]
 pub mod channel_usage;
 pub mod channels;
+pub mod conversation_archive;
 pub mod credential;
 pub mod delivery;
 pub mod egress;

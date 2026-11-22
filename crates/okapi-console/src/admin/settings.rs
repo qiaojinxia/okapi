@@ -70,6 +70,11 @@ pub async fn set_setting(
     {
         return Err(AppError::bad_request().with_param("channel_balance_policy"));
     }
+    if req.key == okapi_kernel::policies::CONVERSATION_ARCHIVE_SETTING
+        && okapi_kernel::policies::ConversationArchivePolicy::parse(&req.value).is_none()
+    {
+        return Err(AppError::bad_request().with_param("conversation_archive"));
+    }
     // 公告列表整份校验：坏值不落库（公开接口读到坏条目只会悄悄跳过，站长以为发布了）
     if req.key == super::super::notices::SETTING && !super::super::notices::valid(&req.value) {
         return Err(AppError::bad_request().with_param("site_notices"));

@@ -9,6 +9,7 @@ import { LogErrorDetails } from './LogErrorDetails'
 import { TokenBreakdown } from './TokenBreakdown'
 import { LogBillingDetails } from './LogBillingDetails'
 import { LogRequestDetails } from './LogRequestDetails'
+import { ConversationArchiveSection } from './ConversationArchiveSection'
 import type { LogRow } from './types'
 
 export function LogStatus({ row }: { row: Pick<LogRow, 'status' | 'is_error'> }) {
@@ -50,6 +51,7 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
       <LogPerformanceDetails row={row} />
       <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
       <LogBillingDetails row={row} status={row.status} />
+      <ConversationArchiveSection mode="portal" requestId={row.request_id} />
     </DetailBody>
   </Drawer>
 }

@@ -21,6 +21,7 @@ pub mod channel_try;
 pub mod channel_verify;
 mod cloud_probe;
 mod console_auth;
+pub mod conversations;
 mod core_source;
 pub mod dlq;
 pub mod egress;
@@ -525,6 +526,23 @@ fn ops_routes() -> ConsoleRouter {
         .route("/admin/monitor/logs", get(monitor::logs))
         .route("/admin/logs", get(logs::search))
         .route("/admin/logs/stat", get(logs::stat))
+        .route(
+            "/admin/logs/{request_id}/conversation",
+            get(conversations::admin_get),
+        )
+        .route("/admin/conversations", get(conversations::admin_list))
+        .route(
+            "/admin/conversations/stats",
+            get(conversations::admin_stats),
+        )
+        .route(
+            "/admin/conversations/cleanup",
+            post(conversations::admin_cleanup),
+        )
+        .route(
+            "/admin/conversations/{request_id}",
+            delete(conversations::admin_delete),
+        )
         .route("/admin/billing/refund", post(admin::refund_by_request))
         .route(
             "/admin/billing/record/{request_id}",
@@ -580,6 +598,15 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me/logs", get(portal::logs))
         .route("/api/me/logs/stat", get(portal::logs_stat))
         .route("/api/me/logs/series", get(portal::logs_series))
+        .route(
+            "/api/me/logs/{request_id}/conversation",
+            get(conversations::portal_get),
+        )
+        .route("/api/me/conversations", get(conversations::portal_list))
+        .route(
+            "/api/me/conversations/policy",
+            get(conversations::portal_policy),
+        )
         .route("/api/me/ledger", get(portal::ledger))
         .route("/api/me/orders", get(portal::orders))
         .route("/api/me/redeem", post(portal::redeem))

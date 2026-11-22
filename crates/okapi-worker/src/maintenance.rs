@@ -3,8 +3,9 @@
 use super::{
     RECONCILE_BATCH, RECONCILE_FULL_INTERVAL, RECONCILE_OVERLAP, SWEEP_INTERVAL,
     drop_expired_partitions, ensure_next_month_partitions, expire_balances, legacy_speech,
-    margin_breaker, nats_relay, notify, reconcile_and_notify, recover_cooled_keys,
-    subscriptions_tick, sweep_expired_reservations, transport_tick,
+    load_conversation_archive_policy, margin_breaker, nats_relay, notify,
+    prune_conversation_archives, reconcile_and_notify, recover_cooled_keys, subscriptions_tick,
+    sweep_expired_reservations, transport_tick,
 };
 use okapi_kernel::sched_redis::{MaintenanceLease, SchedulerRedis};
 use okapi_ledger::BalanceLedger;
@@ -26,6 +27,7 @@ pub(super) struct MaintenanceContext {
     pub(super) js: Option<JsSink>,
     pub(super) ch: Option<ChSink>,
     pub(super) reconcile: std::sync::Mutex<ReconcileClock>,
+    pub(super) last_archive_cleanup: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// 启动时 NATS JetStream 可能尚未就绪；与 [`ChSink`] 同口径，首次失败后按周期自动补建拓扑，
@@ -163,6 +165,7 @@ pub(super) enum MaintenanceJob {
     margin,
     balance_expiry,
     manual_queues,
+    conversation_archive,
 }
 
 impl MaintenanceJob {
@@ -178,6 +181,7 @@ impl MaintenanceJob {
             Self::margin => "margin",
             Self::balance_expiry => "balance_expiry",
             Self::manual_queues => "manual_queues",
+            Self::conversation_archive => "conversation_archive",
         }
     }
     /// `chsink` 已由 `FOR UPDATE SKIP LOCKED` 与 JetStream 持久消费者原生支持多副本并发，无需单主互斥。
@@ -287,6 +291,7 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
         js,
         ch,
         reconcile,
+        last_archive_cleanup,
     } = ctx;
     let ch = match ch {
         Some(sink) => sink.ready().await,
@@ -430,6 +435,43 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
                 }
                 Ok(_) => {}
                 Err(err) => tracing::error!(error = %err, "人工处理队列巡检失败"),
+            }
+        }
+        MaintenanceJob::conversation_archive => {
+            let policy = match load_conversation_archive_policy(pg).await {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::error!(error = %err, "读取对话存档保留策略失败");
+                    return;
+                }
+            };
+            if policy.retention_days == 0 {
+                return;
+            }
+            let min_gap = Duration::from_hours(u64::from(policy.cleanup_interval_hours));
+            let due = last_archive_cleanup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none_or(|prev| prev.elapsed() >= min_gap);
+            if !due {
+                return;
+            }
+            match prune_conversation_archives(pg, ch, chrono::Utc::now()).await {
+                Ok(report) => {
+                    *last_archive_cleanup
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(std::time::Instant::now());
+                    if report.pg_deleted > 0 || report.ch_deleted_requested {
+                        tracing::info!(
+                            pg_deleted = report.pg_deleted,
+                            ch_deleted_requested = report.ch_deleted_requested,
+                            retention_days = policy.retention_days,
+                            "对话存档定时清理已执行"
+                        );
+                    }
+                }
+                Err(err) => tracing::error!(error = %err, "对话存档定时清理失败"),
             }
         }
     }

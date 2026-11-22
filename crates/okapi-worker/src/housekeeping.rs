@@ -110,6 +110,31 @@ pub async fn drop_expired_partitions(
     Ok(okapi_store::history::prune(pg, now).await?)
 }
 
+/// 读取 `settings.conversation_archive` 策略（直接查库，确保管理员调整保留天数后立即生效）。
+pub async fn load_conversation_archive_policy(
+    pg: &PgPool,
+) -> anyhow::Result<okapi_kernel::policies::ConversationArchivePolicy> {
+    let raw: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = $1")
+            .bind(okapi_kernel::policies::CONVERSATION_ARCHIVE_SETTING)
+            .fetch_optional(pg)
+            .await?;
+    Ok(okapi_kernel::policies::ConversationArchivePolicy::from_setting(raw.as_ref()))
+}
+
+/// 按 `settings.conversation_archive.retention_days` 定时清理过期对话存档（0 = 永久保留）。
+pub async fn prune_conversation_archives(
+    pg: &PgPool,
+    ch: Option<&okapi_store::ChClient>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<okapi_store::conversation_archive::PruneReport> {
+    let policy = load_conversation_archive_policy(pg).await?;
+    Ok(
+        okapi_store::conversation_archive::prune(pg, ch, policy.retention_days, now)
+            .await?,
+    )
+}
+
 /// 冷却到期自动恢复 active（§3.4）：cooling(2)/rate_limited(3)/quota_exhausted(4)。
 /// banned(5)/invalid(6) 仅人工恢复。
 /// cooling 恢复保留连续失败计数（半开）：恢复后很快再失败才能逐轮翻倍退避，
