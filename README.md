@@ -62,7 +62,7 @@ Rust 单二进制 · 自带管理后台与用户门户 · OpenAI / Anthropic / G
   <tr>
     <td width="50%" valign="top">
       <img src="docs/screenshots/admin-channels.png" alt="渠道列表">
-      <p><b>渠道</b>：多家上游集中管理。测活、上游余额、订阅额度窗口、24 小时成功率与首字延迟、30 天花费都在一行里，每一格都能点进对应操作。</p>
+      <p><b>渠道</b>：多家上游集中管理，卡片 / 列表两种视图。订阅账号的 5 小时 / 7 天额度、key 冷却、上游余额、24 小时成功率与首字延迟、30 天花费一眼看全；常看的渠道可以置顶，每一格都能点进对应操作。</p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/screenshots/admin-pool-simulate.png" alt="调度池策略模拟">

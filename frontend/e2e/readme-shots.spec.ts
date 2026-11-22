@@ -471,8 +471,18 @@ test('admin dashboard', async ({ page }) => {
 
 test('channels', async ({ page }) => {
   await prepare(page)
+  // 卡片视图一屏四条：置顶订阅号（额度窗口）、有 key 冷却的 deepseek（余额）、正在出错的 qwen，再接正常的官方渠道
+  const pinned = [4, 7, 8]
+  await page.route((url) => url.pathname === '/admin/channels', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    const byId = (id: number) => CHANNELS.find((c) => c.id === id) as Json
+    const rows = [...pinned.map((id, i) => ({ ...byId(id), pinned: true, pinned_at: ago(600 + i) })), ...CHANNELS.filter((c) => !pinned.includes(Number(c.id)))]
+    return route.fulfill({ json: { data: rows, total: rows.length, enabled: rows.filter((c) => c.status === 1).length } })
+  })
   await page.goto('/admin/channels')
   await expect(page.locator('#main-content').getByRole('heading', { name: '渠道' })).toBeVisible()
+  await page.getByRole('button', { name: '卡片' }).click()
+  await expect(page.getByText('qwen-dashscope').first()).toBeVisible()
   await snap(page, 'admin-channels')
 })
 
@@ -563,3 +573,4 @@ test('audit log', async ({ page }) => {
   await expect(page.getByRole('row').filter({ hasText: 'channel.update' })).toBeVisible()
   await snap(page, 'admin-audit')
 })
+
