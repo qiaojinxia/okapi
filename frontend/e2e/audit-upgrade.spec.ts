@@ -115,6 +115,7 @@ test('审计增强：上下文展示、变更对比、删除快照、Worker 徽�
               created_at: '2026-11-22T09:40:00Z',
             },
           ],
+          total: 3,
           has_more: false,
           next_before: null,
         },
@@ -124,7 +125,7 @@ test('审计增强：上下文展示、变更对比、删除快照、Worker 徽�
   })
 
   await page.goto('/admin/audit')
-  await expect(page.getByText('已加载 3 条')).toBeVisible()
+  await expect(page.getByText('共 3 条', { exact: true })).toBeVisible()
   // Worker 徽标与变更摘要
   await expect(page.getByText('后台任务', { exact: false })).toBeVisible()
   await expect(page.getByText('变更：priority, name')).toBeVisible()
@@ -170,4 +171,92 @@ test('审计增强：上下文展示、变更对比、删除快照、Worker 徽�
 
   await page.getByRole('button', { name: '导出 JSON' }).click()
   await expect.poll(() => exports.some((u) => u.searchParams.get('format') === 'json')).toBe(true)
+})
+
+test('审计日志分页：页码 / 页宽进地址，按 offset 取数，换条件回第一页但保留页宽', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('okapi.key', 'audit-paging-fixture')
+    localStorage.setItem('okapi.lang', 'zh-CN')
+  })
+  const TOTAL = 23
+  const queries: URL[] = []
+  await page.route('**/*', (route) => {
+    const req = route.request()
+    const url = new URL(req.url())
+    const path = url.pathname
+    if (req.isNavigationRequest()) {
+      return route.fulfill({
+        path: fileURLToPath(new URL('../dist/index.html', import.meta.url)),
+        contentType: 'text/html',
+      })
+    }
+    if (!/^\/(api|admin|auth)\//.test(path)) return route.continue()
+    if (path === '/api/me') {
+      return route.fulfill({ json: { user_id: 1, username: 'root', role: 100, permissions: ['*'] } })
+    }
+    if (path === '/api/site') return route.fulfill({ json: { site_name: 'Okapi' } })
+    if (path === '/admin/audit/actions') return route.fulfill({ json: { data: ['channel.update'] } })
+    if (path === '/admin/audit') {
+      queries.push(url)
+      const limit = Number(url.searchParams.get('limit'))
+      const offset = Number(url.searchParams.get('offset'))
+      const total = url.searchParams.get('target') ? 1 : TOTAL
+      // id 倒序：第 n 条（0 起）的 id = TOTAL - n
+      const data = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => ({
+        id: TOTAL - offset - i,
+        actor: 'admin:1',
+        actor_info: { kind: 'admin', id: 1, label: 'root' },
+        action: 'channel.update',
+        target: `ch-${TOTAL - offset - i}`,
+        detail: { name: `ch-${TOTAL - offset - i}` },
+        ip: null,
+        user_agent: null,
+        trace_id: null,
+        actor_key_id: null,
+        created_at: '2026-11-22T09:00:00Z',
+      }))
+      return route.fulfill({ json: { data, total, has_more: offset + data.length < total, next_before: null } })
+    }
+    return route.fulfill({ json: { data: [] } })
+  })
+
+  await page.goto('/admin/audit')
+  const main = page.getByRole('main')
+  const pager = page.getByRole('navigation', { name: '分页' })
+  await expect(page.getByText('共 23 条', { exact: true })).toBeVisible()
+  await expect(pager.getByText('1–10 / 共 23')).toBeVisible()
+  await expect(main.getByRole('row').filter({ hasText: 'ch-23' })).toBeVisible()
+  expect(queries.at(-1)?.searchParams.get('offset')).toBe('0')
+  expect(queries.at(-1)?.searchParams.get('limit')).toBe('10')
+
+  // 翻到第 3 页：按 offset=20 取数，地址带 page=3
+  await pager.getByRole('button', { name: '3', exact: true }).click()
+  await expect(pager.getByText('21–23 / 共 23')).toBeVisible()
+  await expect(main.getByRole('row').filter({ hasText: 'ch-3' })).toBeVisible()
+  await expect(main.getByRole('row').filter({ hasText: 'ch-23' })).toHaveCount(0)
+  expect(queries.at(-1)?.searchParams.get('offset')).toBe('20')
+  await expect(page).toHaveURL(/[?&]page=3(&|$)/)
+
+  // 上一页
+  await pager.getByRole('button', { name: '上一页' }).click()
+  await expect(pager.getByText('11–20 / 共 23')).toBeVisible()
+  expect(queries.at(-1)?.searchParams.get('offset')).toBe('10')
+
+  // 换页宽到 20：对齐到新页宽（第 11 条落在第 1 页），地址带 limit=20
+  await pager.getByLabel('每页条数').selectOption('20')
+  await expect(pager.getByText('1–20 / 共 23')).toBeVisible()
+  await expect(page).toHaveURL(/[?&]limit=20(&|$)/)
+  expect(queries.at(-1)?.searchParams.get('limit')).toBe('20')
+
+  // 翻到第 2 页再换条件：回第一页，页宽保留
+  await pager.getByRole('button', { name: '2', exact: true }).click()
+  await expect(pager.getByText('21–23 / 共 23')).toBeVisible()
+  await page.locator('#au-target').fill('ch-5')
+  await page.getByRole('button', { name: '搜索', exact: true }).click()
+  await expect.poll(() => queries.at(-1)?.searchParams.get('target')).toBe('ch-5')
+  expect(queries.at(-1)?.searchParams.get('offset')).toBe('0')
+  expect(queries.at(-1)?.searchParams.get('limit')).toBe('20')
+  await expect(page).not.toHaveURL(/[?&]page=/)
+  await expect(page).toHaveURL(/[?&]limit=20(&|$)/)
+  await expect(page.getByText('共 1 条', { exact: true })).toBeVisible()
 })

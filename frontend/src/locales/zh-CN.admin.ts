@@ -458,7 +458,6 @@ export default {
   auditTime: '时间',
   auditDetail: '详情',
   auditHours: '近 {{n}} 小时',
-  auditLoaded: '已加载 {{n}} 条',
   auditEmptyHint: '该条件下没有记录。审计只记写操作与登录，只读浏览不会出现在这里。',
   auditActorAnon: '未登录 / 未知账号',
   auditKindAdmin: '管理员',

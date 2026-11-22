@@ -4,8 +4,8 @@
 //! 后台 Worker 自动动作以及 `/admin/*` 越权拒绝留痕。
 //!
 //! 过滤参数全部走 sqlx 绑定参数（PG 侧转义），`action` 按前缀匹配（`user.` 拿到全部
-//! 用户类动作），`ip` 支持精确地址或 CIDR 网段，翻页用 `before`（id 倒序游标）而非 offset——
-//! 审计表按月分区且只增，游标翻页在翻页期间新写入的行不会造成重叠。
+//! 用户类动作），`ip` 支持精确地址或 CIDR 网段。列表按 id 倒序分页：页面用 `limit` / `offset` 并带回
+//! 过滤后的 `total`（画页码）；`before`（id 游标）仍可用，翻页期间新写入的行不会造成重叠。
 
 use super::query::Query;
 use axum::Json;
@@ -55,6 +55,9 @@ pub struct AuditQuery {
     pub before: Option<i64>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// 页码分页：跳过前 N 条（与 `before` 可叠加，页面只用这个）。
+    #[serde(default)]
+    pub offset: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -139,16 +142,10 @@ fn normalize_filters(q: &AuditQuery) -> Result<NormalizedFilters, AppError> {
     })
 }
 
-async fn fetch_audit_rows(
-    state: &AppState,
-    f: &NormalizedFilters,
-    limit: i64,
-) -> Result<Vec<AuditDbRow>, AppError> {
-    let rows = sqlx::query_as::<_, AuditDbRow>(
+/// 列表、计数与导出共用的过滤条件（$1–$10，绑定顺序见 [`bind_filters`]）。
+macro_rules! audit_where {
+    () => {
         r"
-        SELECT id, actor, action, target, detail, host(ip) AS ip,
-               user_agent, trace_id, actor_key_id, created_at
-        FROM audit_logs
         WHERE created_at >= $1
           AND ($2::timestamptz IS NULL OR created_at < $2)
           AND ($3::text IS NULL OR actor = $3)
@@ -167,25 +164,64 @@ async fn fetch_audit_rows(
               OR COALESCE(user_agent, '') ILIKE '%' || $10 || '%' ESCAPE '\'
               OR COALESCE(detail::text, '') ILIKE '%' || $10 || '%' ESCAPE '\'
           )
+        "
+    };
+}
+
+fn bind_filters<'q, O>(
+    query: sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>,
+    f: &'q NormalizedFilters,
+) -> sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments> {
+    query
+        .bind(f.from)
+        .bind(f.to)
+        .bind(&f.actor)
+        .bind(&f.action)
+        .bind(&f.target)
+        .bind(f.before)
+        .bind(&f.ip)
+        .bind(&f.trace_id)
+        .bind(f.actor_key_id)
+        .bind(&f.keyword)
+}
+
+async fn fetch_audit_rows(
+    state: &AppState,
+    f: &NormalizedFilters,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AuditDbRow>, AppError> {
+    let query = sqlx::query_as::<_, AuditDbRow>(concat!(
+        r"
+        SELECT id, actor, action, target, detail, host(ip) AS ip,
+               user_agent, trace_id, actor_key_id, created_at
+        FROM audit_logs",
+        audit_where!(),
+        r"
         ORDER BY id DESC
-        LIMIT $11
+        LIMIT $11 OFFSET $12
         ",
-    )
-    .bind(f.from)
-    .bind(f.to)
-    .bind(&f.actor)
-    .bind(&f.action)
-    .bind(&f.target)
-    .bind(f.before)
-    .bind(&f.ip)
-    .bind(&f.trace_id)
-    .bind(f.actor_key_id)
-    .bind(&f.keyword)
-    .bind(limit)
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
+    ));
+    let rows = bind_filters(query, f)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
     Ok(rows)
+}
+
+/// 过滤后的总条数（页码用）。审计表按月分区、按保留期清理，量级在万条以内。
+async fn count_audit_rows(state: &AppState, f: &NormalizedFilters) -> Result<i64, AppError> {
+    let query = sqlx::query_as::<_, (i64,)>(concat!(
+        "SELECT COUNT(*)::bigint FROM audit_logs",
+        audit_where!()
+    ));
+    let (total,) = bind_filters(query, f)
+        .fetch_one(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    Ok(total)
 }
 
 /// 操作者标签回填：`admin:42` → 用户名；`mcp:3` → key 名 + 属主；`user:7` → 用户名；
@@ -279,24 +315,33 @@ fn serialize_row(r: &AuditDbRow, labels: &HashMap<String, Value>) -> Value {
     })
 }
 
-/// GET /admin/audit：审计检索（倒序、游标翻页、多维过滤）。
+/// GET /admin/audit：审计检索（倒序、页码 / 游标翻页、多维过滤），带过滤后的 `total`。
 pub async fn list(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::AUDIT_READ).await?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let limit = q
+        .limit
+        .unwrap_or(50)
+        .clamp(1, okapi_store::listing::MAX_PAGE);
+    let offset = q.offset.unwrap_or(0).max(0);
     let filters = normalize_filters(&q)?;
-    let rows = fetch_audit_rows(&state, &filters, limit).await?;
+    let (rows, total) = tokio::try_join!(
+        fetch_audit_rows(&state, &filters, limit, offset),
+        count_audit_rows(&state, &filters),
+    )?;
 
     let actors: Vec<String> = rows.iter().map(|r| r.actor.clone()).collect();
     let labels = resolve_actors(&state, &actors).await?;
-    let has_more = i64::try_from(rows.len()).unwrap_or(0) == limit;
+    let shown = i64::try_from(rows.len()).unwrap_or(0);
+    let has_more = offset.saturating_add(shown) < total;
     let next_before = rows.last().map(|r| r.id);
     let data: Vec<Value> = rows.iter().map(|r| serialize_row(r, &labels)).collect();
     Ok(Json(json!({
         "data": data,
+        "total": total,
         "has_more": has_more,
         "next_before": if has_more { next_before } else { None },
     })))
@@ -332,25 +377,27 @@ fn render_csv(rows: &[AuditDbRow], labels: &HashMap<String, Value>) -> String {
             .and_then(|v| v.get("label"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let ip = r
-            .ip
-            .as_deref()
-            .or_else(|| r.detail.as_ref().and_then(|d| d.get("ip")).and_then(Value::as_str))
-            .unwrap_or("");
+        let ip =
+            r.ip.as_deref()
+                .or_else(|| {
+                    r.detail
+                        .as_ref()
+                        .and_then(|d| d.get("ip"))
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("");
         let ua = r
             .user_agent
             .as_deref()
-            .or_else(|| r.detail.as_ref().and_then(|d| d.get("ua")).and_then(Value::as_str))
+            .or_else(|| {
+                r.detail
+                    .as_ref()
+                    .and_then(|d| d.get("ua"))
+                    .and_then(Value::as_str)
+            })
             .unwrap_or("");
-        let key_id = r
-            .actor_key_id
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        let detail_json = r
-            .detail
-            .as_ref()
-            .map(Value::to_string)
-            .unwrap_or_default();
+        let key_id = r.actor_key_id.map(|id| id.to_string()).unwrap_or_default();
+        let detail_json = r.detail.as_ref().map(Value::to_string).unwrap_or_default();
         let _ = writeln!(
             out,
             "{},{},{},{},{},{},{},{},{},{},{}",
@@ -390,7 +437,7 @@ pub async fn export(
     }
     let limit = q.query.limit.unwrap_or(2000).clamp(1, 5000);
     let filters = normalize_filters(&q.query)?;
-    let mut rows = fetch_audit_rows(&state, &filters, limit + 1).await?;
+    let mut rows = fetch_audit_rows(&state, &filters, limit + 1, 0).await?;
     let truncated = i64::try_from(rows.len()).unwrap_or(0) > limit;
     if truncated {
         rows.truncate(usize::try_from(limit).unwrap_or(2000));
@@ -556,7 +603,10 @@ pub async fn record_login(
         "user.login_failed"
     };
     let mut meta = super::audit_fallback::current_meta(None);
-    if let Some(parsed) = ip.as_deref().and_then(|s| s.parse::<std::net::IpAddr>().ok()) {
+    if let Some(parsed) = ip
+        .as_deref()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+    {
         meta.ip = Some(parsed);
     }
     if meta.user_agent.is_none() {
@@ -604,11 +654,10 @@ pub async fn my_logins(
         .into_iter()
         .map(|r| {
             let detail = r.detail.unwrap_or(Value::Null);
-            let ip = r
-                .ip
-                .map(Value::String)
-                .or_else(|| detail.get("ip").cloned())
-                .unwrap_or(Value::Null);
+            let ip =
+                r.ip.map(Value::String)
+                    .or_else(|| detail.get("ip").cloned())
+                    .unwrap_or(Value::Null);
             let ua = r
                 .user_agent
                 .map(Value::String)

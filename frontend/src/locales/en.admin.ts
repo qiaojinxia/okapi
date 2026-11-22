@@ -458,7 +458,6 @@ export default {
   auditTime: 'Time',
   auditDetail: 'Detail',
   auditHours: 'Last {{n}}h',
-  auditLoaded: '{{n}} loaded',
   auditEmptyHint: 'Nothing matches. Only writes and logins are audited; read-only browsing never shows up here.',
   auditActorAnon: 'Not signed in / unknown account',
   auditKindAdmin: 'Admin',

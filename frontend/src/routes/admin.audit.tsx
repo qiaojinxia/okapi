@@ -1,10 +1,11 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { AuditPage } from '@/features/audit/AuditPage'
+import { type PageSearch, pageSearch } from '@/hooks/use-pagination'
 import { posInt, text } from '@/lib/search-params'
 
 /// 审计页过滤条件在 URL：用户抽屉 / 渠道行可以 `<Link search={{ target }}>` 深链过来，
-/// 落地即已过滤；一段"谁改过这条渠道"的记录本身就该是一个可分享的地址。
-export interface AuditSearch {
+/// 落地即已过滤；一段"谁改过这条渠道"的记录本身就该是一个可分享的地址。页码 / 页宽同样在地址里。
+export interface AuditSearch extends PageSearch {
   actor?: string
   action?: string
   target?: string
@@ -19,6 +20,7 @@ export interface AuditSearch {
 export const Route = createFileRoute('/admin/audit')({
   staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
+    ...pageSearch(search),
     actor: text(search.actor),
     action: text(search.action),
     target: text(search.target),

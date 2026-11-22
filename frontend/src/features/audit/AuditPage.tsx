@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { Download, Filter, RotateCcw } from 'lucide-react'
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
+import { Pagination } from '@/components/ui/pagination'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { RowExpander } from '@/components/ui/row-expander'
 import { Segmented } from '@/components/ui/segmented'
@@ -17,7 +18,8 @@ import { Select } from '@/components/ui/select'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { DEFAULT_PAGE_SIZE } from '@/hooks/use-pagination'
+import { type Paged, usePagedQuery } from '@/hooks/use-paged-query'
+import { PAGE_SIZES } from '@/hooks/use-pagination'
 import { ApiError, apiFetch, getKey } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -25,7 +27,6 @@ import { qk } from '@/lib/query-keys'
 const routeApi = getRouteApi('/admin/audit')
 const DEFAULT_HOURS = 168
 const HOURS = [24, 168, 720, 2160] as const
-const PAGE = DEFAULT_PAGE_SIZE
 
 const BUILTIN_ACTION_PREFIXES = [
   'channel.',
@@ -66,11 +67,8 @@ interface AuditRow {
   created_at: string
 }
 
-interface AuditResp {
-  data: AuditRow[]
-  has_more: boolean
-  next_before: number | null
-}
+/// 一页审计记录；`total` 是过滤后的总条数（画页码）。
+type AuditResp = Paged<AuditRow>
 
 interface Draft {
   actor: string
@@ -144,11 +142,6 @@ function buildFilterParams(s: AuditSearch, extra?: Record<string, string>): stri
   return p.toString()
 }
 
-function toParams(s: AuditSearch, before?: number): string {
-  const extra: Record<string, string> = { limit: String(PAGE) }
-  if (before !== undefined) extra.before = String(before)
-  return buildFilterParams(s, extra)
-}
 
 /// 动作着色：删除 / 丢弃 / 停用 / 拒绝 / 封禁为高危红，失败 / 熔断 / 复制 / 退款为警示黄。
 function actionTone(action: string): 'destructive' | 'warning' | 'muted' | 'default' {
@@ -202,13 +195,13 @@ export function AuditPage() {
   const [selected, setSelected] = useState<number | null>(null)
   const [exporting, setExporting] = useState<'csv' | 'json' | null>(null)
   const [exportNotice, setExportNotice] = useState<{ kind: 'info' | 'error'; text: string } | null>(null)
-  const detailId = useId(), params = toParams(search)
+  const detailId = useId(), params = buildFilterParams(search)
   useEffect(() => setDraft(fromSearch(search)), [search])
-  useEffect(() => setSelected(null), [params])
 
+  // 过滤条件整体替换 search：页码随之清掉（回第一页），页宽保留
   const submit = (d: Draft) => {
     setExportNotice(null)
-    void navigate({ search: toSearch(d) })
+    void navigate({ search: { ...toSearch(d), limit: search.limit } })
   }
 
   const resetAll = () => {
@@ -232,14 +225,15 @@ export function AuditPage() {
     queryFn: () => apiFetch<{ data: string[] }>('/admin/audit/actions'),
     staleTime: 300_000,
   })
-  const q = useInfiniteQuery({
-    queryKey: qk.audit(params),
-    queryFn: ({ pageParam }) =>
-      apiFetch<AuditResp>(`/admin/audit?${toParams(search, pageParam as number | undefined)}`),
-    initialPageParam: undefined as number | undefined,
-    getNextPageParam: (last) => (last.has_more ? (last.next_before ?? undefined) : undefined),
+  // 服务端分页：页码 / 页宽在地址里，翻页时保留上一页，表格不闪成骨架屏
+  const { query: q, pager, rows } = usePagedQuery({
+    queryKey: (page) => qk.audit(buildFilterParams(search, { limit: String(page.limit), offset: String(page.offset) })),
+    queryFn: (page) =>
+      apiFetch<AuditResp>(`/admin/audit?${buildFilterParams(search, { limit: String(page.limit), offset: String(page.offset) })}`),
+    pagination: { pageSizes: [...PAGE_SIZES, 200] },
   })
-  const rows = q.data?.pages.flatMap((p) => p.data) ?? []
+  // 换条件或翻页后，原先展开的那条不在当前页了，详情跟着收起
+  useEffect(() => setSelected(null), [params, pager.offset, pager.limit])
   const selectedRow = q.isError ? null : rows.find((row) => row.id === selected) ?? null
 
   const actionOptions = useMemo(() => {
@@ -353,7 +347,7 @@ export function AuditPage() {
       <PageHeader
         title={t('admin:auditTitle')}
         description={t('admin:auditDesc')}
-        meta={q.data && t('admin:auditLoaded', { n: rows.length })}
+        meta={q.data && t('common:totalCount', { n: q.data.total })}
         action={
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -555,17 +549,7 @@ export function AuditPage() {
         </Table>
       )}
 
-      {q.hasNextPage && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="self-center"
-          disabled={q.isFetchingNextPage}
-          onClick={() => void q.fetchNextPage()}
-        >
-          {t('common:loadMore')}
-        </Button>
-      )}
+      <Pagination {...pager} total={q.isError ? undefined : q.data?.total} />
       <AuditDetail
         row={selectedRow}
         id={detailId}

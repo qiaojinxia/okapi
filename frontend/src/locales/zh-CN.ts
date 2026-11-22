@@ -5,7 +5,6 @@ export default {
     all: '全部',
     count: '次数',
     copy: '复制',
-    loadMore: '加载更多',
     expandRow: '展开 {{name}} 的明细',
     collapseRow: '收起 {{name}} 的明细',
     table: '表格',

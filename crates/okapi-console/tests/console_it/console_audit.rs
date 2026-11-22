@@ -197,6 +197,70 @@ async fn admin_writes_are_searchable() {
     assert_eq!(status, 200);
     assert_eq!(empty["data"], json!([]));
     assert_eq!(empty["has_more"], false);
+    assert_eq!(empty["total"], 0);
+}
+
+/// 页码分页：`limit` + `offset` 按 id 倒序切页，`total` 是过滤后的总数，页与页之间不重不漏。
+#[tokio::test]
+async fn audit_pages_by_offset_with_a_total() {
+    let env = setup().await;
+    for i in 0..5 {
+        let (status, _) = post(
+            &env,
+            "/admin/pools",
+            &env.super_token,
+            json!({"pool_code": format!("au-pg-{i}-{}", env.suffix), "routing_strategy": "least_latency"}),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let (_, probe) = get(
+        &env,
+        "/admin/audit?action=channel.upsert_pool&limit=200",
+        &env.super_token,
+    )
+    .await;
+    let actor = probe["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["target"] == format!("au-pg-0-{}", env.suffix))
+        .map(|r| r["actor"].as_str().unwrap().to_owned())
+        .expect("本轮写入可查");
+    let page = |offset: i64| {
+        let env = &env;
+        let actor = actor.clone();
+        async move {
+            let (status, body) = get(
+                env,
+                &format!(
+                    "/admin/audit?actor={actor}&action=channel.upsert_pool&limit=2&offset={offset}"
+                ),
+                &env.super_token,
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            body
+        }
+    };
+    let mut ids = Vec::new();
+    for (offset, len, more) in [(0, 2, true), (2, 2, true), (4, 1, false)] {
+        let body = page(offset).await;
+        assert_eq!(body["total"], 5, "offset={offset}: {body}");
+        assert_eq!(body["has_more"], more, "offset={offset}");
+        let rows = body["data"].as_array().unwrap();
+        assert_eq!(rows.len(), len, "offset={offset}");
+        ids.extend(rows.iter().map(|r| r["id"].as_i64().unwrap()));
+    }
+    let mut sorted = ids.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    sorted.dedup();
+    assert_eq!(ids, sorted, "三页拼起来严格倒序、不重复");
+    assert_eq!(ids.len(), 5);
+    let past = page(10).await;
+    assert_eq!(past["data"], json!([]));
+    assert_eq!(past["total"], 5);
+    assert_eq!(past["has_more"], false);
 }
 
 /// 邮箱最长可到 254、失败登录更是任意长的串，而审计的对象列只有 128：此前原样写会超宽，整条审计丢失
@@ -497,8 +561,9 @@ async fn audit_captures_context_diffs_and_snapshots() {
         "least_latency"
     );
 
-    // 设置两次写入 → 第二次带 before / after 对比
-    let setting_key = format!("audit_diff_key_{}", env.suffix);
+    // 设置两次写入 → 第二次带 before / after 对比。键名不能含 key / token / secret 这类词：
+    // 那会被当成密钥类设置（`is_secret_key`），审计只记 redacted、不记前后值
+    let setting_key = format!("audit_diff_probe_{}", env.suffix);
     for val in ["v1", "v2"] {
         let (status, _) = post(
             &env,
@@ -554,10 +619,7 @@ async fn audit_records_denials_and_supports_export() {
         !denied_rows["data"].as_array().unwrap().is_empty(),
         "越权 403 应落 auth.permission_denied：{denied_rows}"
     );
-    assert_eq!(
-        denied_rows["data"][0]["detail"]["permission"],
-        "audit.read"
-    );
+    assert_eq!(denied_rows["data"][0]["detail"]["permission"], "audit.read");
 
     // CSV 与 JSON 导出 + 自审 audit.export
     let csv_resp = client

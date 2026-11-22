@@ -781,7 +781,7 @@ for (const variant of [
   }
 })
 
-test('审计页：空态、条件进 URL、详情抽屉、加载更多带 before 游标', async ({ page }) => {
+test('审计页：空态、条件进 URL、详情抽屉、翻页按 offset 取数', async ({ page }) => {
   await prepare(page)
   const queries: URL[] = []
   const row = (id: number, extra: Record<string, unknown> = {}) => ({
@@ -794,22 +794,20 @@ test('审计页：空态、条件进 URL、详情抽屉、加载更多带 before
     ip: '203.0.113.7',
     created_at: '2026-09-08T12:00:00Z',
   })
-  let page1 = { data: [row(20), row(19, { extra: 'second' })], has_more: true, next_before: 19 }
+  let page1 = { data: [row(20), row(19, { extra: 'second' })], total: 12 }
   await page.route('**/admin/audit/actions', (route) =>
     route.fulfill({ json: { data: ['channel.delete', 'user.login'] } }),
   )
   await page.route('**/admin/audit?*', (route) => {
     queries.push(new URL(route.request().url()))
-    const before = new URL(route.request().url()).searchParams.get('before')
-    if (before === '19') {
-      return route.fulfill({ json: { data: [row(18)], has_more: false, next_before: null } })
-    }
+    const offset = new URL(route.request().url()).searchParams.get('offset')
+    if (offset === '10') return route.fulfill({ json: { data: [row(18)], total: 12 } })
     return route.fulfill({ json: page1 })
   })
 
   await page.goto('/admin/audit')
   await expect(page.locator('#main-content').getByRole('heading', { name: '审计日志' })).toBeVisible()
-  await expect(page.getByText('已加载 2 条')).toBeVisible()
+  await expect(page.getByText('共 12 条', { exact: true })).toBeVisible()
   await expect(page.getByText('root').first()).toBeVisible()
   await expect(page.getByText('管理员', { exact: false }).first()).toBeVisible()
   await expect(page.getByText(/reason=dup/).first()).toBeVisible()
@@ -839,24 +837,29 @@ test('审计页：空态、条件进 URL、详情抽屉、加载更多带 before
   await expect(page).toHaveURL(/hours=24/)
   await expect.poll(() => queries.at(-1)?.searchParams.get('hours')).toBe('24')
 
-  page1 = { data: [], has_more: false, next_before: null }
+  page1 = { data: [], total: 0 }
   await page.locator('#au-target').fill('nobody')
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await expect(page).toHaveURL(/target=nobody/)
   await expect(page.getByText('该条件下没有记录。审计只记写操作与登录，只读浏览不会出现在这里。')).toBeVisible()
 
-  page1 = { data: [row(20), row(19, { extra: 'second' })], has_more: true, next_before: 19 }
+  page1 = { data: [row(20), row(19, { extra: 'second' })], total: 12 }
   await page.goto('/admin/audit')
-  await expect(page.getByText('已加载 2 条')).toBeVisible()
-  await page.getByRole('button', { name: '加载更多' }).click()
-  await expect.poll(() => queries.some((u) => u.searchParams.get('before') === '19')).toBe(true)
-  await expect(page.getByText('已加载 3 条')).toBeVisible()
+  await expect(page.getByText('共 12 条', { exact: true })).toBeVisible()
+  await page.getByRole('navigation', { name: '分页' }).getByRole('button', { name: '下一页' }).click()
+  await expect.poll(() => queries.at(-1)?.searchParams.get('offset')).toBe('10')
+  await expect(page).toHaveURL(/[?&]page=2(&|$)/)
+  await expect(page.getByRole('table', { name: '审计日志', exact: true }).locator('tbody tr')).toHaveCount(1)
   await page.getByRole('button', { name: '展开 18 的明细', exact: true }).click()
   await expect(detail).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(detail).toHaveCount(0)
 
-  await page.route('**/admin/audit?*', (route) => route.fulfill(apiError(500, 'internal_error')))
+  // 地址此时带 ?page=2：页面导航本身也匹配这个模式，撤掉上面的桩，导航交给 prepare 的通配桩
+  await page.unroute('**/admin/audit?*')
+  await page.route('**/admin/audit?*', (route) =>
+    route.request().isNavigationRequest() ? route.fallback() : route.fulfill(apiError(500, 'internal_error')),
+  )
   await page.reload()
   await expect(page.getByRole('alert')).toContainText('服务内部错误')
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
@@ -882,11 +885,11 @@ for (const width of [390, 1440]) test(`审计抽屉：${width}px 完整字段、
       }, {
         id: 30, actor: 'anon', actor_info: null, action: 'user.login_failed', target: null,
         detail: null, ip: null, created_at: '2026-09-08T11:00:00Z',
-      }], has_more: false, next_before: null,
+      }], total: 2,
     } })
   })
   await page.goto('/admin/audit?actor=admin%3A1')
-  await expect(page.getByText('已加载 2 条')).toBeVisible()
+  await expect(page.getByText('共 2 条', { exact: true })).toBeVisible()
   await page.locator('#au-target').fill('channel')
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await expect(page).toHaveURL(/target=channel/)
