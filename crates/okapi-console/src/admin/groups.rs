@@ -66,6 +66,7 @@ pub async fn upsert_group(
         .filter(|s| !s.is_empty())
         .unwrap_or(okapi_store::channels::DEFAULT_POOL);
     ensure_pool_exists(&state, pool_code).await?;
+    let prev = super::super::audit_snapshots::group_snapshot(&state.pg, group_code).await;
     okapi_store::admin::upsert_price_group(
         &state.pg,
         okapi_store::admin::PriceGroupInput {
@@ -87,8 +88,22 @@ pub async fn upsert_group(
         &actor,
         "pricing.upsert_group",
         group_code,
-        json!({ "group_ratio": req.group_ratio, "pool_code": pool_code, "self_select": req.self_select,
-                "rpm_limit": per_minute, "rph_limit": per_hour }),
+        json!({
+            "group_ratio": req.group_ratio,
+            "pool_code": pool_code,
+            "self_select": req.self_select,
+            "rpm_limit": per_minute,
+            "rph_limit": per_hour,
+            "before": prev,
+            "after": {
+                "group_ratio": req.group_ratio,
+                "description": req.description,
+                "pool_code": pool_code,
+                "self_select": req.self_select,
+                "rpm_limit": per_minute,
+                "rph_limit": per_hour,
+            },
+        }),
     )
     .await;
     // 池、限额、自选即时生效；新分组与倍率要等发布进价簿，告诉前端提示去发布

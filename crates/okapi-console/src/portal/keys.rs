@@ -516,6 +516,8 @@ pub async fn patch_key(
         max_concurrency: req.max_concurrency,
         ..Default::default()
     };
+    let prev =
+        super::super::audit_snapshots::api_key_snapshot(&state.pg, id, Some(key.user_id)).await;
     let touched =
         okapi_store::admin::patch_api_key(&state.pg, id, Some(key.user_id), &patch).await?;
     let Some(touched) = touched else {
@@ -523,7 +525,32 @@ pub async fn patch_key(
     };
     // 先落库后失效：并发回源读到的必是新值
     state.sched.auth_del(&touched.key_hash).await;
+    audit_self_key_update(&state, &key, id, prev.as_ref(), &patch).await;
     Ok(Json(json!({ "ok": true, "key_id": id })))
+}
+
+async fn audit_self_key_update(
+    state: &AppState,
+    key: &okapi_store::auth::AuthedKey,
+    id: i64,
+    prev: Option<&Value>,
+    patch: &okapi_store::admin::ApiKeyPatch,
+) {
+    let changed = super::super::audit_snapshots::api_key_patch_changes(patch);
+    let (before, after) = super::super::audit_snapshots::diff_fields(prev, &changed);
+    super::super::audit::record_event(
+        state,
+        &format!("user:{}", key.user_id),
+        "apikey.update",
+        &id.to_string(),
+        json!({
+            "key_prefix": prev.and_then(|v| v.get("key_prefix")),
+            "before": before,
+            "after": after,
+        }),
+        Some(key.key_id),
+    )
+    .await;
 }
 
 /// POST /api/me/keys/{id}/rotate：一键原子轮换密钥（保留全部原配置/限额/白名单，旧明文立废）。
@@ -578,17 +605,15 @@ pub async fn rotate_key(
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     };
     state.sched.auth_del(&old_hash).await;
-    if let Err(error) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::super::audit::record_event(
+        &state,
         &format!("user:{}", key.user_id),
         "apikey.rotate",
         &id.to_string(),
         json!({ "key_prefix": new_prefix }),
+        Some(key.key_id),
     )
-    .await
-    {
-        tracing::error!(%error, "apikey rotate audit write failed");
-    }
+    .await;
     let mut response = Json(json!({
         "key_id": id,
         "api_key": token,
@@ -636,11 +661,32 @@ pub async fn delete_key(
             "key_limits_session_required",
         ));
     }
+    let snapshot: Option<(Option<String>, String)> = sqlx::query_as(
+        "SELECT name, key_prefix FROM api_keys WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(key.user_id)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
     let touched = okapi_store::admin::soft_delete_api_key(&state.pg, id, Some(key.user_id)).await?;
     let Some(touched) = touched else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     };
     state.sched.auth_del(&touched.key_hash).await;
+    super::super::audit::record_event(
+        &state,
+        &format!("user:{}", key.user_id),
+        "apikey.delete",
+        &id.to_string(),
+        json!({
+            "user_id": key.user_id,
+            "name": snapshot.as_ref().and_then(|(name, _)| name.as_deref()),
+            "key_prefix": snapshot.as_ref().map(|(_, prefix)| prefix.as_str()),
+        }),
+        Some(key.key_id),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "key_id": id })))
 }
 

@@ -16,7 +16,7 @@ use okapi_providers::custom_pass::{PassRequest, PassResponse};
 use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const STATE_TTL_SECS: i64 = 600;
 
@@ -220,6 +220,19 @@ pub async fn callback(
                 .find_map(|v| v.strip_prefix(&cookie_name))
         });
     if bound != Some(q.state.as_str()) || !state.sched.oauth_state_take(&q.state).await {
+        super::audit::record_event(
+            &state,
+            "anon",
+            "user.login_failed",
+            &format!("oauth:{code}"),
+            json!({
+                "method": "oauth",
+                "provider": code,
+                "reason": "oauth_state_invalid",
+            }),
+            None,
+        )
+        .await;
         return Err(AppError::unauthorized("oauth_state_invalid"));
     }
     let provider = load_provider(&state, &code).await?;
@@ -288,6 +301,8 @@ pub async fn callback(
 
     // web session（含会话数上限裁剪，§11.37）+ 回前端（?oauth=done 触发兑 key）
     let ip = okapi_kernel::clients::detect_client_ip(&headers);
+    audit_oauth_login(&state, user_id, &provider.code, &subject, &display, ip.as_deref(), &headers)
+        .await;
     let sid = super::auth_web::open_web_session(&state, user_id, ip.as_deref(), &headers).await;
     let mut resp = (
         StatusCode::FOUND,
@@ -298,6 +313,38 @@ pub async fn callback(
         resp.headers_mut().insert(header::SET_COOKIE, value);
     }
     Ok(resp)
+}
+
+async fn audit_oauth_login(
+    state: &AppState,
+    user_id: i64,
+    provider: &str,
+    subject: &str,
+    display: &str,
+    ip: Option<&str>,
+    headers: &HeaderMap,
+) {
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(200).collect::<String>());
+    super::audit::record_event(
+        state,
+        &format!("user:{user_id}"),
+        "user.login",
+        &format!("oauth:{provider}:{subject}"),
+        json!({
+            "method": "oauth",
+            "provider": provider,
+            "subject": subject,
+            "display": display,
+            "ip": ip,
+            "ua": ua,
+            "reason": Value::Null,
+        }),
+        None,
+    )
+    .await;
 }
 
 /// 经 PassUpstream 请求并解析 JSON（token/userinfo 共用）。

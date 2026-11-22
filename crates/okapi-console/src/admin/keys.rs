@@ -139,24 +139,25 @@ pub async fn patch_api_key(
             None => None,
         },
     };
+    let prev = super::super::audit_snapshots::api_key_snapshot(&state.pg, id, None).await;
+    let changed = super::super::audit_snapshots::api_key_patch_changes(&patch);
     let touched = okapi_store::admin::patch_api_key(&state.pg, id, None, &patch).await?;
     let Some(touched) = touched else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     };
     state.sched.auth_del(&touched.key_hash).await;
+    let (before, after) = super::super::audit_snapshots::diff_fields(prev.as_ref(), &changed);
     audit(
         &state,
         &actor,
         "apikey.update",
         &id.to_string(),
         json!({
-            "user_id": touched.user_id, "status": req.status,
-            "group_override": req.group_override, "pool_override": pool_override,
-            "rpm_limit": req.rpm_limit, "tpm_limit": req.tpm_limit, "rpd_limit": req.rpd_limit,
-            "daily_token_limit": req.daily_token_limit,
-            "daily_quota_micro": req.daily_quota_micro,
-            "monthly_quota_micro": req.monthly_quota_micro,
-            "max_concurrency": req.max_concurrency, "expires_at": req.expires_at,
+            "user_id": touched.user_id,
+            "name": prev.as_ref().and_then(|v| v.get("name")),
+            "key_prefix": prev.as_ref().and_then(|v| v.get("key_prefix")),
+            "before": before,
+            "after": after,
         }),
     )
     .await;
@@ -170,6 +171,7 @@ pub async fn delete_api_key(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_MANAGE).await?;
+    let prev = super::super::audit_snapshots::api_key_snapshot(&state.pg, id, None).await;
     let touched = okapi_store::admin::soft_delete_api_key(&state.pg, id, None).await?;
     let Some(touched) = touched else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
@@ -180,7 +182,11 @@ pub async fn delete_api_key(
         &actor,
         "apikey.delete",
         &id.to_string(),
-        json!({ "user_id": touched.user_id }),
+        json!({
+            "user_id": touched.user_id,
+            "name": prev.as_ref().and_then(|v| v.get("name")),
+            "key_prefix": prev.as_ref().and_then(|v| v.get("key_prefix")),
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true, "user_id": touched.user_id })))

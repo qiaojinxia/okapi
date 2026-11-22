@@ -391,6 +391,7 @@ pub async fn set_channel_status(
         return Err(AppError::bad_request());
     }
     ensure_channel_owner(&state, id, &actor, scope).await?;
+    let prev = super::super::audit_snapshots::channel_snapshot(&state.pg, id).await;
     let hit = okapi_store::admin::set_channel_status(&state.pg, id, req.status).await?;
     if !hit {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
@@ -401,7 +402,12 @@ pub async fn set_channel_status(
         &actor,
         "channel.set_status",
         &id.to_string(),
-        json!({ "status": req.status }),
+        json!({
+            "name": prev.as_ref().and_then(|v| v.get("name")),
+            "status": req.status,
+            "before": { "status": prev.as_ref().and_then(|v| v.get("status")) },
+            "after": { "status": req.status },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -457,6 +463,7 @@ pub async fn set_channel_pools(
     ensure_channel_owner(&state, id, &actor, scope).await?;
     ensure_pool_scope(scope)?;
     let members = normalize_members(&state, req.pools).await?;
+    let prev_pools = super::super::audit_snapshots::channel_pools_snapshot(&state.pg, id).await;
     okapi_store::admin::set_channel_pools(&state.pg, id, &members).await?;
     state.invalidate_routing_caches();
     audit(
@@ -464,7 +471,11 @@ pub async fn set_channel_pools(
         &actor,
         "channel.set_pools",
         &id.to_string(),
-        json!({ "pools": members }),
+        json!({
+            "pools": members,
+            "before": { "pools": prev_pools },
+            "after": { "pools": members },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true, "orphan": members.is_empty() })))
@@ -702,6 +713,7 @@ pub async fn update_channel(
         .as_deref()
         .map(|name| super::super::identifiers::ensure_display_name("name", name, 128))
         .transpose()?;
+    let prev = super::super::audit_snapshots::channel_snapshot(&state.pg, id).await;
     let patch = okapi_store::admin::ChannelPatch {
         name,
         provider: req.provider.as_deref(),
@@ -718,20 +730,84 @@ pub async fn update_channel(
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
     state.invalidate_routing_caches();
-    audit(
+    audit_channel_update(
         &state,
         &actor,
-        "channel.update",
-        &id.to_string(),
-        json!({
-            "name": name, "provider": req.provider, "api_base": req.api_base,
-            "models": req.models, "priority": req.priority,
-            "trust_upstream_usage": req.trust_upstream_usage,
-            "cost_milli": req.cost_milli,
-        }),
+        id,
+        prev.as_ref(),
+        name,
+        &req,
+        models.as_ref(),
+        model_mapping.as_ref(),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn audit_channel_update(
+    state: &AppState,
+    actor: &okapi_store::AuthedKey,
+    id: i64,
+    prev: Option<&Value>,
+    name: Option<&str>,
+    req: &PatchChannelReq,
+    models: Option<&Value>,
+    model_mapping: Option<&Value>,
+) {
+    let mut changed = serde_json::Map::new();
+    if let Some(v) = name {
+        changed.insert("name".into(), json!(v));
+    }
+    if let Some(v) = &req.provider {
+        changed.insert("provider".into(), json!(v));
+    }
+    if let Some(v) = &req.api_base {
+        changed.insert("api_base".into(), json!(v));
+    }
+    if let Some(v) = models {
+        changed.insert("models".into(), v.clone());
+    }
+    if let Some(v) = model_mapping {
+        changed.insert("model_mapping".into(), v.clone());
+    }
+    if let Some(v) = &req.settings {
+        changed.insert(
+            "settings".into(),
+            super::super::manage::redact_secret_fields(v),
+        );
+    }
+    if let Some(v) = &req.capabilities {
+        changed.insert("capabilities".into(), v.clone());
+    }
+    if let Some(v) = req.priority {
+        changed.insert("priority".into(), json!(v));
+    }
+    if let Some(v) = req.trust_upstream_usage {
+        changed.insert("trust_upstream_usage".into(), json!(v));
+    }
+    if let Some(v) = req.cost_milli {
+        changed.insert("cost_milli".into(), json!(v));
+    }
+    let (before, after) = super::super::audit_snapshots::diff_fields(prev, &changed);
+    audit(
+        state,
+        actor,
+        "channel.update",
+        &id.to_string(),
+        json!({
+            "name": name,
+            "provider": req.provider,
+            "api_base": req.api_base,
+            "models": req.models,
+            "priority": req.priority,
+            "trust_upstream_usage": req.trust_upstream_usage,
+            "cost_milli": req.cost_milli,
+            "before": before,
+            "after": after,
+        }),
+    )
+    .await;
 }
 
 /// DELETE /admin/channels/{id}：软删除并停用其下 key（历史账单按 channel_id 仍可回溯），与批量删除同口径。
@@ -742,11 +818,28 @@ pub async fn delete_channel(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
+    let prev = super::super::audit_snapshots::channel_snapshot(&state.pg, id).await;
     if !okapi_store::mutate::delete_channel(&state.pg, id).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
     state.invalidate_routing_caches();
-    audit(&state, &actor, "channel.delete", &id.to_string(), json!({})).await;
+    let deleted = prev.map(|v| {
+        json!({
+            "name": v["name"],
+            "provider": v["provider"],
+            "api_base": v["api_base"],
+            "status": v["status"],
+            "models_count": v["models_count"],
+        })
+    });
+    audit(
+        &state,
+        &actor,
+        "channel.delete",
+        &id.to_string(),
+        json!({ "deleted": deleted }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 

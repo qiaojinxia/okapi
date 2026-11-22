@@ -57,6 +57,7 @@ pub struct VerifyReq {
 
 struct PreparedVerify {
     actor: Arc<AuthedKey>,
+    audit_meta: okapi_store::admin::AuditMeta,
     channel_id: i64,
     provider: String,
     model: String,
@@ -214,9 +215,11 @@ async fn prepare(
         pools,
     };
     let ctx = CallContext::new(state.clone(), headers.clone(), pin);
+    let audit_meta = crate::audit_fallback::current_meta(Some(actor.key_id));
 
     Ok(PreparedVerify {
         actor,
+        audit_meta,
         channel_id,
         provider,
         model,
@@ -411,12 +414,13 @@ async fn record_verify_audit(p: &PreparedVerify, report: &VerifyReport, cancelle
         "fingerprint_prediction": report.fingerprint.as_ref().map(|f| &f.prediction),
         "fingerprint_family": report.fingerprint.as_ref().map(|f| &f.family_prediction),
     });
-    audit(
+    crate::audit::record_event_with_meta(
         &p.ctx.state,
-        &p.actor,
+        &format!("admin:{}", p.actor.actor_user_id()),
         "channel.verify",
         &p.channel_id.to_string(),
         detail,
+        &p.audit_meta,
     )
     .await;
 }

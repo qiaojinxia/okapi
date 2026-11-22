@@ -428,4 +428,168 @@ async fn unaudited_admin_writes_get_one_generic_row() {
     assert_eq!(rows[0]["target"], "/admin/channels/oauth/start");
     assert_eq!(rows[0]["detail"]["path"], "/admin/channels/oauth/start");
     assert_eq!(rows[0]["detail"]["status"], 200);
+    assert!(rows[0]["ip"].is_string(), "兜底审计也应写入来源 IP");
+    assert!(rows[0]["actor_key_id"].as_i64().is_some());
+}
+
+/// 增强验证 1：管理写操作落真 IP / UA / trace_id / actor_key_id；IP(含 CIDR) / 关键词 / trace_id
+/// 检索可用；删除保留 deleted 快照；设置更新保留 before/after 对比。
+#[tokio::test]
+async fn audit_captures_context_diffs_and_snapshots() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let pool = format!("au-ctx-{}", env.suffix);
+    let ip = "198.51.100.77";
+    let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let traceparent = format!("00-{trace_id}-00f067aa0ba902b7-01");
+
+    let resp = client
+        .post(format!("http://{}/admin/pools", env.addr))
+        .bearer_auth(&env.super_token)
+        .header("x-real-ip", ip)
+        .header("user-agent", "okapi-audit-it/2.0")
+        .header("traceparent", &traceparent)
+        .json(&json!({"pool_code": pool, "routing_strategy": "least_latency"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for query in [
+        format!("/admin/audit?ip={ip}&target={pool}"),
+        format!("/admin/audit?ip=198.51.100.0/24&target={pool}"),
+        format!("/admin/audit?trace_id={trace_id}&target={pool}"),
+        format!("/admin/audit?q={pool}"),
+    ] {
+        let (status, body) = get(&env, &query, &env.super_token).await;
+        assert_eq!(status, 200, "{query}: {body}");
+        let rows = body["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{query}: {body}");
+        assert_eq!(rows[0]["ip"], ip);
+        assert_eq!(rows[0]["user_agent"], "okapi-audit-it/2.0");
+        assert_eq!(rows[0]["trace_id"], trace_id);
+        assert!(rows[0]["actor_key_id"].as_i64().is_some());
+    }
+    let (bad_status, _) = get(&env, "/admin/audit?ip=not-an-ip", &env.super_token).await;
+    assert_eq!(bad_status, 400);
+
+    // 删除池 → 保留 deleted 快照（非空 {}）
+    let del = client
+        .delete(format!("http://{}/admin/pools/{pool}", env.addr))
+        .bearer_auth(&env.super_token)
+        .header("x-real-ip", ip)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 200);
+    let (_, del_rows) = get(
+        &env,
+        &format!("/admin/audit?action=channel.delete_pool&target={pool}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(
+        del_rows["data"][0]["detail"]["deleted"]["pool_code"],
+        json!(pool)
+    );
+    assert_eq!(
+        del_rows["data"][0]["detail"]["deleted"]["routing_strategy"],
+        "least_latency"
+    );
+
+    // 设置两次写入 → 第二次带 before / after 对比
+    let setting_key = format!("audit_diff_key_{}", env.suffix);
+    for val in ["v1", "v2"] {
+        let (status, _) = post(
+            &env,
+            "/admin/settings",
+            &env.super_token,
+            json!({"key": setting_key, "value": val}),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let (_, set_rows) = get(
+        &env,
+        &format!("/admin/audit?action=settings.set&target={setting_key}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(set_rows["data"][0]["detail"]["before"], "v1");
+    assert_eq!(set_rows["data"][0]["detail"]["after"], "v2");
+}
+
+/// 增强验证 2：403 越权留痕 `auth.permission_denied`；CSV/JSON 导出并自审 `audit.export`。
+#[tokio::test]
+async fn audit_records_denials_and_supports_export() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let pool = format!("au-exp-{}", env.suffix);
+
+    let (status, _) = post(
+        &env,
+        "/admin/pools",
+        &env.super_token,
+        json!({"pool_code": pool}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // 普通用户越权访问 /admin/audit → 403 且自动留痕 auth.permission_denied
+    let denied = client
+        .get(format!("http://{}/admin/audit", env.addr))
+        .bearer_auth(&env.user_token)
+        .header("x-real-ip", "198.51.100.88")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    let (_, denied_rows) = get(
+        &env,
+        "/admin/audit?action=auth.permission_denied&ip=198.51.100.88",
+        &env.super_token,
+    )
+    .await;
+    assert!(
+        !denied_rows["data"].as_array().unwrap().is_empty(),
+        "越权 403 应落 auth.permission_denied：{denied_rows}"
+    );
+    assert_eq!(
+        denied_rows["data"][0]["detail"]["permission"],
+        "audit.read"
+    );
+
+    // CSV 与 JSON 导出 + 自审 audit.export
+    let csv_resp = client
+        .get(format!(
+            "http://{}/admin/audit/export?format=csv&target={pool}",
+            env.addr
+        ))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(csv_resp.status(), 200);
+    let csv_text = csv_resp.text().await.unwrap();
+    assert!(csv_text.starts_with("\u{FEFF}id,created_at,actor,"));
+    assert!(csv_text.contains(&pool));
+
+    let json_resp = client
+        .get(format!(
+            "http://{}/admin/audit/export?format=json&target={pool}",
+            env.addr
+        ))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(json_resp.status(), 200);
+    let json_body: Value = json_resp.json().await.unwrap();
+    assert_eq!(json_body["count"], 1);
+
+    let (_, export_rows) = get(&env, "/admin/audit?action=audit.export", &env.super_token).await;
+    assert!(
+        export_rows["data"].as_array().unwrap().len() >= 2,
+        "导出行为本身也应落 audit.export"
+    );
 }

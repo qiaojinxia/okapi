@@ -263,10 +263,18 @@ pub async fn delete_proxy(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_proxy(&state, id, &actor, scope).await?;
+    let prev = super::super::audit_snapshots::proxy_snapshot(&state.pg, id).await;
     if !egress::delete_proxy(&state.pg, id).await? {
         return Err(not_found());
     }
     state.invalidate_routing_caches();
-    audit(&state, &actor, "proxy.delete", &id.to_string(), json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "proxy.delete",
+        &id.to_string(),
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }

@@ -380,11 +380,19 @@ pub async fn delete_model(
     Path(model): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let prev = super::audit_snapshots::model_snapshot(&state.pg, &model).await;
     if !mutate::delete_model(&state.pg, &model).await? {
         return Err(not_found());
     }
     state.invalidate_routing_caches();
-    audit(&state, &actor, "pricing.delete_model", &model, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "pricing.delete_model",
+        &model,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "requires_publish": true })))
 }
 
@@ -719,11 +727,19 @@ pub async fn delete_pool(
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     // 与 upsert_pool 同口径：池成员关系只有 all 范围能写，删除连带 CASCADE 清空成员
     ensure_pool_scope(scope)?;
+    let prev = super::audit_snapshots::pool_snapshot(&state.pg, &code).await;
     if !mutate::delete_channel_pool(&state.pg, &code).await? {
         return Err(not_found());
     }
     state.invalidate_routing_caches();
-    audit(&state, &actor, "channel.delete_pool", &code, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "channel.delete_pool",
+        &code,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -733,11 +749,19 @@ pub async fn delete_group(
     Path(code): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let prev = super::audit_snapshots::group_snapshot(&state.pg, &code).await;
     if !mutate::delete_price_group(&state.pg, &code).await? {
         return Err(not_found());
     }
     state.invalidate_routing_caches();
-    audit(&state, &actor, "pricing.delete_group", &code, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "pricing.delete_group",
+        &code,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "requires_publish": true })))
 }
 
@@ -747,10 +771,18 @@ pub async fn delete_plan(
     Path(code): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let prev = super::audit_snapshots::plan_snapshot(&state.pg, &code).await;
     if !mutate::delete_plan(&state.pg, &code).await? {
         return Err(not_found());
     }
-    audit(&state, &actor, "plan.delete", &code, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "plan.delete",
+        &code,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -779,10 +811,18 @@ pub async fn delete_role(
 ) -> Result<Json<Value>, AppError> {
     // 角色变更强制 super_admin（与 create_role 同策略，防提权链）
     let actor = guard_super_admin(&state, &headers).await?;
+    let prev = super::audit_snapshots::role_snapshot(&state.pg, &code).await;
     if !mutate::delete_role(&state.pg, &code).await? {
         return Err(not_found());
     }
-    audit(&state, &actor, "role.delete", &code, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "role.delete",
+        &code,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -799,6 +839,7 @@ pub async fn toggle_rule(
     ExtractJson(req): ExtractJson<RuleToggleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let prev = super::audit_snapshots::rule_snapshot(&state.pg, &code).await;
     if !mutate::set_pricing_rule_enabled(&state.pg, &code, req.enabled).await? {
         return Err(not_found());
     }
@@ -807,7 +848,11 @@ pub async fn toggle_rule(
         &actor,
         "pricing.toggle_rule",
         &code,
-        json!({"enabled": req.enabled}),
+        json!({
+            "enabled": req.enabled,
+            "before": { "enabled": prev.as_ref().and_then(|r| r.get("enabled")) },
+            "after": { "enabled": req.enabled },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true, "requires_publish": true })))
@@ -838,13 +883,20 @@ pub async fn manage_user(
     if matches!(action, UserAction::Promote | UserAction::Demote) {
         guard_super_admin(&state, &headers).await?;
     }
+    let prev = super::audit_snapshots::user_snapshot(&state.pg, id).await;
     super::user_management::apply(&state, &actor, id, action).await?;
+    let after = super::audit_snapshots::user_snapshot(&state.pg, id).await;
     audit(
         &state,
         &actor,
         "user.manage",
         &id.to_string(),
-        json!({"action": req.action}),
+        json!({
+            "action": req.action,
+            "username": prev.as_ref().and_then(|u| u.get("username")),
+            "before": prev.as_ref().map(|u| json!({"role": u["role"], "status": u["status"]})),
+            "after": after.as_ref().map(|u| json!({"role": u["role"], "status": u["status"]})),
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))

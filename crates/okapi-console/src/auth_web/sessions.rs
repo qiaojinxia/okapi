@@ -189,6 +189,7 @@ pub(super) async fn verify_login(
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
     if let Some(sid) = session_id(&headers) {
+        let user_id = super::session_user(&state, &sid).await.ok();
         state.sched.web_session_del(&sid).await;
         // 这条会话换来的登录 key 本就随会话失效了；这里把它也删掉，不留死 key
         let revoked = okapi_store::admin::soft_delete_session_keys(&state.pg, &session_hash(&sid))
@@ -200,6 +201,17 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<V
             });
         for hash in &revoked {
             state.sched.auth_del(hash).await;
+        }
+        if let Some(uid) = user_id {
+            super::super::audit::record_event(
+                &state,
+                &format!("user:{uid}"),
+                "user.logout",
+                &uid.to_string(),
+                json!({ "revoked_session_keys": revoked.len() }),
+                None,
+            )
+            .await;
         }
     }
     Json(json!({ "ok": true }))
@@ -213,17 +225,15 @@ pub(super) async fn audit_session_revoke(
     action: &str,
     target: &str,
 ) {
-    if let Err(error) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::super::audit::record_event(
+        state,
         &format!("user:{}", key.user_id),
         action,
         target,
         json!({"key_id": key.key_id}),
+        Some(key.key_id),
     )
-    .await
-    {
-        tracing::error!(%error, action, "会话吊销审计写入失败");
-    }
+    .await;
 }
 
 /// GET /api/me/sessions：当前用户仍有效的 web 会话（门户 API key 鉴权）。

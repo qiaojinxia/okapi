@@ -88,7 +88,10 @@ const REQUIRED: &[(&str, &[&str])] = &[
     ("team_members", &["monthly_spend_limit_micro"]),
     ("oauth_identities", &["provider", "subject"]),
     ("model_aliases", &["pattern", "target_model"]),
-    ("audit_logs", &["actor", "action"]),
+    (
+        "audit_logs",
+        &["actor", "action", "ip", "user_agent", "trace_id", "actor_key_id"],
+    ),
     // 出口代理（0037，§11.41）：地址只存信封、绑定三列、固定分配挂在 key 上
     (
         "proxies",

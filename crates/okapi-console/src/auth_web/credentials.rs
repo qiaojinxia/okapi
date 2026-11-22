@@ -179,9 +179,20 @@ pub async fn totp_confirm(
         .as_deref()
         .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"))?;
     let secret = identity::open_totp_secret(master, &sealed).map_err(|_| AppError::internal())?;
-    let counter =
+    let Some(counter) =
         identity::matching_totp_counter(&secret, &req.code, chrono::Utc::now().timestamp())
-            .ok_or_else(|| AppError::bad_request().with_param("totp_code"))?;
+    else {
+        super::super::audit::record_event(
+            &state,
+            &format!("user:{user_id}"),
+            "user.totp_enable_failed",
+            &user_id.to_string(),
+            json!({ "reason": "totp_code" }),
+            None,
+        )
+        .await;
+        return Err(AppError::bad_request().with_param("totp_code"));
+    };
     if !identity::enable_totp(&state.pg, user_id, &sealed, counter).await? {
         return Err(
             AppError::new(StatusCode::CONFLICT, okapi_api::codes::BAD_REQUEST)
@@ -189,6 +200,15 @@ pub async fn totp_confirm(
         );
     }
     state.sched.totp_pending_del(&binding).await;
+    super::super::audit::record_event(
+        &state,
+        &format!("user:{user_id}"),
+        "user.totp_enable",
+        &user_id.to_string(),
+        json!({ "enabled": true }),
+        None,
+    )
+    .await;
     Ok(Json(json!({"enabled":true})))
 }
 
@@ -206,9 +226,18 @@ pub async fn totp_disable(
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "totp", 10).await?;
     let user_id = require_session(&state, &headers).await?;
-    let user = identity::reauthenticate(&state.pg, user_id, &req.password)
-        .await?
-        .ok_or_else(|| AppError::unauthorized("invalid_credentials"))?;
+    let Some(user) = identity::reauthenticate(&state.pg, user_id, &req.password).await? else {
+        super::super::audit::record_event(
+            &state,
+            &format!("user:{user_id}"),
+            "user.totp_disable_failed",
+            &user_id.to_string(),
+            json!({ "reason": "invalid_credentials" }),
+            None,
+        )
+        .await;
+        return Err(AppError::unauthorized("invalid_credentials"));
+    };
     let sealed = user
         .totp_secret_ciphertext
         .ok_or_else(|| AppError::bad_request().with_param("totp_not_enabled"))?;
@@ -217,12 +246,41 @@ pub async fn totp_disable(
         .as_deref()
         .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"))?;
     let secret = identity::open_totp_secret(master, &sealed).map_err(|_| AppError::internal())?;
-    let counter =
+    let Some(counter) =
         identity::matching_totp_counter(&secret, &req.code, chrono::Utc::now().timestamp())
-            .ok_or_else(|| AppError::unauthorized("totp_invalid"))?;
+    else {
+        super::super::audit::record_event(
+            &state,
+            &format!("user:{user_id}"),
+            "user.totp_disable_failed",
+            &user_id.to_string(),
+            json!({ "reason": "totp_invalid" }),
+            None,
+        )
+        .await;
+        return Err(AppError::unauthorized("totp_invalid"));
+    };
     if !identity::disable_totp(&state.pg, user_id, &sealed, counter).await? {
+        super::super::audit::record_event(
+            &state,
+            &format!("user:{user_id}"),
+            "user.totp_disable_failed",
+            &user_id.to_string(),
+            json!({ "reason": "totp_replay" }),
+            None,
+        )
+        .await;
         return Err(AppError::unauthorized("totp_invalid"));
     }
+    super::super::audit::record_event(
+        &state,
+        &format!("user:{user_id}"),
+        "user.totp_disable",
+        &user_id.to_string(),
+        json!({ "enabled": false }),
+        None,
+    )
+    .await;
     Ok(Json(json!({"enabled":false})))
 }
 
@@ -288,7 +346,8 @@ pub async fn create_key(
         Some(name) => super::super::identifiers::ensure_optional_text("name", name, 128)?,
         None => "web",
     };
-    let allowlist = super::super::portal::resolve_allowlist(&state.pg, req.model_allowlist).await?;
+    let allowlist =
+        super::super::portal::resolve_allowlist(&state.pg, req.model_allowlist.clone()).await?;
     let group_code = req
         .group_code
         .as_deref()
@@ -297,13 +356,14 @@ pub async fn create_key(
     if let Some(code) = group_code {
         super::super::portal::ensure_selectable(&state, user_id, code).await?;
     }
-    let ip_allowlist = super::super::portal::normalize_ip_allowlist(req.ip_allowlist)?;
+    let ip_allowlist = super::super::portal::normalize_ip_allowlist(req.ip_allowlist.clone())?;
     // Missing master key preserves hash-only issuance; never fall back to storing plaintext.
     let ciphertext = state
         .master_key
         .as_deref()
         .map(|master| okapi_store::api_key_secret::seal(master, user_id, &key_hash, &token))
         .transpose()?;
+    let key_prefix: String = token.chars().take(16).collect();
     let key_id = sqlx::query_scalar::<_, i64>(
         r"INSERT INTO api_keys (
               user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override,
@@ -318,12 +378,12 @@ pub async fn create_key(
     )
     .bind(user_id)
     .bind(key_hash)
-    .bind(token.chars().take(16).collect::<String>())
+    .bind(&key_prefix)
     .bind(name)
     .bind(req.expires_at)
-    .bind(allowlist)
+    .bind(&allowlist)
     .bind(group_code)
-    .bind(ip_allowlist)
+    .bind(&ip_allowlist)
     .bind(&ciphertext)
     .bind(req.quota_micro)
     .bind(req.daily_quota_micro)
@@ -336,6 +396,18 @@ pub async fn create_key(
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    audit_key_created(
+        &state,
+        user_id,
+        key_id,
+        name,
+        &key_prefix,
+        group_code,
+        &req,
+        allowlist.is_some(),
+        ip_allowlist.is_some(),
+    )
+    .await;
     let mut response = Json(json!({
         "key_id": key_id,
         // Subsequent reads require an owner web session, not just an API key.
@@ -347,4 +419,42 @@ pub async fn create_key(
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store, private".parse().unwrap());
     Ok(response)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn audit_key_created(
+    state: &AppState,
+    user_id: i64,
+    key_id: i64,
+    name: &str,
+    key_prefix: &str,
+    group_code: Option<&str>,
+    req: &CreateKeyReq,
+    has_model_allowlist: bool,
+    has_ip_allowlist: bool,
+) {
+    super::super::audit::record_event(
+        state,
+        &format!("user:{user_id}"),
+        "apikey.create",
+        &key_id.to_string(),
+        json!({
+            "name": name,
+            "key_prefix": key_prefix,
+            "group_override": group_code,
+            "quota_micro": req.quota_micro,
+            "daily_quota_micro": req.daily_quota_micro,
+            "monthly_quota_micro": req.monthly_quota_micro,
+            "expires_at": req.expires_at,
+            "has_model_allowlist": has_model_allowlist,
+            "has_ip_allowlist": has_ip_allowlist,
+            "rpm_limit": req.rpm_limit,
+            "tpm_limit": req.tpm_limit,
+            "rpd_limit": req.rpd_limit,
+            "daily_token_limit": req.daily_token_limit,
+            "max_concurrency": req.max_concurrency,
+        }),
+        None,
+    )
+    .await;
 }

@@ -41,7 +41,14 @@ pub async fn cache_flush(
         }
         _ => return Err(AppError::bad_request().with_param("scope")),
     }
-    audit(&state, &actor, "cache.flush", &req.scope, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "cache.flush",
+        &req.scope,
+        json!({ "scope": req.scope }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 

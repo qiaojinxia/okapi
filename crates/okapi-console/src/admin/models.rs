@@ -168,6 +168,7 @@ pub async fn upsert_model(
         modality_ratios: req.modality_ratios.as_ref(),
     };
     let tiers = req.tier_ratios.as_ref().map(|v| Value::Object(v.clone()));
+    let prev = super::super::audit_snapshots::model_snapshot(&state.pg, name).await;
     let model_id = okapi_store::model_config::save(
         &state.pg,
         okapi_store::model_config::ModelDraft {
@@ -208,6 +209,13 @@ pub async fn upsert_model(
             "per_call_price_micro": req.per_call_price_micro,
             "tier_ratios": req.tier_ratios,
             "tier_expr": req.tier_expr,
+            "before": prev,
+            "after": {
+                "pricing_mode": mode,
+                "model_ratio": req.model_ratio,
+                "completion_ratio": req.completion_ratio,
+                "per_call_price_micro": req.per_call_price_micro,
+            },
             "fallback_models": req.fallback_models,
         }),
     )

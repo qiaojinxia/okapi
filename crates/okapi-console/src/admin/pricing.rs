@@ -176,6 +176,7 @@ pub async fn upsert_pricing_rule(
     {
         return Err(AppError::bad_request().with_param("valid_window"));
     }
+    let prev = super::super::audit_snapshots::rule_snapshot(&state.pg, rule_code).await;
     okapi_store::admin::upsert_pricing_rule(
         &state.pg,
         okapi_store::admin::PricingRuleInput {
@@ -195,7 +196,21 @@ pub async fn upsert_pricing_rule(
         &actor,
         "pricing.upsert_rule",
         rule_code,
-        json!({ "rule_type": req.rule_type, "params": params, "enabled": req.enabled }),
+        json!({
+            "rule_type": req.rule_type,
+            "params": params,
+            "enabled": req.enabled,
+            "before": prev,
+            "after": {
+                "rule_type": req.rule_type,
+                "scope": scope,
+                "params": params,
+                "priority": req.priority,
+                "enabled": req.enabled,
+                "valid_from": req.valid_from,
+                "valid_to": req.valid_to,
+            },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -234,10 +249,18 @@ pub async fn delete_pricing_rule(
     Path(rule_code): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let prev = super::super::audit_snapshots::rule_snapshot(&state.pg, &rule_code).await;
     if !okapi_store::admin::delete_pricing_rule(&state.pg, &rule_code).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
-    audit(&state, &actor, "pricing.delete_rule", &rule_code, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "pricing.delete_rule",
+        &rule_code,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "requires_publish": true })))
 }
 

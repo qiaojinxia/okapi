@@ -187,8 +187,8 @@ pub async fn put_alerts(
     .await
     .map_err(okapi_store::StoreError::from)?;
 
-    if let Err(error) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::super::audit::record_event(
+        &state,
         &format!("user:{user_id}"),
         "user.alerts_update",
         &user_id.to_string(),
@@ -199,10 +199,8 @@ pub async fn put_alerts(
             "webhook_configured": row.webhook_url.is_some(),
             "min_interval_secs": row.min_interval_secs,
         }),
+        None,
     )
-    .await
-    {
-        tracing::error!(%error, "user alerts audit write failed");
-    }
+    .await;
     Ok(Json(serialize_pref(Some(row))))
 }

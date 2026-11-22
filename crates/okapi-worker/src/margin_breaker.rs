@@ -46,6 +46,31 @@ pub async fn evaluate_and_notify(
             blocked_total = report.blocked_total,
             "负毛利熔断：分组×渠道已从候选摘除（/admin/margin-breaker 可解除）"
         );
+        for item in &report.tripped {
+            if let Err(error) = okapi_store::admin::record_audit(
+                pg,
+                "worker",
+                "margin_breaker.trip",
+                &format!("{}:{}", item.group_code, item.channel_id),
+                serde_json::json!({
+                    "group_code": item.group_code,
+                    "channel_id": item.channel_id,
+                    "requests": item.requests,
+                    "amount_micro": item.amount_micro,
+                    "cost_micro": item.cost_micro,
+                    "margin_bp": item.margin_bp,
+                }),
+            )
+            .await
+            {
+                tracing::warn!(
+                    group_code = %item.group_code,
+                    channel_id = item.channel_id,
+                    %error,
+                    "负毛利熔断审计写入失败"
+                );
+            }
+        }
         notifier
             .dispatch(
                 "margin_breaker",

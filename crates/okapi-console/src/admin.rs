@@ -97,12 +97,18 @@ pub(super) async fn guard(
 ) -> Result<Arc<AuthedKey>, AppError> {
     let key = authenticate(state, headers).await?;
     if !key.has_permission(permission) {
+        super::audit_fallback::note_denied(
+            key.actor_user_id(),
+            key.role,
+            key.key_id,
+            permission,
+        );
         return Err(
             AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
                 .with_param(permission.to_owned()),
         );
     }
-    super::audit_fallback::note_actor(key.actor_user_id(), permission);
+    super::audit_fallback::note_actor(key.actor_user_id(), key.key_id, permission);
     Ok(key)
 }
 
@@ -130,12 +136,15 @@ pub(super) async fn guard_scoped(
 ) -> Result<(Arc<AuthedKey>, PermScope), AppError> {
     let key = authenticate(state, headers).await?;
     match key.permission_scope(base) {
-        PermScope::Denied => Err(
-            AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
-                .with_param(base.to_owned()),
-        ),
+        PermScope::Denied => {
+            super::audit_fallback::note_denied(key.actor_user_id(), key.role, key.key_id, base);
+            Err(
+                AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
+                    .with_param(base.to_owned()),
+            )
+        }
         scope => {
-            super::audit_fallback::note_actor(key.actor_user_id(), base);
+            super::audit_fallback::note_actor(key.actor_user_id(), key.key_id, base);
             Ok((key, scope))
         }
     }
@@ -155,6 +164,12 @@ pub(super) async fn ensure_channel_owner(
         .await?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
     if owner != Some(actor.actor_user_id()) {
+        super::audit_fallback::note_denied(
+            actor.actor_user_id(),
+            actor.role,
+            actor.key_id,
+            "channel.owner",
+        );
         return Err(
             AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED).with_param("owner"),
         );
@@ -169,6 +184,12 @@ pub(super) async fn guard_super_admin(
 ) -> Result<Arc<AuthedKey>, AppError> {
     let key = guard(state, headers, permissions::ROLE_MANAGE).await?;
     if key.role < 100 {
+        super::audit_fallback::note_denied(
+            key.actor_user_id(),
+            key.role,
+            key.key_id,
+            "super_admin_required",
+        );
         return Err(
             AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
                 .with_param("super_admin_required"),
@@ -184,16 +205,13 @@ pub(super) async fn audit(
     target: &str,
     detail: Value,
 ) {
-    super::audit_fallback::note_audited();
-    if let Err(err) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::audit::record_event(
+        state,
         &format!("admin:{}", actor.actor_user_id()),
         action,
         target,
         detail,
+        Some(actor.key_id),
     )
-    .await
-    {
-        tracing::error!(error = %err, action, "审计写入失败");
-    }
+    .await;
 }

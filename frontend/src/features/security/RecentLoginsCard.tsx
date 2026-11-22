@@ -21,6 +21,8 @@ interface LoginRow {
   ip: string | null
   ua: string | null
   reason: string | null
+  method?: string | null
+  provider?: string | null
 }
 
 /// 最近登录（new-api "登录会话"卡的对应物）：成功 / 失败各带 IP 与时间。
@@ -86,6 +88,11 @@ export function RecentLoginsCard({ preview = false, active = true }: { preview?:
                 <Badge variant={r.ok ? 'success' : 'destructive'}>
                   {r.ok ? t('portal:loginsOk') : t('portal:loginsFailed')}
                 </Badge>
+                {r.method === 'oauth' && (
+                  <Badge variant="muted" className="font-mono">
+                    {r.provider ? `OAuth · ${r.provider}` : 'OAuth'}
+                  </Badge>
+                )}
                 <span className="tabular-nums text-muted-foreground">
                   {dayjs(r.at).format(preview ? 'MM-DD HH:mm' : 'YYYY-MM-DD HH:mm:ss')}
                 </span>

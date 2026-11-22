@@ -11,6 +11,7 @@ mod analysis_source;
 pub mod analytics;
 pub mod audit;
 mod audit_fallback;
+mod audit_snapshots;
 pub mod auth_web;
 mod cache_usage;
 pub mod channel_balance;
@@ -563,6 +564,7 @@ fn ops_routes() -> ConsoleRouter {
         // 审计读取面：谁在何时改了什么（含登录记录）
         .route("/admin/audit", get(audit::list))
         .route("/admin/audit/actions", get(audit::actions))
+        .route("/admin/audit/export", get(audit::export))
 }
 
 /// 用户自助面（门户）+ 团队 + 支付回调 + 公开价格。

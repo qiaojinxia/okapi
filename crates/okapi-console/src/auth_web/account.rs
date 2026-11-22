@@ -81,6 +81,19 @@ pub async fn register(
         .ok_or_else(|| AppError::new(StatusCode::CONFLICT, "email_taken"))?;
     bind_inviter(&state, user_id, inviter).await;
     super::super::registration::grant_credits(&state, &policy, user_id, inviter).await;
+    super::super::audit::record_event(
+        &state,
+        &format!("user:{user_id}"),
+        "user.register",
+        &email,
+        json!({
+            "username": username,
+            "inviter_id": inviter,
+            "email_verified": policy.email_verification,
+        }),
+        None,
+    )
+    .await;
     Ok(Json(json!({ "user_id": user_id })))
 }
 
@@ -253,14 +266,26 @@ pub async fn password_forgot(
     let site = site_name(&state).await;
     let ttl_min = u32::try_from(PWRESET_TTL_SECS / 60).unwrap_or(30);
     // 发信失败对外仍 ok：否则"发信失败"与"邮箱不存在"可被区分出来；细节进日志
-    if let Err(err) = mailer
+    let mail_sent = if let Err(err) = mailer
         .send(okapi_kernel::mail::templates::password_reset(
             lang, &site, &email, &link, ttl_min,
         ))
         .await
     {
         tracing::warn!(user_id, error = %err, "找回密码邮件发送失败");
-    }
+        false
+    } else {
+        true
+    };
+    super::super::audit::record_event(
+        &state,
+        &format!("user:{user_id}"),
+        "user.password_forgot",
+        &email,
+        json!({ "mail_sent": mail_sent }),
+        None,
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -294,17 +319,15 @@ pub async fn password_reset(
     }
     state.sched.web_session_revoke_user(user_id).await;
     // 改了密码、踢掉了全部会话：和门户里吊销会话一样留审计（这里没有 key，凭的是重置 token）
-    if let Err(error) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::super::audit::record_event(
+        &state,
         &format!("user:{user_id}"),
         "user.password_reset",
         &user_id.to_string(),
         json!({"sessions_revoked": true}),
+        None,
     )
-    .await
-    {
-        tracing::error!(%error, "找回密码审计写入失败");
-    }
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 

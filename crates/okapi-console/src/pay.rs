@@ -414,6 +414,7 @@ async fn settle_paid_order(
         drop(guard);
         state.sched.auth_flush().await;
         finish_aff_reward(state, reward).await;
+        audit_settled(state, order_no, user_id, amount_micro, proof, json!({"kind": "subscription", "plan_id": order.plan_id})).await;
         return Ok(true);
     }
     let amount = okapi_domain::Money::from_micros(amount_micro);
@@ -438,6 +439,7 @@ async fn settle_paid_order(
     .await;
     drop(guard);
     finish_aff_reward(state, reward).await;
+    audit_settled(state, order_no, user_id, amount_micro, proof, json!({"kind": "wallet", "operation_id": receipt.operation_id})).await;
     tracing::info!(
         order_no,
         user_id,
@@ -447,6 +449,26 @@ async fn settle_paid_order(
         "充值入账"
     );
     Ok(true)
+}
+
+async fn audit_settled(
+    state: &AppState,
+    order_no: &str,
+    user_id: i64,
+    amount_micro: i64,
+    proof: &okapi_store::payments::PaymentProof<'_>,
+    mut extra: Value,
+) {
+    if let Some(obj) = extra.as_object_mut() {
+        obj.insert("user_id".into(), json!(user_id));
+        obj.insert("gateway".into(), json!(proof.gateway));
+        obj.insert("trade_no".into(), json!(proof.trade_no));
+        obj.insert("currency".into(), json!(proof.currency));
+        obj.insert("amount_minor".into(), json!(proof.amount_minor));
+        obj.insert("amount_micro".into(), json!(amount_micro));
+    }
+    super::audit::record_event(state, "system:payment", "payment.settled", order_no, extra, None)
+        .await;
 }
 
 // ---- epay 异步回调（GET 查询串，验 MD5，应答纯文本 "success"） ----

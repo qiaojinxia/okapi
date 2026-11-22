@@ -49,6 +49,7 @@ pub async fn set_user_multiplier(
     if value.as_scaled() > 1_000_000_000 {
         return Err(AppError::bad_request().with_param("multiplier"));
     }
+    let prev = super::super::audit_snapshots::user_snapshot(&state.pg, user_id).await;
     if !okapi_store::admin::set_user_multiplier(&state.pg, user_id, raw).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
@@ -58,7 +59,11 @@ pub async fn set_user_multiplier(
         &actor,
         "user.set_multiplier",
         &user_id.to_string(),
-        json!({ "multiplier": raw }),
+        json!({
+            "multiplier": raw,
+            "before": { "multiplier": prev.as_ref().and_then(|u| u.get("price_multiplier")) },
+            "after": { "multiplier": raw },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true, "multiplier": raw })))
@@ -189,6 +194,7 @@ pub async fn set_balance_expiry(
     ExtractJson(req): ExtractJson<BalanceExpiryReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
+    let prev = super::super::audit_snapshots::user_snapshot(&state.pg, user_id).await;
     let updated = sqlx::query!(
         r#"UPDATE users SET balance_expires_at = $2, updated_at = now()
            WHERE id = $1 AND deleted_at IS NULL"#,
@@ -207,7 +213,11 @@ pub async fn set_balance_expiry(
         &actor,
         "user.balance_expiry",
         &user_id.to_string(),
-        json!({ "expires_at": req.expires_at }),
+        json!({
+            "expires_at": req.expires_at,
+            "before": { "expires_at": prev.as_ref().and_then(|u| u.get("balance_expires_at")) },
+            "after": { "expires_at": req.expires_at },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))

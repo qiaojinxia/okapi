@@ -373,10 +373,26 @@ async fn tools_call(state: &AppState, key: &Arc<AuthedKey>, params: &Value) -> R
         return Err((-32602, "unknown_tool".to_owned()));
     };
     if !allowed(key, spec) {
+        mcp_audit(
+            state,
+            key,
+            "mcp.tool_denied",
+            name,
+            json!({"reason": "permission_denied", "write": spec.write}),
+        )
+        .await;
         return Err((-32603, "permission_denied".to_owned()));
     }
     // 第一道闸：写工具全局开关（默认 OFF）
     if spec.write && !mcp_write_enabled(state).await {
+        mcp_audit(
+            state,
+            key,
+            "mcp.tool_denied",
+            name,
+            json!({"reason": "mcp_write_disabled", "write": true}),
+        )
+        .await;
         return Err((-32603, "mcp_write_disabled".to_owned()));
     }
 
@@ -411,10 +427,26 @@ async fn tools_call(state: &AppState, key: &Arc<AuthedKey>, params: &Value) -> R
             "structuredContent": value,
             "isError": false,
         })),
-        Err(err) => Ok(json!({
-            "content": [{"type": "text", "text": err.code}],
-            "isError": true,
-        })),
+        Err(err) => {
+            if spec.write {
+                mcp_audit(
+                    state,
+                    key,
+                    "mcp.tool_failed",
+                    name,
+                    json!({
+                        "error_code": err.code,
+                        "param": err.param,
+                        "status": err.status.as_u16(),
+                    }),
+                )
+                .await;
+            }
+            Ok(json!({
+                "content": [{"type": "text", "text": err.code}],
+                "isError": true,
+            }))
+        }
     }
 }
 
@@ -422,17 +454,15 @@ async fn tools_call(state: &AppState, key: &Arc<AuthedKey>, params: &Value) -> R
 
 /// MCP 审计（actor = `mcp:{key_id}`，§7.1）。
 async fn mcp_audit(state: &AppState, key: &AuthedKey, action: &str, target: &str, detail: Value) {
-    if let Err(err) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::audit::record_event(
+        state,
         &format!("mcp:{}", key.key_id),
         action,
         target,
         detail,
+        Some(key.key_id),
     )
-    .await
-    {
-        tracing::error!(error = %err, action, "MCP 审计写入失败");
-    }
+    .await;
 }
 
 /// 全链路健康检查（对标老仓库 make diagnose）。

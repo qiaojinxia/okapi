@@ -251,9 +251,22 @@ pub(super) async fn user_ban(
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Ok(json!({"dry_run": true, "user_id": user_id, "action": "ban"}));
     }
+    let prev = super::super::audit_snapshots::user_snapshot(&state.pg, user_id).await;
     super::super::user_management::apply(state, key, user_id, okapi_store::mutate::UserAction::Ban)
         .await?;
-    mcp_audit(state, key, "user.ban", &user_id.to_string(), json!({})).await;
+    mcp_audit(
+        state,
+        key,
+        "user.ban",
+        &user_id.to_string(),
+        json!({
+            "action": "ban",
+            "username": prev.as_ref().and_then(|u| u.get("username")),
+            "before": prev.as_ref().map(|u| json!({"role": u["role"], "status": u["status"]})),
+            "after": prev.as_ref().map(|u| json!({"role": u["role"], "status": 2})),
+        }),
+    )
+    .await;
     Ok(json!({"dry_run": false, "banned": true}))
 }
 
@@ -282,7 +295,18 @@ pub(super) async fn apply_pricing(
         return Ok(json!({"dry_run": true, "validation": sim}));
     }
     let epoch = crate::admin::publish_pricing_inner(state, key.user_id, None).await?;
-    mcp_audit(state, key, "pricing.publish", &epoch.to_string(), json!({})).await;
+    mcp_audit(
+        state,
+        key,
+        "pricing.publish",
+        &epoch.to_string(),
+        json!({
+            "epoch": epoch,
+            "models": sim.get("models"),
+            "groups": sim.get("groups"),
+        }),
+    )
+    .await;
     Ok(json!({"dry_run": false, "epoch": epoch}))
 }
 
@@ -389,6 +413,13 @@ pub(super) async fn mcp_cache_flush(
         }
         _ => return Err(AppError::bad_request().with_param("scope")),
     }
-    mcp_audit(state, key, "cache.flush", scope, json!({})).await;
+    mcp_audit(
+        state,
+        key,
+        "cache.flush",
+        scope,
+        json!({ "scope": scope }),
+    )
+    .await;
     Ok(json!({"ok": true}))
 }

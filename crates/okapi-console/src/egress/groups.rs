@@ -110,11 +110,19 @@ pub async fn delete_group(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_group(&state, &code, &actor, scope).await?;
+    let prev = super::super::audit_snapshots::proxy_group_snapshot(&state.pg, &code).await;
     if !egress::delete_group(&state.pg, &code).await? {
         return Err(not_found());
     }
     state.invalidate_routing_caches();
-    audit(&state, &actor, "proxy_group.delete", &code, json!({})).await;
+    audit(
+        &state,
+        &actor,
+        "proxy_group.delete",
+        &code,
+        json!({ "deleted": prev }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -65,17 +65,15 @@ pub async fn update(
             } else { okapi_store::StoreError::from(error).into() }
         })?
         .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
-    if let Err(error) = okapi_store::admin::record_audit(
-        &state.pg,
+    super::audit::record_event(
+        &state,
         &format!("user:{user_id}"),
         "user.profile_update",
         &user_id.to_string(),
         json!({"username": username,"language": req.language}),
+        None,
     )
-    .await
-    {
-        tracing::error!(%error, "profile audit write failed");
-    }
+    .await;
     Ok(Json(json!(row)))
 }
 

@@ -79,6 +79,7 @@ pub async fn redeem(
             };
             body["amount_micro"] = json!(0);
             body["plan_code"] = json!(claimed.plan_code);
+            audit_redemption_claim(&state, &key, &claimed, "subscription", receipt.id).await;
             Ok(Json(body))
         }
         Accepted::Wallet(operation_id) => {
@@ -90,6 +91,7 @@ pub async fn redeem(
                 okapi_ledger::Pool::Wallet,
             )
             .await;
+            audit_redemption_claim(&state, &key, &claimed, "wallet", receipt.operation_id).await;
             Ok(Json(json!({
                 "amount_micro": claimed.amount_micro,
                 "balance_after_micro": receipt.balance_after.map(okapi_domain::Money::as_micros),
@@ -101,6 +103,31 @@ pub async fn redeem(
             })))
         }
     }
+}
+
+async fn audit_redemption_claim(
+    state: &AppState,
+    key: &okapi_store::auth::AuthedKey,
+    claimed: &okapi_store::admin::ClaimedRedemption,
+    kind: &str,
+    operation_id: uuid::Uuid,
+) {
+    super::super::audit::record_event(
+        state,
+        &format!("user:{}", key.user_id),
+        "redemption.claim",
+        &claimed.code_id.to_string(),
+        json!({
+            "kind": kind,
+            "amount_micro": if kind == "subscription" { 0 } else { claimed.amount_micro },
+            "plan_code": claimed.plan_code,
+            "granted_group": claimed.grant_group,
+            "balance_valid_days": claimed.balance_valid_days,
+            "operation_id": operation_id,
+        }),
+        Some(key.key_id),
+    )
+    .await;
 }
 
 /// 兑换码在事务里落定的去处：订阅入队（激活单号）或钱包入账（操作号）。

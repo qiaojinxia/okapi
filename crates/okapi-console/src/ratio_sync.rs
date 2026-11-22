@@ -509,11 +509,20 @@ pub async fn apply(
         skipped += overridden;
     }
     super::audit_fallback::note_audited();
-    okapi_store::admin::record_audit_in(&mut tx, &format!("admin:{}", actor.user_id), "pricing.sync_apply", "batch", json!({
-        "applied": applied,
-        "skipped": skipped,
-        "changes": req.changes.iter().map(|c| json!({"model": c.model, "axis": c.axis, "value": c.value})).collect::<Vec<_>>(),
-    })).await?;
+    let audit_meta = super::audit_fallback::current_meta(Some(actor.key_id));
+    okapi_store::admin::record_audit_with_meta_in(
+        &mut tx,
+        &format!("admin:{}", actor.actor_user_id()),
+        "pricing.sync_apply",
+        "batch",
+        json!({
+            "applied": applied,
+            "skipped": skipped,
+            "changes": req.changes.iter().map(|c| json!({"model": c.model, "axis": c.axis, "value": c.value})).collect::<Vec<_>>(),
+        }),
+        &audit_meta,
+    )
+    .await?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
     Ok(Json(
         json!({ "applied": applied, "skipped": skipped, "published": false }),

@@ -55,6 +55,15 @@ pub async fn run(
         direct_loopback(conn.0, &headers)
     };
     if !authorized {
+        super::audit::record_event(
+            &state,
+            "anon",
+            "system.setup_denied",
+            "setup",
+            json!({ "reason": "setup_token_required" }),
+            None,
+        )
+        .await;
         return Err(
             AppError::new(StatusCode::FORBIDDEN, okapi_api::codes::PERMISSION_DENIED)
                 .with_param("setup_token_required"),
@@ -81,6 +90,19 @@ pub async fn run(
         return Err(AppError::new(StatusCode::CONFLICT, "already_initialized"));
     };
     tracing::warn!(user_id, "Setup 向导：超管已创建（key 明文仅本次返回）");
+    super::audit::record_event(
+        &state,
+        &format!("admin:{user_id}"),
+        "system.setup",
+        &user_id.to_string(),
+        json!({
+            "username": username,
+            "key_id": key_id,
+            "key_prefix": key_prefix,
+        }),
+        Some(key_id),
+    )
+    .await;
     Ok(Json(json!({
         "user_id": user_id,
         "key_id": key_id,

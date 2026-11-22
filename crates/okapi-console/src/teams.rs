@@ -81,6 +81,15 @@ pub async fn create_team(
     .await
     .map_err(okapi_store::StoreError::from)?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
+    super::audit::record_event(
+        &state,
+        &format!("user:{creator}"),
+        "team.create",
+        &team_id.to_string(),
+        json!({ "name": name }),
+        None,
+    )
+    .await;
     Ok(Json(json!({ "team_id": team_id, "name": name })))
 }
 
@@ -221,6 +230,20 @@ pub async fn upsert_member(
     }
     // 团 key 的鉴权缓存（含限额快照）失效
     state.sched.auth_flush().await;
+    super::audit::record_event(
+        &state,
+        &format!("user:{actor}"),
+        "team.upsert_member",
+        &format!("{team_id}:{}", req.user_id),
+        json!({
+            "team_id": team_id,
+            "member_user_id": req.user_id,
+            "role": req.role,
+            "monthly_spend_limit_micro": req.monthly_spend_limit_micro,
+        }),
+        None,
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -259,18 +282,32 @@ pub async fn create_team_key(
         Some(name) => super::identifiers::ensure_optional_text("name", name, 128)?,
         None => "team",
     };
+    let key_prefix: String = token.chars().take(16).collect();
     let key_id = sqlx::query_scalar!(
         r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, member_user_id)
            VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
         team_id,
         key_hash,
-        token.chars().take(16).collect::<String>(),
+        key_prefix,
         name,
         member
     )
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    super::audit::record_event(
+        &state,
+        &format!("user:{member}"),
+        "team.create_key",
+        &key_id.to_string(),
+        json!({
+            "team_id": team_id,
+            "name": name,
+            "key_prefix": key_prefix,
+        }),
+        None,
+    )
+    .await;
     Ok(Json(json!({
         "key_id": key_id,
         // 明文仅本次返回

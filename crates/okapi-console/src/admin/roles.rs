@@ -35,6 +35,7 @@ pub async fn create_role(
     {
         return Err(AppError::bad_request().with_param("permissions"));
     }
+    let prev = super::super::audit_snapshots::role_snapshot(&state.pg, &req.role_code).await;
     let permissions = json!(req.permissions);
     let role_id = okapi_store::admin::create_admin_role(
         &state.pg,
@@ -50,7 +51,17 @@ pub async fn create_role(
         &actor,
         "role.upsert",
         &req.role_code,
-        json!({ "permissions": req.permissions }),
+        json!({
+            "permissions": req.permissions,
+            "before": prev.map(|p| json!({
+                "display_name": p["display_name"],
+                "permissions": p["permissions"],
+            })),
+            "after": {
+                "display_name": req.display_name,
+                "permissions": req.permissions,
+            },
+        }),
     )
     .await;
     Ok(Json(json!({ "admin_role_id": role_id })))
@@ -101,18 +112,32 @@ pub async fn assign_role(
             );
         }
     }
+    let prev = super::super::audit_snapshots::user_snapshot(&state.pg, user_id).await;
     let hit = okapi_store::admin::assign_user_role(&state.pg, user_id, req.role, req.admin_role_id)
         .await?;
     if !hit {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
     state.sched.auth_flush().await;
+    let prev_role = prev.as_ref().and_then(|u| u.get("role").and_then(Value::as_i64));
     audit(
         &state,
         &actor,
         "role.assign",
         &user_id.to_string(),
-        json!({ "role": req.role, "admin_role_id": req.admin_role_id }),
+        json!({
+            "username": prev.as_ref().and_then(|u| u.get("username")),
+            "role": req.role,
+            "admin_role_id": req.admin_role_id,
+            "before": {
+                "role": prev_role,
+                "admin_role_id": prev.as_ref().and_then(|u| u.get("admin_role_id")),
+            },
+            "after": {
+                "role": req.role.map(i64::from).or(prev_role),
+                "admin_role_id": req.admin_role_id,
+            },
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))

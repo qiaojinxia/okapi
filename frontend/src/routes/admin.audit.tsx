@@ -8,7 +8,12 @@ export interface AuditSearch {
   actor?: string
   action?: string
   target?: string
+  ip?: string
+  q?: string
+  trace_id?: string
   hours?: number
+  from?: string
+  to?: string
 }
 
 export const Route = createFileRoute('/admin/audit')({
@@ -17,7 +22,12 @@ export const Route = createFileRoute('/admin/audit')({
     actor: text(search.actor),
     action: text(search.action),
     target: text(search.target),
+    ip: text(search.ip),
+    q: text(search.q),
+    trace_id: text(search.trace_id),
     hours: posInt(search.hours),
+    from: text(search.from),
+    to: text(search.to),
   }),
   component: AuditPage,
 })
