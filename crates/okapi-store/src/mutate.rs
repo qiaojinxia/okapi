@@ -82,6 +82,52 @@ pub async fn batch_delete_channels(pool: &PgPool, ids: &[i64]) -> Result<u64, St
     Ok(affected)
 }
 
+/// 批量解除渠道的临时冷却（限流 3 / 配额 4 / 带冷却期的临时禁用 2），不动手工停用（无冷却期 2）、
+/// 人工封禁（5）与凭证失效（6）；同时返回目标渠道全部 key 与声明模型供调用方清理 Redis 模型短冷却。
+pub async fn batch_clear_channel_cooldown(
+    pool: &PgPool,
+    ids: &[i64],
+) -> Result<(u64, Vec<(i64, Vec<String>)>), StoreError> {
+    if ids.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let affected = sqlx::query(
+        r"UPDATE channel_keys
+          SET status = 1, cooldown_until = NULL, failed_count = 0, last_error = NULL, updated_at = now()
+          WHERE channel_id = ANY($1)
+            AND channel_id IN (SELECT id FROM channels WHERE id = ANY($1) AND deleted_at IS NULL)
+            AND (status IN (3, 4) OR (status = 2 AND cooldown_until IS NOT NULL) OR cooldown_until IS NOT NULL)",
+    )
+    .bind(ids)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let rows: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+        r"SELECT ck.id, c.models
+          FROM channel_keys ck
+          JOIN channels c ON c.id = ck.channel_id
+          WHERE c.id = ANY($1) AND c.deleted_at IS NULL",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    let keys = rows
+        .into_iter()
+        .map(|(kid, models)| {
+            let list = models
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (kid, list)
+        })
+        .collect();
+    Ok((affected, keys))
+}
+
 /// 复制渠道（对齐 new-api "复制渠道"）：连同 key 与可见组克隆。
 /// 新渠道**默认停用**——避免半配置的复制体立刻进调度。返回新 id；None = 源不存在。
 pub async fn duplicate_channel(

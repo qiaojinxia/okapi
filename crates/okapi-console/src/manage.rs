@@ -259,14 +259,17 @@ pub async fn list_settings(
 #[derive(Deserialize)]
 pub struct BatchChannelReq {
     pub ids: Vec<i64>,
-    /// enable | disable | delete | set_egress
+    /// enable | disable | delete | set_egress | set_pools | clear_cooldown
     pub action: String,
     /// `set_egress` 的目标绑定（§11.41），形状同 `POST /admin/channels/{id}/egress`。
     #[serde(default)]
     pub egress: Option<okapi_store::egress::Binding>,
+    /// `set_pools` 的目标池成员列表，形状同 `POST /admin/channels/{id}/pools`。
+    #[serde(default)]
+    pub pools: Option<Vec<super::admin::PoolMemberReq>>,
 }
 
-/// 批量启停/删除渠道（对齐 new-api 批量操作）。
+/// 批量启停/删除/切出口/切池/解冷渠道（对齐 new-api 批量操作）。
 /// own 范围拒绝批量：逐条属主校验会放大误操作面，own 角色请用单条端点。
 pub async fn batch_channels(
     State(state): State<AppState>,
@@ -298,6 +301,31 @@ pub async fn batch_channels(
             let (affected, report) =
                 okapi_store::egress::set_channels_binding(&state.pg, &req.ids, binding).await?;
             assignment = Some(report);
+            affected
+        }
+        "set_pools" => {
+            let raw_pools = req
+                .pools
+                .ok_or_else(|| AppError::bad_request().with_param("pools"))?;
+            let members = super::admin::normalize_members(&state, raw_pools).await?;
+            let valid_ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM channels WHERE id = ANY($1) AND deleted_at IS NULL",
+            )
+            .bind(&req.ids)
+            .fetch_all(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?;
+            for cid in &valid_ids {
+                okapi_store::admin::set_channel_pools(&state.pg, *cid, &members).await?;
+            }
+            valid_ids.len() as u64
+        }
+        "clear_cooldown" => {
+            let (affected, keys) =
+                mutate::batch_clear_channel_cooldown(&state.pg, &req.ids).await?;
+            for (kid, models) in keys {
+                state.sched.clear_channel_key_cooldowns(kid, &models).await;
+            }
             affected
         }
         _ => return Err(AppError::bad_request().with_param("action")),

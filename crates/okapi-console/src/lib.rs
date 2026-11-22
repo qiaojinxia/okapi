@@ -262,14 +262,16 @@ fn channel_routes() -> ConsoleRouter {
             "/admin/channels/{id}/credential",
             post(admin::rotate_channel_credential),
         )
+        .route("/admin/channels/{id}/keys", post(admin::add_channel_key))
         .route(
             "/admin/channels/{id}/keys/{key_id}",
-            axum::routing::patch(admin::update_channel_key),
+            axum::routing::patch(admin::update_channel_key).delete(admin::delete_channel_key),
         )
         .route(
             "/admin/channels/{id}/status",
             post(admin::set_channel_status),
         )
+        .route("/admin/channels/{id}/pin", post(admin::set_channel_pinned))
         .route("/admin/channels/{id}/pools", post(admin::set_channel_pools))
         .route(
             "/admin/pools",
@@ -351,6 +353,14 @@ fn pricing_routes() -> ConsoleRouter {
         )
         .route("/admin/models/{model}", delete(manage::delete_model))
         .route(
+            "/admin/model-aliases",
+            get(admin::list_model_aliases).post(admin::upsert_model_alias),
+        )
+        .route(
+            "/admin/model-aliases/{id}",
+            delete(admin::delete_model_alias),
+        )
+        .route(
             "/admin/groups",
             post(admin::upsert_group).get(manage::list_groups),
         )
@@ -381,6 +391,13 @@ fn pricing_routes() -> ConsoleRouter {
             post(manage::toggle_rule),
         )
         .route("/admin/pricing/publish", post(admin::publish_pricing))
+        .route("/admin/pricing/epochs", get(admin::list_pricing_epochs))
+        .route(
+            "/admin/pricing/epochs/{epoch}/rollback",
+            post(admin::rollback_pricing_epoch),
+        )
+        .route("/admin/pricing/diff", get(admin::diff_pricing))
+        .route("/admin/pricing/simulate", post(admin::simulate_pricing))
         .route(
             "/admin/pricing/import-newapi",
             post(admin::import_newapi_pricing),
@@ -423,6 +440,14 @@ fn user_admin_routes() -> ConsoleRouter {
         .route("/admin/users/{id}/role", post(admin::assign_role))
         .route("/admin/users/{id}/overview", get(admin::user_overview))
         .route("/admin/users/{id}/usage", get(admin::user_usage))
+        .route(
+            "/admin/users/{id}/pricing",
+            get(admin::list_user_pricing).post(admin::upsert_user_pricing),
+        )
+        .route(
+            "/admin/users/{id}/pricing/{model}",
+            delete(admin::delete_user_pricing),
+        )
         .route("/admin/keys", get(manage::list_keys))
         .route(
             "/admin/keys/{id}",

@@ -91,7 +91,12 @@ const REQUIRED: &[(&str, &[&str])] = &[
     ),
     (
         "channels",
-        &["egress_mode", "egress_proxy_id", "egress_group_code"],
+        &[
+            "egress_mode",
+            "egress_proxy_id",
+            "egress_group_code",
+            "pinned_at",
+        ],
     ),
     // 渠道的累计用量（0006 加了成本）：渠道的累计上限读这一行
     ("channel_token_totals", &["tokens", "cost_micro"]),

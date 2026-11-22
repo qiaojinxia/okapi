@@ -11,6 +11,10 @@ pub struct ChannelRow {
     pub status: i16,
     pub priority: i32,
     pub models: serde_json::Value,
+    /// 请求模型 → 上游模型映射（回显以防编辑表单静默清空）。
+    pub model_mapping: serde_json::Value,
+    /// 渠道能力声明（tools / vision 等；回显以防编辑表单静默清空）。
+    pub capabilities: serde_json::Value,
     pub trust_upstream_usage: bool,
     pub owner_id: Option<i64>,
     /// 渠道行为开关（thinking_to_content / bill_by_response_model / strip_request_fields）。
@@ -27,6 +31,8 @@ pub struct ChannelRow {
     pub egress_mode: Option<String>,
     pub egress_proxy_id: Option<i64>,
     pub egress_group_code: Option<String>,
+    /// 管理端列表置顶时间；非空即置顶，按置顶时间倒序排在最前，不影响路由调度优先级。
+    pub pinned_at: Option<DateTime<Utc>>,
 }
 
 /// 渠道在某个池里的成员关系：覆盖为 None 时继承渠道 / key 自身的调度参数。
@@ -39,7 +45,7 @@ pub struct PoolMember {
     pub weight_override: Option<i32>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct ChannelKeyRow {
     pub id: i64,
     pub channel_id: i64,
@@ -50,6 +56,12 @@ pub struct ChannelKeyRow {
     /// 加权随机的权重（多 key 渠道的核心调度参数，管理端需可见可调）。
     pub weight: i32,
     pub max_concurrency: Option<i32>,
+    /// key 级模型子集（null = 继承渠道全部模型）。
+    pub model_subset: Option<serde_json::Value>,
+    /// key 级每分钟请求上限（null = 不限）。
+    pub rpm_limit: Option<i32>,
+    /// key 级每日消费上限 micro-USD（null = 不限）。
+    pub daily_spend_cap_micro: Option<i64>,
     /// 0 = static_key，1 = oauth_refresh（§11.38；列表据此决定是否解出到期时间）。
     pub credential_kind: i16,
     /// 固定分配组分给这把 key 的代理（§11.41）；None = 未分配 / 非固定分配。
@@ -77,6 +89,55 @@ pub struct ChannelFilter<'a> {
     pub status: Option<i16>,
 }
 
+#[derive(sqlx::FromRow)]
+struct ChannelRowDb {
+    id: i64,
+    name: String,
+    provider: String,
+    api_base: Option<String>,
+    status: i16,
+    priority: i32,
+    models: serde_json::Value,
+    model_mapping: serde_json::Value,
+    capabilities: serde_json::Value,
+    trust_upstream_usage: bool,
+    owner_id: Option<i64>,
+    settings: serde_json::Value,
+    cost_milli: i64,
+    egress_mode: Option<String>,
+    egress_proxy_id: Option<i64>,
+    egress_group_code: Option<String>,
+    pinned_at: Option<DateTime<Utc>>,
+    pools: Vec<String>,
+    pool_members: serde_json::Value,
+}
+
+impl From<ChannelRowDb> for ChannelRow {
+    fn from(r: ChannelRowDb) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            provider: r.provider,
+            api_base: r.api_base,
+            status: r.status,
+            priority: r.priority,
+            models: r.models,
+            model_mapping: r.model_mapping,
+            capabilities: r.capabilities,
+            trust_upstream_usage: r.trust_upstream_usage,
+            owner_id: r.owner_id,
+            settings: r.settings,
+            pools: r.pools,
+            pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
+            cost_milli: r.cost_milli,
+            egress_mode: r.egress_mode,
+            egress_proxy_id: r.egress_proxy_id,
+            egress_group_code: r.egress_group_code,
+            pinned_at: r.pinned_at,
+        }
+    }
+}
+
 /// 渠道列表；`filter` 的四个维度全部落在 SQL 里，`slice` 不分页时回全量。
 /// `ChannelList::enabled` 与 `Page::total` 都是过滤集内的计数。
 pub async fn list_channels(
@@ -92,18 +153,20 @@ pub async fn list_channels(
     } = filter;
     let pattern = crate::listing::like_pattern(query);
     let (rows, counts) = tokio::try_join!(
-        sqlx::query!(
-            r#"
+        sqlx::query_as::<_, ChannelRowDb>(
+            r"
         SELECT c.id, c.name, c.provider, c.api_base, c.status, c.priority, c.models,
+               COALESCE(c.model_mapping, '{}'::jsonb) AS model_mapping,
+               COALESCE(c.capabilities, '{}'::jsonb) AS capabilities,
                c.trust_upstream_usage, c.owner_id,
-               COALESCE(c.settings, '{}'::jsonb) AS "settings!",
-               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!",
-               c.egress_mode, c.egress_proxy_id, c.egress_group_code,
+               COALESCE(c.settings, '{}'::jsonb) AS settings,
+               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS cost_milli,
+               c.egress_mode, c.egress_proxy_id, c.egress_group_code, c.pinned_at,
                COALESCE(
                    (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
                    ARRAY[]::varchar[]
-               ) AS "pools!",
+               ) AS pools,
                COALESCE(
                    (SELECT jsonb_agg(jsonb_build_object(
                                'pool_code', pc.pool_code,
@@ -112,22 +175,22 @@ pub async fn list_channels(
                            ) ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
                    '[]'::jsonb
-               ) AS "pool_members!"
+               ) AS pool_members
         FROM channels c
         WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)
           AND ($2::text IS NULL OR c.name ILIKE $2 OR c.api_base ILIKE $2)
           AND ($3::text IS NULL OR c.provider = $3)
           AND ($4::smallint IS NULL OR c.status = $4)
-        ORDER BY c.priority DESC, c.id
+        ORDER BY (c.pinned_at IS NOT NULL) DESC, c.pinned_at DESC NULLS LAST, c.priority DESC, c.id
         LIMIT $5 OFFSET $6
-        "#,
-            owner,
-            pattern.as_deref(),
-            provider,
-            status,
-            slice.limit,
-            slice.offset
+        ",
         )
+        .bind(owner)
+        .bind(pattern.as_deref())
+        .bind(provider)
+        .bind(status)
+        .bind(slice.limit)
+        .bind(slice.offset)
         .fetch_all(pool),
         crate::listing::count_unless_all(
             slice,
@@ -155,27 +218,7 @@ pub async fn list_channels(
         },
         |c| (c.total, c.enabled),
     );
-    let data = rows
-        .into_iter()
-        .map(|r| ChannelRow {
-            id: r.id,
-            name: r.name,
-            provider: r.provider,
-            api_base: r.api_base,
-            status: r.status,
-            priority: r.priority,
-            models: r.models,
-            trust_upstream_usage: r.trust_upstream_usage,
-            owner_id: r.owner_id,
-            settings: r.settings,
-            pools: r.pools,
-            pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
-            cost_milli: r.cost_milli,
-            egress_mode: r.egress_mode,
-            egress_proxy_id: r.egress_proxy_id,
-            egress_group_code: r.egress_group_code,
-        })
-        .collect();
+    let data = rows.into_iter().map(ChannelRow::from).collect();
     Ok(ChannelList {
         page: crate::listing::Page { data, total },
         enabled,
@@ -316,13 +359,13 @@ pub async fn upsert_channel_pool(
 
 /// 全站渠道 key（健康汇总这类整表调用方用）。列表页翻页请走 [`list_channel_keys_for`]。
 pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, StoreError> {
-    let rows = sqlx::query_as!(
-        ChannelKeyRow,
-        r#"
+    let rows = sqlx::query_as::<_, ChannelKeyRow>(
+        r"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
-               weight, max_concurrency, credential_kind, egress_proxy_id
+               weight, max_concurrency, model_subset, rpm_limit, daily_spend_cap_micro,
+               credential_kind, egress_proxy_id
         FROM channel_keys ORDER BY channel_id, id
-        "#
+        ",
     )
     .fetch_all(pool)
     .await?;
@@ -337,15 +380,15 @@ pub async fn list_channel_keys_for(
     if channel_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query_as!(
-        ChannelKeyRow,
-        r#"
+    let rows = sqlx::query_as::<_, ChannelKeyRow>(
+        r"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
-               weight, max_concurrency, credential_kind, egress_proxy_id
+               weight, max_concurrency, model_subset, rpm_limit, daily_spend_cap_micro,
+               credential_kind, egress_proxy_id
         FROM channel_keys WHERE channel_id = ANY($1) ORDER BY channel_id, id
-        "#,
-        channel_ids
+        ",
     )
+    .bind(channel_ids)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -365,6 +408,27 @@ pub async fn set_channel_status(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// 渠道列表置顶开关：pinned = true 写入当前时间（最新置顶排最前），false 清空。
+/// 外层 None = 渠道不存在或已删除；内层 Option = 写入后的 `pinned_at`。
+pub async fn set_channel_pinned(
+    pool: &PgPool,
+    channel_id: i64,
+    pinned: bool,
+) -> Result<Option<Option<DateTime<Utc>>>, StoreError> {
+    let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+        r"UPDATE channels
+          SET pinned_at = CASE WHEN $2 THEN now() ELSE NULL END,
+              updated_at = now()
+          WHERE id = $1 AND deleted_at IS NULL
+          RETURNING pinned_at",
+    )
+    .bind(channel_id)
+    .bind(pinned)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(ts,)| ts))
 }
 
 // ---- 渠道编辑 ----
@@ -430,44 +494,154 @@ pub async fn patch_channel(
     Ok(affected > 0)
 }
 
-/// 渠道单把 key 的权重/并发上限调整；返回是否命中。
-/// 调单把 key 的调度参数与状态。
+/// 渠道单把 key 的三态可写补丁（None = 不改；Some(None) = 清空限额/子集）。
+#[derive(Debug, Default, Clone)]
+pub struct ChannelKeyPatch {
+    pub weight: Option<i32>,
+    pub max_concurrency: Option<Option<i32>>,
+    pub status: Option<i16>,
+    pub model_subset: Option<Option<serde_json::Value>>,
+    pub rpm_limit: Option<Option<i32>>,
+    pub daily_spend_cap_micro: Option<Option<i64>>,
+}
+
+/// 调单把 key 的调度参数、限流护栏与状态。
 ///
 /// `status` 同时复位 `failed_count / cooldown_until / last_error`——手动改状态的语义就是
-/// 「我处理过了，重新开始计数」。此前没有这个参数：401/403 把 key 打成 `status=6`
-/// （无冷却、不自愈）之后，冷却恢复 worker 只捞 `status IN (2,3,4)`，控制面又没有别的入口，
-/// 唯一救法是重置凭证。
+/// 「我处理过了，重新开始计数」。
 pub async fn patch_channel_key(
     pool: &PgPool,
     channel_id: i64,
     channel_key_id: i64,
-    weight: Option<i32>,
-    max_concurrency: Option<Option<i32>>,
-    status: Option<i16>,
+    patch: &ChannelKeyPatch,
 ) -> Result<bool, StoreError> {
-    let affected = sqlx::query!(
-        r#"
+    let affected = sqlx::query(
+        r"
         UPDATE channel_keys SET
-            weight          = COALESCE($3, weight),
-            max_concurrency = CASE WHEN $4::bool THEN $5::int ELSE max_concurrency END,
-            status          = COALESCE($6, status),
-            failed_count    = CASE WHEN $6::smallint IS NULL THEN failed_count ELSE 0 END,
-            cooldown_until  = CASE WHEN $6::smallint IS NULL THEN cooldown_until ELSE NULL END,
-            last_error      = CASE WHEN $6::smallint IS NULL THEN last_error ELSE NULL END,
-            updated_at      = now()
+            weight                = COALESCE($3, weight),
+            max_concurrency       = CASE WHEN $4::bool THEN $5::int ELSE max_concurrency END,
+            status                = COALESCE($6::smallint, status),
+            failed_count          = CASE WHEN $6::smallint IS NULL THEN failed_count ELSE 0 END,
+            cooldown_until        = CASE WHEN $6::smallint IS NULL THEN cooldown_until ELSE NULL END,
+            last_error            = CASE WHEN $6::smallint IS NULL THEN last_error ELSE NULL END,
+            model_subset          = CASE WHEN $7::bool THEN $8::jsonb ELSE model_subset END,
+            rpm_limit             = CASE WHEN $9::bool THEN $10::int ELSE rpm_limit END,
+            daily_spend_cap_micro = CASE WHEN $11::bool THEN $12::bigint ELSE daily_spend_cap_micro END,
+            updated_at            = now()
         WHERE id = $2 AND channel_id = $1
-        "#,
-        channel_id,
-        channel_key_id,
-        weight,
-        max_concurrency.is_some(),
-        max_concurrency.flatten(),
-        status,
+        ",
     )
+    .bind(channel_id)
+    .bind(channel_key_id)
+    .bind(patch.weight)
+    .bind(patch.max_concurrency.is_some())
+    .bind(patch.max_concurrency.flatten())
+    .bind(patch.status)
+    .bind(patch.model_subset.is_some())
+    .bind(patch.model_subset.as_ref().and_then(Option::as_ref))
+    .bind(patch.rpm_limit.is_some())
+    .bind(patch.rpm_limit.flatten())
+    .bind(patch.daily_spend_cap_micro.is_some())
+    .bind(patch.daily_spend_cap_micro.flatten())
     .execute(pool)
     .await?
     .rows_affected();
     Ok(affected > 0)
+}
+
+/// 向已有渠道追加一把新 key 的输入参数。
+pub struct NewChannelKey<'a> {
+    pub credential: &'a str,
+    pub weight: i32,
+    pub max_concurrency: Option<i32>,
+    pub model_subset: Option<&'a serde_json::Value>,
+    pub rpm_limit: Option<i32>,
+    pub daily_spend_cap_micro: Option<i64>,
+}
+
+/// 向已有渠道追加一把新 key（带出口组固定分配协调）；返回 None = 渠道不存在/已删。
+pub async fn add_channel_key(
+    pool: &PgPool,
+    channel_id: i64,
+    input: NewChannelKey<'_>,
+    master_key: Option<&str>,
+) -> Result<Option<i64>, StoreError> {
+    let mut tx = pool.begin().await?;
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM channels WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(channel_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    let sealed = crate::credential::seal_or_plain(master_key, input.credential)?;
+    let kind = i16::from(crate::credential::OAuthCredential::parse(input.credential).is_some());
+    let key_id: i64 = sqlx::query_scalar(
+        r"INSERT INTO channel_keys (
+              channel_id, credential_ciphertext, credential_kind, weight,
+              max_concurrency, model_subset, rpm_limit, daily_spend_cap_micro, status
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
+          RETURNING id",
+    )
+    .bind(channel_id)
+    .bind(sealed)
+    .bind(kind)
+    .bind(input.weight)
+    .bind(input.max_concurrency)
+    .bind(input.model_subset)
+    .bind(input.rpm_limit)
+    .bind(input.daily_spend_cap_micro)
+    .fetch_one(&mut *tx)
+    .await?;
+    crate::egress::reconcile(&mut tx).await?;
+    tx.commit().await?;
+    Ok(Some(key_id))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteChannelKeyOutcome {
+    Deleted,
+    NotFound,
+    LastKey,
+}
+
+/// 从多 key 渠道移除指定 key（禁止删空最后一把，避免留下无凭证的僵尸渠道）。
+pub async fn delete_channel_key(
+    pool: &PgPool,
+    channel_id: i64,
+    channel_key_id: i64,
+) -> Result<DeleteChannelKeyOutcome, StoreError> {
+    let mut tx = pool.begin().await?;
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM channels WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(channel_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if exists.is_none() {
+        return Ok(DeleteChannelKeyOutcome::NotFound);
+    }
+    let key_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id = $1")
+        .bind(channel_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    if !key_ids.contains(&channel_key_id) {
+        return Ok(DeleteChannelKeyOutcome::NotFound);
+    }
+    if key_ids.len() <= 1 {
+        return Ok(DeleteChannelKeyOutcome::LastKey);
+    }
+    sqlx::query("DELETE FROM channel_keys WHERE id = $1 AND channel_id = $2")
+        .bind(channel_key_id)
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
+    crate::egress::reconcile(&mut tx).await?;
+    tx.commit().await?;
+    Ok(DeleteChannelKeyOutcome::Deleted)
 }
 
 /// 凭证轮换结果。多把 key 的渠道必须显式指定 `channel_key_id`——

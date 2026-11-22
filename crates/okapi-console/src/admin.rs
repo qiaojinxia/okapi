@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 mod balance;
+mod channel_keys;
 mod channel_probe;
 mod channel_settings;
 mod channels;
@@ -25,6 +26,8 @@ mod models;
 mod ops;
 mod plans;
 mod pricing;
+mod pricing_entities;
+mod pricing_ops;
 mod roles;
 mod settings;
 mod users;
@@ -35,6 +38,9 @@ pub use self::balance::{
     refund_by_request, set_balance_expiry, set_user_multiplier,
 };
 pub(super) use self::balance::{ensure_adjust_amount, ensure_redemption_amount, ratio_fits};
+pub use self::channel_keys::{
+    AddChannelKeyReq, PatchChannelKeyReq, add_channel_key, delete_channel_key, update_channel_key,
+};
 pub(crate) use self::channel_probe::probe_channel;
 pub use self::channel_probe::{
     DraftModelsReq, TestChannelReq, fetch_channel_models, fetch_draft_models, test_channel,
@@ -42,10 +48,10 @@ pub use self::channel_probe::{
 use self::channel_settings::ensure_request_extensions;
 pub(super) use self::channel_settings::{ensure_azure_api_base, validate_channel_settings};
 pub use self::channels::{
-    ChannelUsageQuery, CreateChannelReq, PatchChannelKeyReq, PatchChannelReq, PoolMemberReq,
-    RotateCredentialReq, SetPoolsReq, SetStatusReq, channel_providers, channel_usage,
-    create_channel, delete_channel, list_channels, rotate_channel_credential, set_channel_pools,
-    set_channel_status, update_channel, update_channel_key,
+    ChannelUsageQuery, CreateChannelReq, PatchChannelReq, PoolMemberReq, RotateCredentialReq,
+    SetPinnedReq, SetPoolsReq, SetStatusReq, channel_providers, channel_usage, create_channel,
+    delete_channel, list_channels, rotate_channel_credential, set_channel_pinned,
+    set_channel_pools, set_channel_status, update_channel,
 };
 pub(super) use self::channels::{
     ensure_cost_milli, ensure_max_concurrency, ensure_pool_scope, normalize_members,
@@ -66,6 +72,14 @@ pub(super) use self::pricing::publish_pricing_inner;
 pub use self::pricing::{
     ImportNewApiReq, PublishPricingQuery, UpsertRuleReq, delete_pricing_rule,
     import_newapi_pricing, list_pricing_rules, publish_pricing, upsert_pricing_rule,
+};
+pub use self::pricing_entities::{
+    UpsertModelAliasReq, UpsertUserPricingReq, delete_model_alias, delete_user_pricing,
+    list_model_aliases, list_user_pricing, upsert_model_alias, upsert_user_pricing,
+};
+pub use self::pricing_ops::{
+    DiffPricingQuery, SimulatePricingReq, diff_pricing, list_pricing_epochs,
+    rollback_pricing_epoch, simulate_pricing,
 };
 pub use self::roles::{AssignRoleReq, CreateRoleReq, assign_role, create_role, list_roles};
 pub use self::settings::{SetSettingReq, SmtpTestReq, get_setting, set_setting, smtp_test};

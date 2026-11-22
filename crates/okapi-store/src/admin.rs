@@ -17,11 +17,12 @@ pub use self::billing::{
     redemption_precheck,
 };
 pub use self::channels::{
-    CREDENTIAL_KIND_OAUTH, ChannelFilter, ChannelKeyRow, ChannelList, ChannelPatch, ChannelRow,
-    PoolMember, RotateOutcome, channel_cost_milli, channel_owner, list_channel_keys,
+    CREDENTIAL_KIND_OAUTH, ChannelFilter, ChannelKeyPatch, ChannelKeyRow, ChannelList,
+    ChannelPatch, ChannelRow, DeleteChannelKeyOutcome, NewChannelKey, PoolMember, RotateOutcome,
+    add_channel_key, channel_cost_milli, channel_owner, delete_channel_key, list_channel_keys,
     list_channel_keys_for, list_channels, patch_channel, patch_channel_key, read_key_credential,
-    rotate_channel_credential, set_channel_owner, set_channel_pool_codes, set_channel_pools,
-    set_channel_status, upsert_channel_pool, write_key_credential,
+    rotate_channel_credential, set_channel_owner, set_channel_pinned, set_channel_pool_codes,
+    set_channel_pools, set_channel_status, upsert_channel_pool, write_key_credential,
 };
 pub use self::pricing::{
     PriceGroupInput, PricingRuleInput, PricingRuleRow, RatioAxes, delete_pricing_rule,

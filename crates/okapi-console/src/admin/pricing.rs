@@ -118,6 +118,45 @@ pub(super) fn rule_params(req: &UpsertRuleReq) -> Result<Value, AppError> {
     Ok(Value::Object(params))
 }
 
+/// 校验规则 `scope`：仅允许 `groups` / `models` / `users` 三键，拦截拼错键名或元素类型错误导致的静默失效。
+pub(super) fn validate_rule_scope(scope: &Value) -> Result<(), AppError> {
+    let Some(map) = scope.as_object() else {
+        return Err(AppError::bad_request().with_param("scope"));
+    };
+    for (key, value) in map {
+        match key.as_str() {
+            "groups" | "models" => {
+                let Some(items) = value.as_array() else {
+                    return Err(AppError::bad_request().with_param(format!("scope.{key}")));
+                };
+                if items.iter().any(|item| {
+                    item.as_str().is_none_or(|s| {
+                        let t = s.trim();
+                        t.is_empty() || t.len() > 128 || t.chars().any(char::is_control)
+                    })
+                }) {
+                    return Err(AppError::bad_request().with_param(format!("scope.{key}")));
+                }
+            }
+            "users" => {
+                let Some(items) = value.as_array() else {
+                    return Err(AppError::bad_request().with_param("scope.users"));
+                };
+                if items
+                    .iter()
+                    .any(|item| item.as_i64().is_none_or(|id| id <= 0))
+                {
+                    return Err(AppError::bad_request().with_param("scope.users"));
+                }
+            }
+            other => {
+                return Err(AppError::bad_request().with_param(format!("scope.{other}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 定价规则 upsert（改动后需 publish 才进价簿；与模型/分组同一发布闸）。
 pub async fn upsert_pricing_rule(
     State(state): State<AppState>,
@@ -129,9 +168,7 @@ pub async fn upsert_pricing_rule(
     let rule_code = super::super::identifiers::ensure_code("rule_code", &req.rule_code, 64)?;
     let params = rule_params(&req)?;
     let scope = req.scope.clone().unwrap_or_else(|| json!({}));
-    if !scope.is_object() {
-        return Err(AppError::bad_request().with_param("scope"));
-    }
+    validate_rule_scope(&scope)?;
     if req
         .valid_from
         .zip(req.valid_to)

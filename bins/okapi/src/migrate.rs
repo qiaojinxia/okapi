@@ -222,8 +222,16 @@ async fn sync_imported_key(
         )
         .await?;
     }
-    okapi_store::admin::patch_channel_key(pg, channel_id, *key_id, Some(source.weight), None, None)
-        .await?;
+    okapi_store::admin::patch_channel_key(
+        pg,
+        channel_id,
+        *key_id,
+        &okapi_store::admin::ChannelKeyPatch {
+            weight: Some(source.weight),
+            ..Default::default()
+        },
+    )
+    .await?;
     Ok(())
 }
 

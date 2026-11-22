@@ -305,7 +305,11 @@ pub async fn list_channels(
             json!({
                 "id": c.id, "name": c.name, "provider": c.provider,
                 "api_base": c.api_base, "status": c.status, "priority": c.priority,
-                "models": c.models, "trust_upstream_usage": c.trust_upstream_usage,
+                "pinned": c.pinned_at.is_some(),
+                "pinned_at": c.pinned_at,
+                "models": c.models, "model_mapping": c.model_mapping,
+                "capabilities": c.capabilities,
+                "trust_upstream_usage": c.trust_upstream_usage,
                 // 列表也带池：空数组 = 孤儿渠道（对谁都不可达），列表页要能一眼看见
                 "pools": c.pools,
                 "pool_members": c.pool_members,
@@ -360,6 +364,39 @@ pub async fn set_channel_status(
     )
     .await;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct SetPinnedReq {
+    pub pinned: bool,
+}
+
+/// POST /admin/channels/{id}/pin：管理端渠道列表置顶 / 取消置顶（不影响路由调度优先级）。
+pub async fn set_channel_pinned(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    ExtractJson(req): ExtractJson<SetPinnedReq>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    ensure_channel_owner(&state, id, &actor, scope).await?;
+    let Some(pinned_at) = okapi_store::admin::set_channel_pinned(&state.pg, id, req.pinned).await?
+    else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    audit(
+        &state,
+        &actor,
+        "channel.set_pinned",
+        &id.to_string(),
+        json!({ "pinned": req.pinned }),
+    )
+    .await;
+    Ok(Json(json!({
+        "ok": true,
+        "pinned": pinned_at.is_some(),
+        "pinned_at": pinned_at,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -598,16 +635,18 @@ pub async fn update_channel(
             ensure_azure_api_base("vertex", Some(api_base))?;
         }
     }
-    for (field, value) in [
-        ("model_mapping", req.model_mapping.as_ref()),
-        ("settings", req.settings.as_ref()),
-        ("capabilities", req.capabilities.as_ref()),
-    ] {
-        if let Some(v) = value
-            && !v.is_object()
-        {
-            return Err(AppError::bad_request().with_param(field));
-        }
+    let model_mapping = req
+        .model_mapping
+        .as_ref()
+        .map(super::channel_keys::normalize_model_mapping)
+        .transpose()?;
+    if let Some(cap) = req.capabilities.as_ref() {
+        super::channel_keys::validate_capabilities(cap)?;
+    }
+    if let Some(v) = req.settings.as_ref()
+        && !v.is_object()
+    {
+        return Err(AppError::bad_request().with_param("settings"));
     }
     let models = req
         .models
@@ -627,7 +666,7 @@ pub async fn update_channel(
         provider: req.provider.as_deref(),
         api_base: req.api_base.as_deref(),
         models: models.as_ref(),
-        model_mapping: req.model_mapping.as_ref(),
+        model_mapping: model_mapping.as_ref(),
         settings: req.settings.as_ref(),
         capabilities: req.capabilities.as_ref(),
         priority: req.priority,
@@ -730,65 +769,4 @@ pub async fn rotate_channel_credential(
     Ok(Json(
         json!({ "ok": true, "channel_key_id": channel_key_id }),
     ))
-}
-
-#[derive(Deserialize)]
-pub struct PatchChannelKeyReq {
-    #[serde(default)]
-    pub weight: Option<i32>,
-    #[serde(default, deserialize_with = "super::super::double_option")]
-    pub max_concurrency: Option<Option<i32>>,
-    /// 状态：1 启用 / 2 停用。置状态同时清零失败计数、冷却与 last_error。
-    #[serde(default)]
-    pub status: Option<i16>,
-}
-
-/// PATCH /admin/channels/{id}/keys/{key_id}：调单把 key 的权重、并发上限与状态。
-///
-/// `status=1` 即「重新启用」——被 401/403 打成 `status=6`（凭证失效，无冷却不自愈）的 key
-/// 此前只能靠重置凭证救回，运维排查完上游侧问题后没有一键恢复的路径。
-pub async fn update_channel_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, key_id)): Path<(i64, i64)>,
-    ExtractJson(req): ExtractJson<PatchChannelKeyReq>,
-) -> Result<Json<Value>, AppError> {
-    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
-    ensure_channel_owner(&state, id, &actor, scope).await?;
-    if req.weight.is_some_and(|w| w < 0) {
-        return Err(AppError::bad_request().with_param("weight"));
-    }
-    if req.max_concurrency.flatten().is_some_and(|c| c <= 0) {
-        return Err(AppError::bad_request().with_param("max_concurrency"));
-    }
-    // 只放 1/2：其余状态位是状态机自己的（冷却/限流/配额/失效），手工写进去只会骗过调度器
-    if req.status.is_some_and(|s| !matches!(s, 1 | 2)) {
-        return Err(AppError::bad_request().with_param("status"));
-    }
-    let hit = okapi_store::admin::patch_channel_key(
-        &state.pg,
-        id,
-        key_id,
-        req.weight,
-        req.max_concurrency,
-        req.status,
-    )
-    .await?;
-    if !hit {
-        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
-    }
-    state.invalidate_routing_caches();
-    audit(
-        &state,
-        &actor,
-        "channel.update_key",
-        &format!("{id}/{key_id}"),
-        json!({
-            "weight": req.weight,
-            "max_concurrency": req.max_concurrency,
-            "status": req.status,
-        }),
-    )
-    .await;
-    Ok(Json(json!({ "ok": true })))
 }

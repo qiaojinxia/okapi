@@ -122,6 +122,17 @@ impl SchedulerRedis {
         let key = Self::overload_streak_key(channel_key_id);
         let _: Result<i64, _> = self.client.del(key).await;
     }
+
+    /// 运维人工解冷：同时清除指定渠道 key 的 529 退避计数与渠道声明模型的 `(key, model)` 短冷却。
+    pub async fn clear_channel_key_cooldowns(&self, channel_key_id: i64, models: &[String]) {
+        let mut keys = Vec::with_capacity(models.len() + 1);
+        keys.push(Self::overload_streak_key(channel_key_id));
+        for model in models {
+            keys.push(Self::model_cooldown_key(channel_key_id, model));
+        }
+        // 同一个 `{channel_key_id}` hash-tag，单次 DEL 在 Redis Cluster 同槽原子执行
+        let _: Result<i64, _> = self.client.del(keys).await;
+    }
 }
 
 #[cfg(test)]
