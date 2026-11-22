@@ -2,29 +2,116 @@
 
 # Okapi
 
-**自托管的 AI API 网关：一个入口接入多家大模型，按倍率精确计费，每一笔账都能展开成算式。**
+**自托管的 AI API 网关：一个入口接入多家大模型，调度可编排，上游可验真，每一笔账都能展开成算式。**
 
 Rust 单二进制 · 自带管理后台与用户门户 · OpenAI / Anthropic / Gemini 协议兼容
 
-<sub>A self-hosted AI API gateway written in Rust: one OpenAI / Anthropic / Gemini compatible endpoint in front of many LLM providers, with exact, explainable billing and a built-in admin console.</sub>
+<sub>A self-hosted AI API gateway written in Rust: one OpenAI / Anthropic / Gemini compatible endpoint in front of many LLM providers, with policy-driven routing, upstream model verification, exact and explainable billing, and a built-in admin console.</sub>
 
 [![ci](https://github.com/qiaojinxia/okapi/actions/workflows/ci.yml/badge.svg)](https://github.com/qiaojinxia/okapi/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/qiaojinxia/okapi)](LICENSE)
 
-[快速开始](#快速开始) · [界面截图](#界面截图) · [功能清单](#功能清单) · [部署](#部署) · [文档](#文档)
+[最近更新](#最近更新) · [核心能力](#核心能力) · [界面截图](#界面截图) · [快速开始](#快速开始) · [功能清单](#功能清单) · [部署](#部署)
 
 </div>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/admin-dashboard-dark.png">
-  <img alt="Okapi 运营概览：请求量与收入趋势、调用质量、模型用量分布" src="docs/screenshots/admin-dashboard.png">
+  <img alt="Okapi 运营概览：待处理事项、请求量与收入趋势、调用质量、模型用量分布" src="docs/screenshots/admin-dashboard.png">
 </picture>
 
 ## 适合谁
 
 - **运营 API 中转站**：分组定价、充值支付、兑换码、套餐、邀请返利、三方对账，计费后台开箱即用。
-- **团队统一出口**：各家 API key 和云厂商账号收到一处，按成员 / 密钥限额，用量与成本按人、按模型、按渠道拆开看。
+- **团队统一出口**：各家 API key 和云厂商账号收到一处，按成员 / 密钥限额，用量与成本按人、按模型、按渠道拆开看；谁改了什么有审计可查。
 - **个人自用**：自己的 Claude Pro / Max、ChatGPT Codex 订阅登录成渠道，Claude Code、Codex CLI 直接切到网关（实验性）。
+
+## 最近更新
+
+- **调度池与策略中心**：每个池一份带版本的调度策略（多跳降级、条件规则、灰度、护栏、质量降权），保存前 Dry-Run 看候选顺序；
+  订阅账号按 5 小时 / 7 天额度窗口排先后，快过期的额度先用掉。
+- **模型验真**：从协议与能力、分词器指纹、行为指纹三层核验渠道背后是不是声称的模型，识别套壳和偷换。
+- **对话存档**：可选保存请求与响应原文（缺省关），后台按对话气泡查看思考过程和工具调用；有 ClickHouse 存 ClickHouse，没有就存 PG。
+- **审计日志增强**：记录来源 IP、User-Agent、Trace ID 和操作凭证，改动前后逐字段对比、删除前留快照，越权拒绝和后台自动动作也留痕；分页浏览，可导出 CSV / JSON。
+- **界面**：渠道列表每行带 24 小时成功率条，每一格都能点进对应操作；首页待办写明统计时段；统计时区可在后台切换。
+
+## 核心能力
+
+- **一个入口，四种协议互转。** 入口 OpenAI / Anthropic `/v1/messages` / Gemini / Responses，上游 OpenAI /
+  Anthropic / Gemini / Azure / Bedrock / Vertex 任意组合；`reasoning_effort`、`thinking`、`reasoning:{…}`
+  三种写法归一成一条内部指令再按渠道方言展开，跨协议转换保留 `cache_control` 断点——客户端不必知道这次会路由到哪家。
+- **调度可编排。** 六种选路策略、按池的版本化策略文档、三层会话粘性、首字前跨渠道 failover、模型级冷却与
+  529 退避、低质量 key 自动降权；改策略前先 Dry-Run，对比新旧选路，不影响线上流量。
+- **上游可验真。** 协议探针（返回模型名、Tool Calling 回显、Thinking 签名）、贝叶斯分词器指纹、ModelTrace 行为指纹三层
+  逐层给结论；探针走正常数据面，出口代理照常生效。
+- **每一分钱可解释。** 金额全程 i64 micro-USD 定点，计费路径禁浮点（CI 守卫拦截）；每笔账落一份可回放的
+  `pricing_snapshot`，门户里任意一笔账单能展开成逐项算式；改价前有定价模拟器，发布后可对比、回滚。
+- **账目安全到多副本。** Redis Lua 原子预扣 → 上游调用 → usage 结算（微批组提交）→ PG 事件溯源 + outbox；失败原额退款；
+  三方对账（事件重放 ↔ Redis 热余额 ↔ PG 快照）并可按账本修复；采集上游成本算毛利，负毛利自动熔断。
+- **谁改了什么都查得到。** 管理写操作、MCP 工具、身份与密钥安全、支付兑换、后台自动动作和越权拒绝全部进审计，
+  带请求上下文和前后对比；对话原文按需存档，保留期到了自动清理。
+- **AI 直接管网关。** console 内置 MCP 服务（Streamable HTTP），22 个工具按 RBAC 裁剪；写操作过三道闸
+  （站点总开关 + 权限点 + dry-run / confirm）。
+- **单二进制，热路径干净。** `okapi gateway|console|worker|all` 一个二进制跑任意组合；gateway 只碰
+  Redis 与上游，零跨服务调用。容器 8 vCPU 压测 json 10874 / stream 10402 RPS 全 0 错误，SSE 2 万条持有
+  120s 无泄漏。
+
+## 界面截图
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/admin-channels.png" alt="渠道列表">
+      <p><b>渠道</b>：多家上游集中管理。测活、上游余额、订阅额度窗口、24 小时成功率与首字延迟、30 天花费都在一行里，每一格都能点进对应操作。</p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/admin-pool-simulate.png" alt="调度池策略模拟">
+      <p><b>调度池与策略模拟</b>：按池配置选路策略、降级链、条件规则和护栏；Dry-Run 走与生产相同的调度管线，不发上游、不扣费，列出候选顺序、额度紧迫度、质量降权和被排除的原因。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/screenshots/admin-model-verify.png" alt="模型验真">
+      <p><b>模型验真</b>：协议与能力探针、分词器指纹、行为指纹三层核验，判断渠道背后是不是声称的模型。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/screenshots/admin-analytics.png" alt="用量分析">
+      <p><b>用量分析</b>：趋势 / 拆分 / 流向三视图，按模型、渠道、用户、密钥任意过滤与比较，统计时区可在后台切换。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/screenshots/portal-log-bill.png" alt="账单解释">
+      <p><b>账单解释</b>：任意一笔请求展开成「用量 × 当时快照单价」的逐项算式，附分组、规则等倍率快照。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/screenshots/portal-overview.png" alt="用户门户">
+      <p><b>用户门户</b>：用户自己的用量趋势、模型消费排行、实时 RPM / TPM 与余额。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/screenshots/admin-conversation-archive.png" alt="对话存档">
+      <p><b>对话存档</b>：开启后保存请求与响应原文，按对话气泡查看 system、提问、思考过程、工具调用和回复，也能切到原始 JSON。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/screenshots/admin-audit.png" alt="审计日志">
+      <p><b>审计日志</b>：谁在何时从哪改了什么。按动作、对象、操作者、IP 网段、关键词、时间检索，点开看前后对比与请求上下文，可导出。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/screenshots/public-pricing.png" alt="模型广场">
+      <p><b>模型广场</b>：公开价格页，按厂商、能力、分组比价，每个模型附调用示例。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/screenshots/admin-dashboard-dark.png" alt="深色主题">
+      <p><b>深色主题</b>：全站支持浅色 / 深色主题，界面有简体中文与英文。</p>
+    </td>
+  </tr>
+</table>
+
+<sub>截图里是虚构的演示数据，由 <code>frontend/e2e/readme-shots.spec.ts</code> 生成：在 <code>frontend/</code> 下执行 <code>pnpm build && pnpm exec playwright test -c playwright.readme.config.ts</code>。</sub>
 
 ## 快速开始
 
@@ -54,63 +141,6 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 网关（8080）对外，控制台（8081）只绑本机。上公网前请先看[部署](#部署)里的反代与信任来源说明。
-
-## 界面截图
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="docs/screenshots/admin-channels.png" alt="渠道列表">
-      <p><b>渠道</b>：多家上游集中管理，测活结果、上游余额、订阅额度窗口、密钥冷却都在一行里。</p>
-    </td>
-    <td width="50%" valign="top">
-      <img src="docs/screenshots/admin-analytics.png" alt="用量分析">
-      <p><b>用量分析</b>：趋势 / 拆分 / 流向三视图，按模型、渠道、用户、密钥任意过滤与比较。</p>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <img src="docs/screenshots/portal-log-bill.png" alt="账单解释">
-      <p><b>账单解释</b>：任意一笔请求展开成「用量 × 当时快照单价」的逐项算式，附分组、规则等倍率快照。</p>
-    </td>
-    <td valign="top">
-      <img src="docs/screenshots/portal-overview.png" alt="用户门户">
-      <p><b>用户门户</b>：用户自己的用量趋势、模型消费排行、实时 RPM / TPM 与余额。</p>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <img src="docs/screenshots/public-pricing.png" alt="模型广场">
-      <p><b>模型广场</b>：公开价格页，按厂商、能力、分组比价，每个模型附调用示例。</p>
-    </td>
-    <td valign="top">
-      <img src="docs/screenshots/admin-dashboard-dark.png" alt="深色主题">
-      <p><b>深色主题</b>：全站支持浅色 / 深色主题，界面有简体中文与英文。</p>
-    </td>
-  </tr>
-</table>
-
-<sub>截图里是虚构的演示数据，由 <code>frontend/e2e/readme-shots.spec.ts</code> 生成：在 <code>frontend/</code> 下执行 <code>pnpm build && pnpm exec playwright test -c playwright.readme.config.ts</code>。</sub>
-
-## 为什么是 Okapi
-
-- **每一分钱可解释。** 金额全程 i64 micro-USD 定点，计费路径禁浮点（CI 守卫拦截）；每笔账落一份可回放的
-  `pricing_snapshot`；门户里任意一笔账单能展开成逐步算式，管理员改价前有定价模拟器预览新旧差异。
-- **一个入口，四种协议互转。** 入口 OpenAI / Anthropic `/v1/messages` / Gemini / Responses，上游 OpenAI /
-  Anthropic / Gemini / Azure / Bedrock / Vertex 任意组合；`reasoning_effort`、`thinking`、`reasoning:{…}`
-  三种写法归一成一条内部指令再按渠道方言展开——客户端不必知道这次会路由到哪家。
-- **账目安全到多副本。** Redis Lua 原子预扣 → 上游调用 → usage 结算 → PG 事件溯源 + outbox；失败原额退款；
-  三方对账（事件重放 ↔ Redis 热余额 ↔ PG 快照）并可按账本修复；采集上游成本算毛利，负毛利自动熔断。
-- **自用订阅凭证也能进网关。** 站长自己的 Claude Pro / Max、ChatGPT Codex 订阅经 OAuth 登录成渠道，
-  token 刷新走四步锁；Claude Code / Codex CLI 直接切到网关（实验性）。
-- **调度可编排，上游可验真。** 每个调度池一份带版本的策略文档（多跳降级、条件规则、灰度、护栏），
-  改之前先 Dry-Run 对比新旧选路；订阅账号按 5 小时 / 7 天额度窗口排先后，快过期的额度先用掉；
-  渠道背后是不是声称的模型，可以从协议、分词器、行为指纹三层核验。
-- **AI 直接管网关。** console 内置 MCP 服务（Streamable HTTP），22 个工具按 RBAC 裁剪；写操作过三道闸
-  （站点总开关 + 权限点 + dry-run / confirm）。
-- **单二进制，热路径干净。** `okapi gateway|console|worker|all` 一个二进制跑任意组合；gateway 只碰
-  Redis 与上游，零跨服务调用。容器 8 vCPU 压测 json 10874 / stream 10402 RPS 全 0 错误，SSE 2 万条持有
-  120s 无泄漏。
 
 ## 架构一图
 
@@ -234,9 +264,9 @@ flowchart LR
 - [x] Team 层（成员限额、分账、团队 key）
 - [x] key 级 IP 白名单、模型白名单（支持 `claude-*` 这类通配，填别名自动归一到真名）+ 转发头信任闸（信任代理 CIDR / Edge key 两模式）
 - [x] 门户自助：密钥一键轮换（原子换新）、自己把密钥限流调紧（只能调紧不能调松）、低余额 / 密钥到期提醒（邮件或 webhook，可设最短间隔）
-- [x] 对话存档（缺省关，在「系统设置 → 隐私与留痕」开启）：保存请求与响应原文，有 ClickHouse 存 ClickHouse、没有就存 PG；单侧截断上限与保留天数可配，到期自动清理；可选让用户在门户看自己的存档
+- [x] 对话存档（缺省关，在「系统设置 → 隐私与留痕」开启）：保存请求与响应原文，有 ClickHouse 存 ClickHouse、没有就存 PG；单侧截断上限与保留天数可配，到期自动清理；后台按对话气泡查看（思考过程、工具调用、原始 JSON），可单条删除；可选让用户在门户看自己的存档
 - [x] 关键接口每 IP 限流（登录 / 注册 / TOTP / 兑换）
-- [x] 审计日志与登录审计
+- [x] 审计日志：管理写操作、MCP 工具、身份 / 两步验证 / 密钥安全、团队 / 支付 / 兑换、后台自动动作（如负毛利熔断）与越权拒绝全部留痕；记录来源 IP、User-Agent、Trace ID 与操作凭证，改动前后逐字段对比、删除前留快照；按动作 / 对象 / 操作者 / IP 网段 / 关键词 / 时间检索，分页浏览，导出 CSV / JSON（单次 5000 条）；登录成功与失败都记，用户可看自己的登录记录
 - [x] 单用户模式（release 下需二次确认）
 - [ ] Telegram 登录、LDAP；内容记录三态
 
@@ -270,7 +300,7 @@ flowchart LR
 <summary><b>前端</b>（6 项）</summary>
 
 - [x] 管理后台 + 用户门户 + 公开价格页同一 SPA，按角色分区
-- [x] 渠道列表：每一格都能点进对应操作（测活、请求日志、限额、调度池、模型、代理、余额刷新），只看异常、置顶、卡片视图与 24 小时成功率条
+- [x] 渠道列表：每一格都能点进对应操作（测活、请求日志、限额、调度池、模型、代理、余额刷新），只看异常、置顶、卡片视图与 24 小时成功率条；行内菜单一键模型验真
 - [x] 账单解释器、定价模拟器、Playground 试用台（控制面同源中继）
 - [x] 新手引导与接入指南；密钥一键导入 Claude Code / Codex（cc-switch）、NextChat、Cherry Studio
 - [x] i18n zh-CN / en（守卫零裸文案、中英键对齐）、暗色主题、响应式

@@ -89,7 +89,15 @@ const PROVIDERS = {
   ],
 }
 const CH_REQ = [21840, 15620, 9310, 4120, 3260, 2980, 4890, 2240, 0]
-const CHANNEL_HEALTH = { data: CHANNELS.map((c, i) => ({
+// 渠道列表「近 24h」成功率条：48 个半小时槽；qwen 那条（下标 7）下午几个槽出错，停用的那条没流量
+const SLOT = 1800
+const HOURLY_START = Math.floor(nowSec / SLOT) * SLOT - 47 * SLOT
+const hourly = (i: number) => Array.from({ length: 48 }, (_, s) => {
+  const requests = i === 8 ? 0 : Math.max(1, Math.round((CH_REQ[i] / 7 / 48) * (0.55 + 0.45 * Math.sin(((s + 14) / 48) * Math.PI))))
+  const errors = i === 7 && s >= 38 && s <= 43 ? Math.round(requests * (s === 40 || s === 41 ? 0.4 : 0.08)) : i === 1 && s === 20 ? 1 : 0
+  return { ts: HOURLY_START + s * SLOT, requests, errors }
+})
+const CHANNEL_HEALTH = { hourly_start: HOURLY_START, data: CHANNELS.map((c, i) => ({ hourly: hourly(i),
   channel_id: c.id, name: c.name, provider: c.provider, requests: Math.round(CH_REQ[i] / 7), errors: i === 7 ? 41 : Math.round(CH_REQ[i] / 7 / 300),
   error_rate_bp: i === 7 ? 1830 : 30 + i * 7, ttft_p50_ms: 420 + i * 60, ttft_p95_ms: 1100 + i * 140, ttft_p99_ms: 1900 + i * 200,
   failovers: i === 7 ? 12 : i, sticky_rate_bp: 6200, tokens_per_1k_sec: 0, amount_micro: CH_REQ[i] * 900 })) }
@@ -198,6 +206,155 @@ function pricing(url: URL) {
   return { models: batch, groups: GROUPS, ...pageMeta(CATALOG.length, limit, offset, batch.length), groups_page: pageMeta(GROUPS.length, 20, 0, GROUPS.length), pricing_epoch: 12 }
 }
 
+// ---- 调度池：Claude 订阅账号池按额度窗口紧迫度排序，Dry-Run 给出候选顺序与被排除的原因
+const POOLS = [
+  { pool_code: 'default', description: '缺省池：新渠道自动加入，未指定池的分组走这里', routing_strategy: 'priority_weighted', fallback_pool_code: null,
+    policy_version: 3, builtin: true, channel_count: 7, group_count: 2, key_count: 14, fallback_ref_count: 2 },
+  { pool_code: 'claude-sub', description: 'Claude 订阅账号：先用快到期作废的额度，长上下文避开快见底的号', routing_strategy: 'expiry_urgency', fallback_pool_code: 'default',
+    policy_version: 7, builtin: false, channel_count: 4, group_count: 1, key_count: 4, fallback_ref_count: 0 },
+  { pool_code: 'low-latency', description: '交互类请求：按首字延迟选路，失败降级到缺省池', routing_strategy: 'least_latency', fallback_pool_code: 'default',
+    policy_version: 2, builtin: false, channel_count: 3, group_count: 1, key_count: 6, fallback_ref_count: 0 },
+]
+const SUB_POLICY = {
+  fallback_pools: ['default'],
+  selection: { mode: 'expiry_urgency', respect_priority_layers: true, urgency: { short_window_weight: 1, long_window_weight: 2, heavy_prompt_tokens: 100000, heavy_min_headroom_pct: 20 } },
+  affinity: { mode: 'prefer_warm', ttl_secs: 3600 },
+  failover: { max_attempts: 3, max_same_channel_retries: 1, first_output_timeout_secs: 30 },
+  guardrails: { max_cost_milli: 1500 },
+  quality: { enabled: true, min_samples: 20, demote_error_rate_milli: 50, eject_error_rate_milli: 200, demote_latency_ms: 8000 },
+  canary_percent: 10,
+  rules: [{ name: 'long-context', when: { min_prompt_tokens: 100000 }, apply: { failover: { first_output_timeout_secs: 60 } } }],
+}
+const SUB_MEMBERS = [
+  { channel_id: 11, name: 'claude-max-01', provider: 'anthropic_max', status: 1, priority: 10, priority_override: null, weight_override: null, role: 'primary', enabled: true, tags: ['max'], models: ['claude-sonnet-4-5', 'claude-opus-4-1'], active_keys: 1 },
+  { channel_id: 12, name: 'claude-max-02', provider: 'anthropic_max', status: 1, priority: 10, priority_override: null, weight_override: null, role: 'primary', enabled: true, tags: ['max'], models: ['claude-sonnet-4-5', 'claude-opus-4-1'], active_keys: 1 },
+  { channel_id: 13, name: 'claude-pro-03', provider: 'anthropic_max', status: 1, priority: 8, priority_override: null, weight_override: null, role: 'backup', enabled: true, tags: ['pro'], models: ['claude-sonnet-4-5'], active_keys: 1 },
+  { channel_id: 14, name: 'claude-max-04', provider: 'anthropic_max', status: 1, priority: 10, priority_override: null, weight_override: null, role: 'canary', enabled: true, tags: ['max'], models: ['claude-sonnet-4-5'], active_keys: 1 },
+]
+const cand = (channel_id: number, channel_name: string, provider: string, pool_rank: number, pool_role: string, priority: number, over: Json = {}) =>
+  ({ channel_id, channel_key_id: channel_id * 10 + 1, channel_name, provider, pool_rank, pool_role, priority, weight: 1, cost_milli: 1000, tags: [], ...over })
+const SIMULATE = {
+  pool_code: 'claude-sub', requested_model: 'claude-sonnet-4-5', canonical_model: 'claude-sonnet-4-5',
+  saved: {
+    policy_version: 7, canary_selected: false,
+    effective_policy: { primary_pool: 'claude-sub', pool_chain: ['claude-sub', 'default'], strategy: 'expiry_urgency', respect_priority_layers: true, ignore_cost_in_weight: false,
+      affinity_mode: 'prefer_warm', affinity_ttl_secs: 3600, max_attempts: 3, max_same_channel_retries: 1, first_output_timeout_secs: 60, guardrails: { max_cost_milli: 1500 },
+      canary_percent: 10, matched_rules: ['long-context'] },
+    ordered_candidates: [
+      cand(12, 'claude-max-02', 'anthropic_max', 0, 'primary', 10, { tags: ['max'], urgency_score: 87, dominant_window: '7d', quality_status: 'healthy', latency_ms: 1120 }),
+      cand(11, 'claude-max-01', 'anthropic_max', 0, 'primary', 10, { tags: ['max'], urgency_score: 64, dominant_window: '5h', quality_status: 'healthy', latency_ms: 1240 }),
+      cand(13, 'claude-pro-03', 'anthropic_max', 0, 'backup', 8, { tags: ['pro'], urgency_score: 41, dominant_window: '5h', quality_status: 'demoted_latency', latency_ms: 9400 }),
+      cand(1, 'anthropic-official', 'anthropic', 1, 'primary', 10, { cost_milli: 1200, quality_status: 'healthy', latency_ms: 812 }),
+      cand(6, 'bedrock-us-west-2', 'bedrock', 1, 'primary', 4, { cost_milli: 1100, quality_status: 'healthy', latency_ms: 1043 }),
+    ],
+    rejected_candidates: [
+      { channel_id: 14, channel_key_id: 141, channel_name: 'claude-max-04', provider: 'anthropic_max', pool_rank: 0, pool_role: 'canary', reason: 'canary_not_selected' },
+      { channel_id: 3, channel_key_id: 31, channel_name: 'vertex-gemini', provider: 'vertex', pool_rank: 1, pool_role: 'primary', reason: 'member_model_filter' },
+    ],
+  },
+  draft: null,
+}
+
+// ---- 模型验真：三层都通过的结果（协议 / 分词器 / 行为指纹），SSE 一次性回放
+const BANK = { loaded: true, cache_exists: true, built_at: '2026-11-18T00:00:00Z', model_count: 75, tokenizer_classes: 62, tokenizer_probes: 72, sources: ['https://lm.ikale.io/data/'] }
+function verifySse() {
+  const protocol = {
+    model_name: { declared_model: 'claude-sonnet-4-5', upstream_model: 'claude-sonnet-4-5', response_model: 'claude-sonnet-4-5-20250929', declared_family: 'claude', response_family: 'claude', status: 'pass' },
+    tool_call: { status: 'pass', nonce: 'okapi-7c41e9a2', tool_called: true, nonce_matched: true, arguments_valid_json: true, latency_ms: 1380 },
+    signature: { status: 'pass', applicable: true, has_thinking_block: true, has_signature: true, signature_len: 412, thinking_mode: 'enabled', latency_ms: 2210 },
+  }
+  const posterior = {
+    classes: [
+      { id: 'anthropic_claude', lab: 'anthropic', lab_name: 'Anthropic', series: 'Claude', series_zh: 'Claude', exact: 0.962, related: 0.021, matched: 11, compared: 12, overhead: 9 },
+      { id: 'openai_o200k', lab: 'openai', lab_name: 'OpenAI', series: 'o200k_base', series_zh: 'o200k_base', exact: 0.009, related: 0.004, matched: 2, compared: 12, overhead: 18 },
+    ],
+    labs: [{ lab: 'anthropic', lab_name: 'Anthropic', total: 0.983 }, { lab: 'openai', lab_name: 'OpenAI', total: 0.013 }],
+    unknown: 0.004, alien: 0.002, answered: 12,
+  }
+  const tokenizer = { posterior, probes_run: 12, baseline_tokens: 9, baseline_drift: 0, latency_ms: 6420,
+    verdict: { kind: 'exact', top: posterior.classes[0], confidence: 0.962, claim: { expected: ['anthropic_claude'], vendor: 'Anthropic', first_party: true, probability: 0.983, status: 'consistent' } } }
+  const samples = [0, 1, 2].map((index) => ({ index, expected_count: 260, parsed_numbers: 260, minimum_numbers: 182, accepted: true, latency_ms: 4100 + index * 380, response_model: 'claude-sonnet-4-5-20250929' }))
+  const fingerprint = {
+    bank_built_at: BANK.built_at, bank_model_count: 75, decision: 'scored', prediction: 'claude-sonnet-4.5', prediction_name: 'Claude Sonnet 4.5',
+    family_prediction: 'claude', family_prediction_name: 'Claude', declared_family: 'claude', family_matches: true, declared_in_bank: true,
+    top_probability: 0.91, top_family_probability: 0.98, probability_status: 'reference_calibrated', used_outputs: 3, model_like: true,
+    evidence_label: 'Strong', evidence_reason: 'Top family dominates posterior.',
+    top_matches: [
+      { model: 'claude-sonnet-4.5', display_name: 'Claude Sonnet 4.5', family: 'claude', family_name: 'Claude', score: 0.93, probability: 0.91 },
+      { model: 'claude-opus-4.1', display_name: 'Claude Opus 4.1', family: 'claude', family_name: 'Claude', score: 0.71, probability: 0.06 },
+      { model: 'gpt-5.1', display_name: 'GPT-5.1', family: 'gpt', family_name: 'GPT', score: 0.38, probability: 0.02 },
+    ],
+    family_probabilities: [{ family: 'claude', family_name: 'Claude', probability: 0.98 }, { family: 'gpt', family_name: 'GPT', probability: 0.02 }],
+    samples,
+  }
+  const report = { channel_id: 1, provider: 'anthropic', model: 'claude-sonnet-4-5', upstream_model: 'claude-sonnet-4-5', mimic_profile_active: false,
+    verdict: 'verified', warnings: [], protocol, tokenizer, fingerprint, elapsed_ms: 19_840 }
+  const ev = (data: Json) => `event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`
+  return [
+    ev({ type: 'init', channel_id: 1, provider: 'anthropic', model: 'claude-sonnet-4-5', upstream_model: 'claude-sonnet-4-5', mimic_profile_active: false,
+      checks: { protocol: true, tokenizer: true, fingerprint: true }, bank: BANK }),
+    ev({ type: 'protocol_result', result: protocol }),
+    ev({ type: 'tokenizer_result', result: tokenizer }),
+    ...samples.map((sample) => ev({ type: 'fingerprint_sample', sample })),
+    ev({ type: 'fingerprint_result', result: fingerprint }),
+    ev({ type: 'done', report }),
+  ].join('')
+}
+
+// ---- 对话存档：一条 Claude Code 风格的对话（思考过程 + 工具调用），存在 ClickHouse
+const ARCHIVE_ID = '5c0f6a1e-93d2-4b8e-a7c4-1f20e9b3d6a8'
+const ARCHIVE_REQ = {
+  model: 'claude-sonnet-4-5', max_tokens: 4096, stream: true,
+  system: '你是代码助手，回答简洁，必要时调用工具读取文件。',
+  tools: [{ name: 'read_file', description: '读取仓库里的文件', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
+  messages: [{ role: 'user', content: '帮我看看 src/billing.rs 里退款为什么会重复入账？' }],
+}
+const ARCHIVE_TOOLS = [{ id: 'toolu_01', name: 'read_file', arguments: '{"path":"src/billing.rs"}' }]
+const ARCHIVE_TEXT = '问题在 refund() 没有按 request_id 去重：上游超时重试时同一笔请求会进来两次。建议在写退款事件前先查 refunded_at，或把 (request_id, kind) 设成唯一键，让第二次写入直接冲突返回。'
+const ARCHIVE_THINK = '先读 billing.rs 的 refund 路径。重试来自网关 failover，同一个 request_id 可能两次触发退款；看有没有幂等键……'
+const ARCHIVE = {
+  request_id: ARCHIVE_ID, user_id: 7, api_key_id: 12, channel_id: 11, model: 'claude-sonnet-4-5', requested_model: 'claude-sonnet-4-5', endpoint: '/v1/messages',
+  is_stream: true, status_code: 200, error_code: '', request_body: JSON.stringify(ARCHIVE_REQ),
+  response_body: JSON.stringify({ stream: true, text: ARCHIVE_TEXT, reasoning: ARCHIVE_THINK, tool_calls: ARCHIVE_TOOLS }),
+  response_text: ARCHIVE_TEXT, reasoning_text: ARCHIVE_THINK, tool_calls: JSON.stringify(ARCHIVE_TOOLS), truncated: false, created_at: ago(6), storage: 'clickhouse',
+}
+const archiveRow = (i: number, model: string, ask: string, reply: string, over: Json = {}) => ({
+  request_id: `${(0x5c0f6a1e + i * 7919).toString(16)}-93d2-4b8e-a7c4-${(0x1f20e9b3d6a8 + i * 104729).toString(16)}`, user_id: 7 + (i % 3), username: ['dev-lin', 'dev-zhao', 'ops-wu'][i % 3],
+  api_key_id: 12, channel_id: 11, channel_name: 'claude-max-01', model, requested_model: model, endpoint: model.startsWith('claude') ? '/v1/messages' : '/v1/chat/completions',
+  is_stream: true, status_code: 200, error_code: '', request_preview: ask, response_preview: reply, truncated: false, created_at: ago(6 + i * 9), storage: 'clickhouse', ...over,
+})
+const ARCHIVES = [
+  archiveRow(0, 'claude-sonnet-4-5', ARCHIVE_REQ.messages[0].content, ARCHIVE_TEXT, { request_id: ARCHIVE_ID }),
+  archiveRow(1, 'gpt-5.1', '把这段 SQL 改成按月分区的写法', '可以用 PARTITION BY RANGE (created_at)，每月建一个子表……'),
+  archiveRow(2, 'claude-sonnet-4-5', '解释一下这个 panic 的调用栈', 'panic 来自 unwrap() 拿到了 None：config.redis_url 没配……'),
+  archiveRow(3, 'gemini-2.5-pro', '总结这份周报的三个风险点', '一是供应商额度紧张；二是 p95 延迟上升；三是退款积压……'),
+  archiveRow(4, 'claude-opus-4-1', '帮我写个 Rust 的重试中间件，指数退避', '下面是一个基于 tower::Layer 的实现……', { truncated: true }),
+  archiveRow(5, 'deepseek-chat', '这条正则为什么匹配不到中文', '\\w 默认只匹配 ASCII，换成 \\p{Han} 或开 unicode 标志……'),
+]
+
+// ---- 审计日志：谁在何时从哪改了什么；第一条带变更前后对比
+const AUDIT = [
+  { id: 5120, actor: 'admin:1', actor_info: { kind: 'admin', id: 1, label: 'admin' }, action: 'channel.update', target: '7',
+    detail: { before: { priority: 3, weight: 1, pools: ['default'] }, after: { priority: 6, weight: 2, pools: ['default', 'low-latency'] } },
+    ip: '203.0.113.24', user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/131.0', trace_id: '4bf92f3577b34da6a3ce929d0e0e4736', actor_key_id: null, created_at: ago(4) },
+  { id: 5119, actor: 'admin:1', actor_info: { kind: 'admin', id: 1, label: 'admin' }, action: 'pricing.publish', target: 'epoch:12',
+    detail: { epoch: 12, changed_models: 3 }, ip: '203.0.113.24', user_agent: 'Mozilla/5.0 Chrome/131.0', trace_id: '9a1c4e2f6b7d48e0a3f5c2b1d0e9f8a7', actor_key_id: null, created_at: ago(22) },
+  { id: 5118, actor: 'worker', actor_info: { kind: 'worker', id: null, label: null }, action: 'margin_breaker.trip', target: 'pro:8',
+    detail: { group_code: 'pro', channel_id: 8, requests: 214, margin_bp: -180 }, ip: null, user_agent: null, trace_id: null, actor_key_id: null, created_at: ago(47) },
+  { id: 5117, actor: 'mcp:3', actor_info: { kind: 'mcp', id: 3, label: 'admin / ops-agent' }, action: 'channel.set_status', target: '9',
+    detail: { before: { status: 1 }, after: { status: 2 } }, ip: '198.51.100.12', user_agent: 'claude-code/2.1', trace_id: 'c2d1e0f9a8b7465c3d2e1f0a9b8c7d6e', actor_key_id: 3, created_at: ago(65) },
+  { id: 5116, actor: 'admin:1', actor_info: { kind: 'admin', id: 1, label: 'admin' }, action: 'channel.delete', target: '15',
+    detail: { deleted: { name: 'legacy-openai', provider: 'openai', models_count: 5 } }, ip: '203.0.113.24', user_agent: 'Mozilla/5.0 Chrome/131.0', trace_id: null, actor_key_id: null, created_at: ago(96) },
+  { id: 5115, actor: 'user:42', actor_info: { kind: 'user', id: 42, label: 'dev-lin' }, action: 'key.rotate', target: 'key:88',
+    detail: { name: 'cursor-laptop' }, ip: '192.0.2.61', user_agent: 'Mozilla/5.0 Safari/18.1', trace_id: null, actor_key_id: null, created_at: ago(130) },
+  { id: 5114, actor: 'admin:1', actor_info: { kind: 'admin', id: 1, label: 'admin' }, action: 'settings.set', target: 'conversation_archive',
+    detail: { before: { enabled: false }, after: { enabled: true, retention_days: 30 } }, ip: '203.0.113.24', user_agent: 'Mozilla/5.0 Chrome/131.0', trace_id: null, actor_key_id: null, created_at: ago(185) },
+  { id: 5113, actor: 'anon', actor_info: null, action: 'user.login_failed', target: 'dev-zhao@example.com', detail: { reason: 'bad_password' },
+    ip: '192.0.2.200', user_agent: 'curl/8.7.1', trace_id: null, actor_key_id: null, created_at: ago(240) },
+  { id: 5112, actor: 'user:43', actor_info: { kind: 'user', id: 43, label: 'dev-zhao' }, action: 'user.login', target: 'dev-zhao@example.com', detail: { method: 'password' },
+    ip: '192.0.2.200', user_agent: 'Mozilla/5.0 Firefox/133.0', trace_id: null, actor_key_id: null, created_at: ago(241) },
+]
+
 const ME = { user_id: 1, key_id: 1, role: 100, group: 'default', balance_micro: 1_286_400_000, permissions: ['*'], username: 'admin', email: 'admin@example.com', balance_expires_at: null }
 
 const shiftDay = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400_000).toISOString().slice(0, 10)
@@ -246,6 +403,16 @@ function fixture(url: URL): unknown {
     case '/admin/stats/channel-usage': return CHANNEL_USAGE
     case '/admin/proxies': return { data: [{ id: 1, name: 'sg-egress-01', status: 1 }], total: 1 }
   }
+  if (p === '/admin/pools') return { data: POOLS, total: POOLS.length }
+  if (p === '/admin/pools/claude-sub') return { ...POOLS[1], policy: SUB_POLICY, members: SUB_MEMBERS, models: ['claude-sonnet-4-5', 'claude-opus-4-1'], groups: ['pro'] }
+  if (p === '/admin/channels/verify/bank') return BANK
+  if (p === '/admin/audit') return { data: AUDIT, total: 1286, has_more: true, next_before: null }
+  if (p === '/admin/audit/actions') return { data: [...new Set(AUDIT.map((r) => r.action))] }
+  if (p === '/admin/conversations') return { backend: 'clickhouse', clickhouse_enabled: true, data: ARCHIVES }
+  if (p === '/admin/conversations/stats') return { backend: 'clickhouse', clickhouse_enabled: true, total_count: 18_432, pg_count: 0, ch_count: 18_432,
+    oldest_at: '2026-10-21T00:00:00Z', newest_at: ago(6), policy: { enabled: true, retention_days: 30, allow_user_view: true, max_body_kb: 1024, cleanup_interval_hours: 6 } }
+  if (p === `/admin/logs/${ARCHIVE_ID}/conversation`) return { data: ARCHIVE }
+  if (p === '/admin/settings/conversation_archive') return { value: { enabled: true, retention_days: 30, allow_user_view: true, max_body_kb: 1024, cleanup_interval_hours: 6 } }
   if (p === '/api/me/stats/breakdown') return portalBreakdown(url)
   if (p === '/api/me/logs') return { scope: 'user', data: LOGS, next_before: null }
   if (p === '/api/me/logs/stat') return LOG_STATS
@@ -273,6 +440,10 @@ async function prepare(page: Page, { dark = false } = {}) {
     const url = new URL(request.url())
     if (request.isNavigationRequest()) return route.fulfill({ path: fileURLToPath(new URL('../dist/index.html', import.meta.url)), contentType: 'text/html' })
     if (!/^\/(api|admin|auth|pay)\//.test(url.pathname)) return route.continue()
+    if (request.method() === 'POST' && url.pathname === '/admin/pools/claude-sub/simulate') return route.fulfill({ json: SIMULATE })
+    if (request.method() === 'POST' && url.pathname === '/admin/channels/1/verify') {
+      return route.fulfill({ status: 200, contentType: 'text/event-stream; charset=utf-8', body: verifySse() })
+    }
     return route.fulfill({ json: fixture(url) })
   })
 }
@@ -342,4 +513,53 @@ test('admin dashboard dark', async ({ page }) => {
   await page.goto('/admin')
   await expect(page.locator('[data-slot="dashboard-trend"]')).toBeVisible()
   await snap(page, 'admin-dashboard-dark')
+})
+
+test('routing pool dry-run', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/admin/pools')
+  await page.getByRole('row').filter({ hasText: 'claude-sub' }).getByRole('button', { name: '策略模拟' }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer).toBeVisible()
+  await drawer.locator('#sim-model').fill('claude-sonnet-4-5')
+  await drawer.locator('#sim-tokens').fill('128000')
+  await drawer.getByRole('button', { name: '运行模拟' }).click()
+  await expect(drawer.getByText('claude-max-02').first()).toBeVisible()
+  await snap(page, 'admin-pool-simulate')
+})
+
+test('model verification', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/admin/channels')
+  await page.getByRole('button', { name: '更多操作' }).first().click()
+  await page.getByRole('menuitem', { name: '模型验真' }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer).toBeVisible()
+  await drawer.getByRole('button', { name: '开始验真' }).click()
+  const verdict = drawer.locator('[data-slot="verify-verdict"]')
+  await expect(verdict).toBeVisible()
+  // 结论放到抽屉顶端，下面接着三层结果
+  await verdict.evaluate((node) => node.scrollIntoView({ block: 'start' }))
+  await snap(page, 'admin-model-verify')
+})
+
+test('conversation archive', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/admin/logs')
+  await page.getByRole('button', { name: '对话存档' }).click()
+  const tab = page.locator('[data-slot="admin-conversations-tab"]')
+  await expect(tab).toBeVisible()
+  await tab.getByText(ARCHIVE_TEXT.slice(0, 20)).first().click()
+  const viewer = page.getByRole('dialog').locator('[data-slot="conversation-viewer"]')
+  await expect(viewer).toBeVisible()
+  await viewer.getByText('思考过程（点击展开）').click()
+  await snap(page, 'admin-conversation-archive')
+})
+
+test('audit log', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/admin/audit')
+  await expect(page.getByRole('navigation', { name: '分页' })).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'channel.update' })).toBeVisible()
+  await snap(page, 'admin-audit')
 })
