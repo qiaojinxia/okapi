@@ -182,6 +182,66 @@ pub(crate) fn stream_error(err: &serde_json::Value, raw: &str) -> UpstreamError 
 #[derive(Default)]
 pub struct MetaScanner;
 
+#[derive(serde::Deserialize)]
+struct GeminiChunk<'a> {
+    #[serde(default)]
+    error: crate::json_probe::Present,
+    #[serde(default, borrow)]
+    candidates: Option<Vec<GeminiCandidate<'a>>>,
+    #[serde(default, rename = "usageMetadata")]
+    usage_metadata: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct GeminiCandidate<'a> {
+    #[serde(default, borrow)]
+    content: Option<GeminiContent<'a>>,
+}
+
+#[derive(serde::Deserialize)]
+struct GeminiContent<'a> {
+    #[serde(default, borrow)]
+    parts: Option<Vec<GeminiPart<'a>>>,
+}
+
+#[derive(serde::Deserialize)]
+struct GeminiPart<'a> {
+    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+    text: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, rename = "functionCall")]
+    function_call: crate::json_probe::Present,
+}
+
+/// 快速路径：纯文本增量块单遍零 DOM 解析（serde 仍完整校验整帧 JSON 合法性）；
+/// 命中 error / functionCall 或非常规字段形态时返回 None 交由 Value DOM 回退处理。
+fn scan_gemini_fast(raw: &str) -> Option<(bool, usize, Option<okapi_api::UsageProbe>)> {
+    let chunk = serde_json::from_str::<GeminiChunk>(raw).ok()?;
+    if chunk.error.0 {
+        return None;
+    }
+    let parts = chunk
+        .candidates
+        .as_deref()
+        .and_then(|c| c.first())
+        .and_then(|c| c.content.as_ref())
+        .and_then(|c| c.parts.as_deref());
+    if parts.into_iter().flatten().any(|part| part.function_call.0) {
+        return None;
+    }
+    let mut has_output = false;
+    let mut content_chars = 0usize;
+    for part in parts.into_iter().flatten() {
+        if let Some(t) = part.text.as_deref() {
+            if !t.is_empty() {
+                has_output = true;
+            }
+            content_chars = content_chars.saturating_add(t.chars().count());
+        }
+    }
+    let usage = crate::convert::openai_to_gemini::usage_from_gemini(chunk.usage_metadata.as_ref());
+    Some((has_output, content_chars, usage))
+}
+
 impl MetaScanner {
     #[must_use]
     pub fn new() -> Self {
@@ -197,6 +257,15 @@ impl MetaScanner {
             Ok(raw) => raw,
             Err(err) => return vec![Err(err)],
         };
+        if let Some((has_output, content_chars, usage)) = scan_gemini_fast(&raw) {
+            return vec![Ok(crate::types::ChatEvent::Data {
+                raw,
+                event: None,
+                has_output,
+                content_chars,
+                usage,
+            })];
+        }
         let src: serde_json::Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => return vec![Err(UpstreamError::Stream("gemini_chunk_json".into()))],

@@ -30,32 +30,47 @@ pub(super) struct RespMeta {
 /// （response.created 就带 model，service_tier 到 response.completed 才定）。
 pub(super) fn capture_chunk_meta(event: &ChatEvent, meta: &mut RespMeta) {
     #[derive(serde::Deserialize)]
-    struct MetaOnly {
+    struct MetaOnly<'a> {
         /// Gemini 形状叫 modelVersion
-        #[serde(alias = "modelVersion")]
-        model: Option<String>,
-        service_tier: Option<String>,
-        #[serde(alias = "message")]
-        response: Option<Box<MetaOnly>>,
+        #[serde(default, alias = "modelVersion", borrow)]
+        model: Option<std::borrow::Cow<'a, str>>,
+        #[serde(default, borrow)]
+        service_tier: Option<std::borrow::Cow<'a, str>>,
+        #[serde(default, alias = "message", borrow)]
+        response: Option<Box<MetaOnly<'a>>>,
     }
-    fn absorb(meta: &mut RespMeta, probe: MetaOnly) {
+    fn absorb(meta: &mut RespMeta, probe: MetaOnly<'_>) {
         if meta.model.is_none()
             && let Some(model) = probe.model.filter(|m| !m.is_empty())
         {
-            meta.model = Some(model);
+            meta.model = Some(model.into_owned());
         }
         if meta.service_tier.is_none()
             && let Some(tier) = probe.service_tier.filter(|t| !t.is_empty())
         {
-            meta.service_tier = Some(tier);
+            meta.service_tier = Some(tier.into_owned());
         }
         if let Some(inner) = probe.response {
             absorb(meta, *inner);
         }
     }
-    if let ChatEvent::Data { raw, .. } = event
-        && let Ok(probe) = serde_json::from_str::<MetaOnly>(raw)
+    if meta.model.is_some() && meta.service_tier.is_some() {
+        return;
+    }
+    let ChatEvent::Data { raw, .. } = event else {
+        return;
+    };
+    let need_model = meta.model.is_none();
+    let need_tier = meta.service_tier.is_none();
+    // `model` 同时覆盖顶层/嵌套 `model` 与 Gemini 的 `modelVersion`；
+    // 所需字段均未出现（且无 `\u` 转义）时直接跳过 JSON 解析，避免长流逐帧重复反序列化。
+    if (!need_model || !raw.contains("model"))
+        && (!need_tier || !raw.contains("service_tier"))
+        && !raw.contains("\\u")
     {
+        return;
+    }
+    if let Ok(probe) = serde_json::from_str::<MetaOnly>(raw) {
         absorb(meta, probe);
     }
 }
@@ -141,11 +156,11 @@ pub(super) async fn attempt_json(
                 retry,
             );
             info.upstream_request_id = upstream_request_id;
-            bill.trace
-                .response_model(extract_body_meta(&body).model.as_deref());
+            let body_meta = extract_body_meta(&body);
+            bill.trace.response_model(body_meta.model.as_deref());
             // 响应元数据（model 渠道 opt-in / service_tier 模型配档位倍率）
             let resp_meta = if info.bill_resp_model || bill.has_tier_pricing {
-                let mut m = extract_body_meta(&body);
+                let mut m = body_meta;
                 if !info.bill_resp_model {
                     m.model = None; // 未开开关不按响应模型计费
                 }
@@ -352,5 +367,38 @@ mod native_response_meta_tests {
         };
         capture_chunk_meta(&later, &mut meta);
         assert_eq!(meta.model.as_deref(), Some("native-actual"));
+    }
+
+    #[test]
+    fn capture_chunk_meta_fast_path_picks_gemini_model_and_nested_tier() {
+        let mut meta = RespMeta::default();
+        let make = |raw: &str| ChatEvent::Data {
+            event: None,
+            raw: raw.to_owned(),
+            content_chars: 0,
+            usage: None,
+            has_output: false,
+        };
+        // 无关增量直接跳过
+        capture_chunk_meta(&make(r#"{"delta":"hello"}"#), &mut meta);
+        assert!(meta.model.is_none() && meta.service_tier.is_none());
+        // Gemini modelVersion
+        capture_chunk_meta(&make(r#"{"modelVersion":"gemini-2.5-pro"}"#), &mut meta);
+        assert_eq!(meta.model.as_deref(), Some("gemini-2.5-pro"));
+        assert!(meta.service_tier.is_none());
+        // Responses 嵌套 service_tier
+        capture_chunk_meta(
+            &make(r#"{"response":{"model":"ignored","service_tier":"priority"}}"#),
+            &mut meta,
+        );
+        assert_eq!(meta.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(meta.service_tier.as_deref(), Some("priority"));
+        // 两者均就位后不再覆盖
+        capture_chunk_meta(
+            &make(r#"{"model":"other","service_tier":"flex"}"#),
+            &mut meta,
+        );
+        assert_eq!(meta.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(meta.service_tier.as_deref(), Some("priority"));
     }
 }

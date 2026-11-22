@@ -10,6 +10,7 @@ mod envelope;
 mod wire;
 pub use aliases::compatible_cache_details;
 pub use envelope::usage_from_chat;
+pub(crate) use envelope::usage_from_chat_parts;
 pub use wire::has_bridged_usage_fields;
 
 #[derive(Deserialize)]

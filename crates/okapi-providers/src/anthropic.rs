@@ -327,33 +327,69 @@ impl MetaScanner {
             Ok(ev) => ev,
             Err(err) => return vec![Err(err)],
         };
-        let data: serde_json::Value = serde_json::from_str(&ev.data).unwrap_or_default();
-        let mut has_output = false;
-        let mut content_chars = 0usize;
-        let usage = self.usage.observe(&ev.event, &data);
-        match ev.event.as_str() {
+        // 按事件名分派：95%+ 的 content_block_delta / content_block_start 走零 DOM 借用探针，
+        // ping / content_block_stop 直接跳过 JSON 解析；仅含 usage/error 的极少数事件解析 Value。
+        let (has_output, content_chars, usage) = match ev.event.as_str() {
             "content_block_start" => {
-                has_output = data
-                    .get("content_block")
-                    .and_then(|b| b.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("tool_use");
+                #[derive(serde::Deserialize)]
+                struct BlockStart<'a> {
+                    #[serde(default, borrow)]
+                    content_block: Option<BlockKind<'a>>,
+                }
+                #[derive(serde::Deserialize)]
+                struct BlockKind<'a> {
+                    #[serde(
+                        default,
+                        borrow,
+                        rename = "type",
+                        deserialize_with = "crate::json_probe::opt_str"
+                    )]
+                    kind: Option<std::borrow::Cow<'a, str>>,
+                }
+                let is_tool_use = serde_json::from_str::<BlockStart>(&ev.data)
+                    .ok()
+                    .and_then(|s| s.content_block)
+                    .and_then(|b| b.kind)
+                    .is_some_and(|k| k == "tool_use");
+                (is_tool_use, 0, None)
             }
             "content_block_delta" => {
-                content_chars = data.get("delta").map_or(0, |d| {
-                    ["text", "thinking", "partial_json"]
-                        .iter()
-                        .filter_map(|k| d.get(k).and_then(serde_json::Value::as_str))
-                        .map(|s| s.chars().count())
-                        .sum()
-                });
+                #[derive(serde::Deserialize)]
+                struct BlockDelta<'a> {
+                    #[serde(default, borrow)]
+                    delta: Option<DeltaText<'a>>,
+                }
+                #[derive(serde::Deserialize)]
+                struct DeltaText<'a> {
+                    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+                    text: Option<std::borrow::Cow<'a, str>>,
+                    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+                    thinking: Option<std::borrow::Cow<'a, str>>,
+                    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+                    partial_json: Option<std::borrow::Cow<'a, str>>,
+                }
+                let chars = serde_json::from_str::<BlockDelta>(&ev.data)
+                    .ok()
+                    .and_then(|d| d.delta)
+                    .map_or(0, |d| {
+                        d.text.as_deref().map_or(0, |s| s.chars().count())
+                            + d.thinking.as_deref().map_or(0, |s| s.chars().count())
+                            + d.partial_json.as_deref().map_or(0, |s| s.chars().count())
+                    });
                 // 只有带正文 / 思考 / 工具参数的增量才算产出；signature_delta 之类的元数据不算，
                 // 否则一条只发签名的畸形流就能绕过空回复判定
-                has_output = content_chars > 0;
+                (chars > 0, chars, None)
             }
-            "error" => return vec![Err(stream_error(&data, ev.data.as_bytes()))],
-            _ => {}
-        }
+            "message_start" | "message_delta" | "message_stop" => {
+                let data: serde_json::Value = serde_json::from_str(&ev.data).unwrap_or_default();
+                (false, 0, self.usage.observe(&ev.event, &data))
+            }
+            "error" => {
+                let data: serde_json::Value = serde_json::from_str(&ev.data).unwrap_or_default();
+                return vec![Err(stream_error(&data, ev.data.as_bytes()))];
+            }
+            _ => (false, 0, None),
+        };
         let passthrough = ChatEvent::Data {
             raw: ev.data,
             event: Some(ev.event.clone()),

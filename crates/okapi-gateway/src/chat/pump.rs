@@ -247,13 +247,24 @@ pub(super) fn capture_terminal_usage(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SequenceProbe {
+    #[serde(default, deserialize_with = "okapi_kernel::json_probe::opt_u64")]
+    sequence_number: Option<u64>,
+}
+
 pub(super) fn advance_stream_sequence(event: &ChatEvent, ingress: Ingress, next: &mut u64) {
-    if matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact)
-        && let ChatEvent::Data { raw, .. } = event
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
-        && let Some(sequence) = value
-            .get("sequence_number")
-            .and_then(serde_json::Value::as_u64)
+    if !matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact) {
+        return;
+    }
+    let ChatEvent::Data { raw, .. } = event else {
+        return;
+    };
+    if !raw.contains("sequence_number") && !raw.contains("\\u") {
+        return;
+    }
+    if let Ok(probe) = serde_json::from_str::<SequenceProbe>(raw)
+        && let Some(sequence) = probe.sequence_number
     {
         *next = (*next).max(sequence.saturating_add(1));
     }
@@ -309,6 +320,18 @@ impl TerminalGate {
     }
 
     fn defer(&mut self, event: &ChatEvent) -> bool {
+        #[derive(serde::Deserialize)]
+        struct GeminiFinishChunk {
+            #[serde(default)]
+            candidates: Option<Vec<GeminiCandidateFinish>>,
+        }
+        #[derive(serde::Deserialize)]
+        struct GeminiCandidateFinish {
+            #[serde(default, deserialize_with = "okapi_kernel::json_probe::opt_u64")]
+            index: Option<u64>,
+            #[serde(default, rename = "finishReason")]
+            finish_reason: Option<serde::de::IgnoredAny>,
+        }
         let ChatEvent::Data {
             event: name, raw, ..
         } = event
@@ -327,20 +350,31 @@ impl TerminalGate {
         if self.closed {
             return true;
         }
-        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(raw) else {
+        // 绝大部分 Gemini 增量块不带 finishReason，预检直接返回避免逐帧建 DOM。
+        if !raw.contains("finishReason") && !raw.contains("\\u") {
             return false;
-        };
-        let candidates = chunk
-            .get("candidates")
-            .and_then(serde_json::Value::as_array);
-        for candidate in candidates.into_iter().flatten() {
-            if candidate
-                .get("finishReason")
-                .is_some_and(|reason| !reason.is_null())
-            {
-                let index = candidate.get("index").and_then(serde_json::Value::as_u64);
-                self.finished.insert(index.unwrap_or(0));
+        }
+        if let Ok(chunk) = serde_json::from_str::<GeminiFinishChunk>(raw) {
+            for candidate in chunk.candidates.into_iter().flatten() {
+                if candidate.finish_reason.is_some() {
+                    self.finished.insert(candidate.index.unwrap_or(0));
+                }
             }
+        } else if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(raw) {
+            let candidates = chunk
+                .get("candidates")
+                .and_then(serde_json::Value::as_array);
+            for candidate in candidates.into_iter().flatten() {
+                if candidate
+                    .get("finishReason")
+                    .is_some_and(|reason| !reason.is_null())
+                {
+                    let index = candidate.get("index").and_then(serde_json::Value::as_u64);
+                    self.finished.insert(index.unwrap_or(0));
+                }
+            }
+        } else {
+            return false;
         }
         self.closed = self.finished.len() >= self.candidates;
         self.closed
@@ -544,5 +578,36 @@ mod terminal_gate_tests {
             r#"{"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}"#
         )));
         assert!(gate.defer(&ChatEvent::Done));
+    }
+
+    #[test]
+    fn sequence_probe_advances_only_for_valid_responses_u64() {
+        let mut next = 0;
+        super::advance_stream_sequence(
+            &chunk(r#"{"type":"response.output_text.delta","sequence_number":7}"#),
+            Ingress::Responses,
+            &mut next,
+        );
+        assert_eq!(next, 8);
+        // 非 u64 / 非 Responses 入口不推进
+        super::advance_stream_sequence(
+            &chunk(r#"{"sequence_number":"bad"}"#),
+            Ingress::Responses,
+            &mut next,
+        );
+        assert_eq!(next, 8);
+        super::advance_stream_sequence(
+            &chunk(r#"{"sequence_number":99}"#),
+            Ingress::OpenAi,
+            &mut next,
+        );
+        assert_eq!(next, 8);
+        // Unicode 逃逸仍生效
+        super::advance_stream_sequence(
+            &chunk(r#"{"\u0073equence_number":12}"#),
+            Ingress::ResponsesCompact,
+            &mut next,
+        );
+        assert_eq!(next, 13);
     }
 }

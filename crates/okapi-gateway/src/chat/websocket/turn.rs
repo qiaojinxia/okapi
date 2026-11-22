@@ -233,11 +233,8 @@ impl Progress {
         }
         capture_chunk_meta(event, &mut self.meta);
         bill.trace.stream_event(raw);
-        let value = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
-        let kind = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let probe = parse_turn_event_probe(raw);
+        let kind = probe.kind.as_deref().unwrap_or_default();
         self.terminal = matches!(
             kind,
             "response.completed" | "response.failed" | "response.incomplete" | "error"
@@ -245,9 +242,8 @@ impl Progress {
         if self.error.is_none()
             && matches!(kind, "error" | "response.failed" | "response.incomplete")
         {
-            let status = value
-                .get("status")
-                .and_then(Value::as_u64)
+            let status = probe
+                .status
                 .and_then(|v| u16::try_from(v).ok())
                 .and_then(|v| StatusCode::from_u16(v).ok())
                 .filter(|s| s.is_client_error() || s.is_server_error())
@@ -469,6 +465,23 @@ async fn consume(
         }
     }
     progress
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TurnEventProbe<'a> {
+    #[serde(
+        default,
+        borrow,
+        rename = "type",
+        deserialize_with = "okapi_kernel::json_probe::opt_str"
+    )]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, deserialize_with = "okapi_kernel::json_probe::opt_u64")]
+    status: Option<u64>,
+}
+
+fn parse_turn_event_probe(raw: &str) -> TurnEventProbe<'_> {
+    serde_json::from_str::<TurnEventProbe>(raw).unwrap_or_default()
 }
 
 #[cfg(test)]

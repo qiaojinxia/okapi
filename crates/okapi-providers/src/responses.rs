@@ -143,6 +143,31 @@ fn is_terminal(kind: &str) -> bool {
     )
 }
 
+#[derive(Default, serde::Deserialize)]
+struct ResponsesEventProbe<'a> {
+    #[serde(
+        default,
+        borrow,
+        rename = "type",
+        deserialize_with = "crate::json_probe::opt_str"
+    )]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+    delta: Option<std::borrow::Cow<'a, str>>,
+}
+
+#[derive(serde::Deserialize)]
+struct TerminalUsageEnvelope {
+    #[serde(default)]
+    response: Option<TerminalResponseUsage>,
+}
+
+#[derive(serde::Deserialize)]
+struct TerminalResponseUsage {
+    #[serde(default)]
+    usage: Option<Value>,
+}
+
 /// 一条 Responses SSE 事件 → 透传事件（终态后追加流终止标记）。
 ///
 /// 首字判定：任何带 `delta` 文本的增量事件（output_text / refusal /
@@ -155,20 +180,25 @@ pub fn parse_event(event_name: &str, data: &str) -> Vec<ChatEvent> {
         // 官方不发 [DONE]；兼容上游若发，当作流结束
         return vec![ChatEvent::Done];
     }
-    let parsed: Value = serde_json::from_str(data).unwrap_or_default();
-    let kind = parsed
-        .get("type")
-        .and_then(Value::as_str)
+    // 热路径：99% 以上是增量事件，只读顶层 type/delta，完全跳过整帧 Value DOM 分配；
+    // 仅终态事件（每条流 1 帧）才按需提取 response.usage（仍跳过庞大的 response.output 数组）。
+    let probe = serde_json::from_str::<ResponsesEventProbe>(data).unwrap_or_default();
+    let kind = probe
+        .kind
+        .as_deref()
         .filter(|k| !k.is_empty())
         .unwrap_or(event_name)
         .to_owned();
     let is_delta = kind.strip_suffix(".delta").is_some();
-    let (has_output, content_chars) = match parsed.get("delta").and_then(Value::as_str) {
+    let (has_output, content_chars) = match probe.delta.as_deref() {
         Some(delta) if is_delta => (true, delta.chars().count()),
         _ => (kind == "response.output_item.done", 0),
     };
     let usage = if is_terminal(&kind) {
-        usage_from_responses(parsed.pointer("/response/usage"))
+        serde_json::from_str::<TerminalUsageEnvelope>(data)
+            .ok()
+            .and_then(|t| t.response)
+            .and_then(|r| usage_from_responses(r.usage.as_ref()))
     } else {
         None
     };

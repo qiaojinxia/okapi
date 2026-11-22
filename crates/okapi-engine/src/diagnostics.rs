@@ -100,24 +100,31 @@ impl Trace {
     }
 
     pub fn stream_event(&self, raw: &str) {
+        // 绝大多数正常流式增量块既无 error 字段也非终态失败事件，先做字面量预检跳过 JSON 解析；
+        // 保留 `\\u` 逃逸兜底以保证与 RFC 8259 字符串语义一致。
+        if !raw.contains("error")
+            && !raw.contains("response.failed")
+            && !raw.contains("response.incomplete")
+            && !raw.contains("\\u")
+        {
+            return;
+        }
+        // 即便正文增量恰巧出现 "error" 字样，也先用零 DOM 轻量探针排除，
+        // 仅在真正命中顶层失败事件时才构建 Value 提取诊断详情。
+        if !is_stream_failure_event(raw) {
+            return;
+        }
         let Ok(value) = serde_json::from_str::<Value>(raw) else {
             return;
         };
-        if matches!(
-            value["type"].as_str(),
-            Some("error" | "response.failed" | "response.incomplete")
-        ) || value["error"].is_object()
-            || value["error"].is_string()
-        {
-            let error = value.get("response").unwrap_or(&value);
-            self.failure(&UpstreamError::Status {
-                status: 502,
-                body: bytes::Bytes::from(error.to_string()),
-                retry_after_secs: None,
-            });
-            self.set("request_failed", json!(true));
-            self.set("stream_end_reason", json!("upstream_error"));
-        }
+        let error = value.get("response").unwrap_or(&value);
+        self.failure(&UpstreamError::Status {
+            status: 502,
+            body: bytes::Bytes::from(error.to_string()),
+            retry_after_secs: None,
+        });
+        self.set("request_failed", json!(true));
+        self.set("stream_end_reason", json!("upstream_error"));
     }
 
     pub fn media(&self, body: &[u8], video: bool) {
@@ -397,6 +404,83 @@ pub fn public(value: &Value) -> Value {
     result
 }
 
+#[derive(Default)]
+enum StreamErrorField {
+    #[default]
+    Other,
+    ObjectOrString,
+}
+
+impl<'de> serde::Deserialize<'de> for StreamErrorField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+        struct FieldVisitor;
+        impl<'de> Visitor<'de> for FieldVisitor {
+            type Value = StreamErrorField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::ObjectOrString)
+            }
+            fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::ObjectOrString)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(StreamErrorField::ObjectOrString)
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(StreamErrorField::Other)
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::Other)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::Other)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::Other)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::Other)
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::Other)
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(StreamErrorField::Other)
+            }
+        }
+        deserializer.deserialize_any(FieldVisitor)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct StreamErrorProbe<'a> {
+    #[serde(
+        default,
+        borrow,
+        rename = "type",
+        deserialize_with = "okapi_kernel::json_probe::opt_str"
+    )]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default)]
+    error: StreamErrorField,
+}
+
+/// 零 DOM 探测流式 chunk 是否为顶层失败事件（`type` 命中错误/失败/未完成，或顶层 `error` 为对象/字符串）。
+fn is_stream_failure_event(raw: &str) -> bool {
+    let Ok(probe) = serde_json::from_str::<StreamErrorProbe>(raw) else {
+        return false;
+    };
+    matches!(
+        probe.kind.as_deref(),
+        Some("error" | "response.failed" | "response.incomplete")
+    ) || matches!(probe.error, StreamErrorField::ObjectOrString)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +604,22 @@ mod tests {
         assert_eq!(snapshot["error_phase"], "upstream");
         assert_eq!(snapshot["stream_end_reason"], "upstream_error");
         assert!(!snapshot.to_string().contains("private prompt"));
+    }
+
+    #[test]
+    fn stream_event_fast_path_ignores_text_mentioning_error_and_handles_unicode_escapes() {
+        let trace = Trace::new(&HeaderMap::new());
+        // 正常正文增量哪怕包含 "error" 字样也不得误判为上游失败。
+        trace.stream_event(r#"{"choices":[{"delta":{"content":"no error happened here"}}]}"#);
+        assert!(trace.snapshot()["request_failed"].is_null());
+        // 顶层 type 非字符串而 error 为字符串时仍应识别。
+        trace.stream_event(r#"{"type":123,"error":"upstream boom"}"#);
+        assert_eq!(trace.snapshot()["request_failed"], true);
+
+        // RFC 8259 \uXXXX 逃逸的键名仍走探针且正确识别。
+        let escaped = Trace::new(&HeaderMap::new());
+        escaped.stream_event(r#"{"\u0065rror":{"message":"escaped failure"}}"#);
+        assert_eq!(escaped.snapshot()["request_failed"], true);
+        assert_eq!(escaped.snapshot()["error_message"], "escaped failure");
     }
 }

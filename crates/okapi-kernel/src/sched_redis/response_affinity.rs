@@ -213,22 +213,11 @@ impl ResponseWriter {
         key: i64,
         raw: &[u8],
     ) -> Result<(), AppError> {
-        let Ok(value) = serde_json::from_slice::<Value>(raw) else {
-            return Ok(());
-        };
-        let response = value.get("response").unwrap_or(&value);
-        if response
-            .get("object")
-            .and_then(Value::as_str)
-            .is_some_and(|object| object != "response")
-        {
-            return Ok(());
-        }
-        let Some(id) = response.get("id").and_then(Value::as_str) else {
+        let Some(id) = extract_response_id(raw) else {
             return Ok(());
         };
         if let Some(seen) = &self.seen {
-            return if seen == id {
+            return if seen == id.as_ref() {
                 Ok(())
             } else {
                 Err(
@@ -238,9 +227,161 @@ impl ResponseWriter {
             };
         }
         sched
-            .response_binding_set(user, key, id, &self.binding)
+            .response_binding_set(user, key, id.as_ref(), &self.binding)
             .await?;
-        self.seen = Some(id.to_owned());
+        self.seen = Some(id.into_owned());
         Ok(())
+    }
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[derive(Default)]
+struct ResponseFields<'a> {
+    id: Option<std::borrow::Cow<'a, str>>,
+    object: Option<std::borrow::Cow<'a, str>>,
+}
+
+#[derive(Default)]
+enum ResponseSlot<'a> {
+    #[default]
+    Absent,
+    Object(ResponseFields<'a>),
+    NonObject,
+}
+
+struct OptStrSeed;
+impl<'de> serde::de::DeserializeSeed<'de> for OptStrSeed {
+    type Value = Option<std::borrow::Cow<'de, str>>;
+    fn deserialize<D: serde::de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        crate::json_probe::opt_str(deserializer)
+    }
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for ResponseSlot<'a> {
+    fn deserialize<D: serde::de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+        use std::borrow::Cow;
+
+        struct SlotVisitor;
+        impl<'de> Visitor<'de> for SlotVisitor {
+            type Value = ResponseSlot<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = ResponseFields::default();
+                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+                    match key.as_ref() {
+                        "id" => fields.id = map.next_value_seed(OptStrSeed)?,
+                        "object" => fields.object = map.next_value_seed(OptStrSeed)?,
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(ResponseSlot::Object(fields))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(ResponseSlot::NonObject)
+            }
+        }
+        deserializer.deserialize_any(SlotVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+struct ResponseIdProbe<'a> {
+    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+    id: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "crate::json_probe::opt_str")]
+    object: Option<std::borrow::Cow<'a, str>>,
+    #[serde(default, borrow)]
+    response: ResponseSlot<'a>,
+}
+
+/// 零 DOM 提取 Responses 事件（或非流式响应）里的 `response.id`（或顶层 `id`）。
+/// 普通增量帧只含 `item_id` 不含 `"id"`，字面量预检即可直接返回 `None` 避免解析 JSON。
+fn extract_response_id(raw: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
+    if !contains_subslice(raw, b"\"id\"") && !contains_subslice(raw, b"\\u") {
+        return None;
+    }
+    let probe = serde_json::from_slice::<ResponseIdProbe>(raw).ok()?;
+    let (id, object) = match probe.response {
+        ResponseSlot::Object(fields) => (fields.id, fields.object),
+        ResponseSlot::Absent => (probe.id, probe.object),
+        ResponseSlot::NonObject => return None,
+    };
+    if object.as_deref().is_some_and(|o| o != "response") {
+        return None;
+    }
+    id
+}
+
+#[cfg(test)]
+mod extract_id_tests {
+    use super::extract_response_id;
+
+    #[test]
+    fn extracts_response_id_across_streaming_and_edge_shapes() {
+        assert_eq!(
+            extract_response_id(
+                br#"{"type":"response.output_text.delta","item_id":"msg_1","delta":"hi"}"#
+            ),
+            None
+        );
+        assert_eq!(
+            extract_response_id(
+                br#"{"type":"response.created","response":{"id":"resp_1","object":"response"}}"#
+            )
+            .as_deref(),
+            Some("resp_1")
+        );
+        assert_eq!(
+            extract_response_id(br#"{"id":"resp_2","object":"response"}"#).as_deref(),
+            Some("resp_2")
+        );
+        // 显式 response: null 不能退回到顶层 id
+        assert_eq!(
+            extract_response_id(br#"{"id":"resp_top","response":null}"#),
+            None
+        );
+        // 非 response object 忽略
+        assert_eq!(
+            extract_response_id(br#"{"id":"msg_1","object":"chat.completion"}"#),
+            None
+        );
+        // \uXXXX 逃逸键名保持等价
+        assert_eq!(
+            extract_response_id(br#"{"\u0069d":"resp_3","object":"response"}"#).as_deref(),
+            Some("resp_3")
+        );
     }
 }

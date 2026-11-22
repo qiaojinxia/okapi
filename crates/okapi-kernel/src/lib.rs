@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod extract;
 pub mod inflight;
+pub mod json_probe;
 pub mod mail;
 pub mod margin;
 pub mod metrics;

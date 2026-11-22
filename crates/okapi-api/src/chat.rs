@@ -421,18 +421,42 @@ pub struct ChunkProbe {
 
 impl<'de> Deserialize<'de> for ChunkProbe {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        // 从借用的子树反序列化：每个流式事件都过这里，不必先把 choices 深拷贝一份
-        let choices = match value.get("choices") {
-            Some(choices) => {
-                Vec::<ChunkChoice>::deserialize(choices).map_err(serde::de::Error::custom)?
-            }
-            None => Vec::new(),
+        #[derive(Deserialize)]
+        struct FastChoice {
+            #[serde(default)]
+            delta: ChunkDelta,
+            #[serde(default)]
+            usage: Option<serde_json::Value>,
+        }
+        #[derive(Deserialize)]
+        struct FastChunk {
+            #[serde(default)]
+            choices: Vec<FastChoice>,
+            #[serde(default)]
+            usage: Option<serde_json::Value>,
+            #[serde(default)]
+            timings: Option<serde_json::Value>,
+        }
+        // 单遍直接反序列化：绝大多数增量块不含 usage/timings，完全跳过整块 Value DOM 分配。
+        let raw = FastChunk::deserialize(deserializer)?;
+        let has_usage = raw.usage.is_some()
+            || raw.timings.is_some()
+            || raw.choices.iter().any(|c| c.usage.is_some());
+        let usage = if has_usage {
+            crate::token_usage::usage_from_chat_parts(
+                raw.usage,
+                raw.timings.as_ref(),
+                raw.choices.iter().filter_map(|c| c.usage.as_ref()),
+            )
+        } else {
+            None
         };
-        Ok(Self {
-            choices,
-            usage: crate::usage_from_chat(&value),
-        })
+        let choices = raw
+            .choices
+            .into_iter()
+            .map(|c| ChunkChoice { delta: c.delta })
+            .collect();
+        Ok(Self { choices, usage })
     }
 }
 

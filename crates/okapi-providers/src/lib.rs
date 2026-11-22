@@ -38,6 +38,7 @@ pub mod http;
 pub mod image_store;
 pub mod image_stream;
 pub mod inference;
+mod json_probe;
 pub mod limits;
 pub mod model_parameters;
 pub mod modifiers;
