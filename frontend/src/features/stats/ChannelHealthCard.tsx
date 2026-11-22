@@ -6,6 +6,7 @@ import { BAD_BP, WARN_BP } from '@/lib/health'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Pagination } from '@/components/ui/pagination'
+import { Tooltip } from '@/components/ui/tooltip'
 import { EmptyState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
@@ -58,21 +59,31 @@ export function ChannelHealthCard({ days }: { days: number }) {
               {(q.data?.data ?? []).map((c) => (
                 <Tr key={c.channel_id}>
                   <Td className="max-w-48 truncate">
-                    {/* 红灯渠道 → 一键到该渠道的失败明细，不必记 id 再去日志页手敲 */}
-                    <Link
-                      to="/admin/logs"
-                      search={{
-                        channel_id: c.channel_id,
-                        hours: days * 24,
-                        errors_only: c.error_rate_bp >= WARN_BP ? true : undefined,
-                      }}
-                      className="underline decoration-dotted hover:text-foreground"
-                    >
-                      {maskEmails(c.name || `#${c.channel_id}`)}
-                    </Link>
+                    {c.channel_id === 0 ? (
+                      // id=0 不是渠道：请求在选到渠道之前就失败了（没有可用渠道、客户端提前断开…）。
+                      // 日志页的渠道筛选只收正整数，链过去会变成"全部渠道"，所以这里只给说明不给链接
+                      <Tooltip content={t('admin:statUnassignedHint')}>
+                        <span tabIndex={0} className="cursor-help rounded underline decoration-dotted outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+                          {t('admin:dashboardUnassignedChannel')}
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      /* 红灯渠道 → 一键到该渠道的失败明细，不必记 id 再去日志页手敲 */
+                      <Link
+                        to="/admin/logs"
+                        search={{
+                          channel_id: c.channel_id,
+                          hours: days * 24,
+                          errors_only: c.error_rate_bp >= WARN_BP ? true : undefined,
+                        }}
+                        className="underline decoration-dotted hover:text-foreground"
+                      >
+                        {maskEmails(c.name || `#${c.channel_id}`)}
+                      </Link>
+                    )}
                   </Td>
                   <Td>
-                    <Badge variant="muted">{c.provider}</Badge>
+                    {c.provider ? <Badge variant="muted">{c.provider}</Badge> : <span className="text-muted-foreground">—</span>}
                   </Td>
                   <Td>{formatCount(c.requests, i18n.language)}</Td>
                   <Td>
@@ -81,7 +92,8 @@ export function ChannelHealthCard({ days }: { days: number }) {
                     </Badge>
                   </Td>
                   <Td className="font-mono text-xs">
-                    {c.ttft_p50_ms} / {c.ttft_p95_ms} / {c.ttft_p99_ms} ms
+                    {/* 没有一次成功出字的渠道（含 id=0）没有首字分位，后端给 null */}
+                    {c.ttft_p50_ms == null ? <span className="text-muted-foreground">—</span> : `${c.ttft_p50_ms} / ${c.ttft_p95_ms ?? '—'} / ${c.ttft_p99_ms ?? '—'} ms`}
                   </Td>
                   <Td>{formatTokensPerSec(c.tokens_per_1k_sec, i18n.language)}</Td>
                   <Td>{formatBp(c.sticky_rate_bp, i18n.language)}</Td>

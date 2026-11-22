@@ -445,6 +445,46 @@ test('首页异常进入同窗渠道健康，质量页日期和页签刷新、�
   await page.screenshot({ path: 'test-results/quality-mobile-320.png', fullPage: true, animations: 'disabled' })
 })
 
+test('首页渠道待办写明统计时段，没选到渠道的失败单列；渠道健康把 id=0 显示成未分配渠道', async ({ page }) => {
+  await prepare(page)
+  const days: string[] = []
+  await page.route('**/admin/stats/channels?*', (route) => {
+    const url = new URL(route.request().url())
+    days.push(url.searchParams.get('days') ?? '')
+    const base = { provider: 'anthropic', failovers: 0, sticky_rate_bp: 0, tokens_per_1k_sec: 0, amount_micro: 0 }
+    return route.fulfill({ json: { total_items: 2, data: [
+      { ...base, channel_id: 9, name: 'kiro', requests: 13, errors: 1, error_rate_bp: 769, ttft_p50_ms: 1529, ttft_p95_ms: 2246, ttft_p99_ms: 2685 },
+      // 后端对没有成功出字的桶给 null 分位、空 provider
+      { ...base, channel_id: 0, name: '', provider: '', requests: 7, errors: 7, error_rate_bp: 10000, ttft_p50_ms: null, ttft_p95_ms: null, ttft_p99_ms: null },
+    ] } })
+  })
+  await page.goto('/admin')
+  const attention = page.locator('#dashboard-attention')
+  // 只有 1 个真渠道超阈值；id=0 不算渠道，单独一条说"多少次请求没选到渠道"
+  await expect(attention.getByText('近 7 天有 1 个渠道错误率超 5%（如 kiro）')).toBeVisible()
+  await expect(attention.getByText('近 7 天有 7 次请求没选到可用渠道就失败了')).toBeVisible()
+  await expect(attention.getByText(/2 个渠道错误率/)).toHaveCount(0)
+  await expect(attention.getByRole('link', { name: /没选到可用渠道/ })).toHaveAttribute('href', '/admin/quality?days=7&tab=channels')
+  await page.goto('/admin?days=1')
+  await expect.poll(() => days.at(-1)).toBe('1')
+  await expect(attention.getByText('近 24 小时有 1 个渠道错误率超 5%（如 kiro）')).toBeVisible()
+  await expect(attention.getByText('近 24 小时有 7 次请求没选到可用渠道就失败了')).toBeVisible()
+
+  await page.goto('/admin/quality?days=1&tab=channels')
+  const panel = page.getByRole('tabpanel', { name: '渠道健康' })
+  await expect(panel.getByRole('link', { name: 'kiro', exact: true })).toBeVisible()
+  const unassigned = panel.getByText('未分配渠道', { exact: true })
+  await expect(unassigned).toBeVisible()
+  await expect(panel.getByText('#0')).toHaveCount(0)
+  await expect(panel.getByRole('link', { name: /未分配渠道/ })).toHaveCount(0)
+  const row = panel.getByRole('row').filter({ hasText: '未分配渠道' })
+  await expect(row).not.toContainText('ms')
+  await expect(row.getByText('—')).toHaveCount(2)
+  await unassigned.focus()
+  await expect(page.getByText(/在选到渠道之前就失败了/)).toBeVisible()
+  await expect(panel.getByRole('row').filter({ hasText: 'kiro' })).toContainText('1529 / 2246 / 2685 ms')
+})
+
 test('Dashboard 一套日期选择同步所有历史统计，默认近 7 天，刷新保留且显示日期时区', async ({ page }) => {
   const requests = await prepare(page)
   await page.goto('/admin')

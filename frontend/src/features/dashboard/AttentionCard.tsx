@@ -19,6 +19,7 @@ import { maskEmails } from '@/lib/mask'
 interface ChannelStat {
   channel_id: number
   name: string
+  errors: number
   error_rate_bp: number
 }
 interface ModelRow {
@@ -262,23 +263,39 @@ function useAttention(days: number) {
     })
   }
 
-  // 高错误率渠道：5% 起视为需要处置（与渠道健康卡同阈值）
-  const bad = (channels.data?.data ?? []).filter((c) => c.error_rate_bp >= 500)
+  // 高错误率渠道：5% 起视为需要处置（与渠道健康卡同阈值）。统计窗口就是首页所选时段（近 N 天滚动，
+  // days=1 是近 24 小时），文案里写明，免得把几天前已经过去的故障看成正在发生。
+  // id=0 不是渠道，是请求在选到渠道之前就失败的聚合桶（没有可用渠道、客户端提前断开等），
+  // 单列一条，不算进"N 个渠道"。
+  const span = days === 1 ? t('admin:attnWindow24h') : t('admin:lastDays', { days })
+  const channelStats = channels.data?.data ?? []
+  const bad = channelStats.filter((c) => c.channel_id > 0 && c.error_rate_bp >= 500)
   if (bad.length > 0) {
     items.push({
       key: 'bad-channel',
       summary: t('admin:dashboardChannelIssue'),
       text: t('admin:attnBadChannel', {
+        span,
         n: bad.length,
-        // 示例优先挑有名字的渠道；id=0 是"无渠道"的聚合桶，"如 #0"对人没有信息量
-        first: maskEmails(bad.find((c) => c.name)?.name ?? '') || (bad.some((c) => c.channel_id > 0)
-          ? t('admin:dashboardUnnamedChannel', { id: bad.find((c) => c.channel_id > 0)!.channel_id })
-          : t('admin:dashboardUnassignedChannel')),
+        // 示例优先挑有名字的渠道
+        first: maskEmails(bad.find((c) => c.name)?.name ?? '') || t('admin:dashboardUnnamedChannel', { id: bad[0].channel_id }),
       }),
       action: t('admin:attnGoChannels'),
       to: '/admin/quality',
       search: { days, tab: 'channels' },
       tone: 'destructive',
+    })
+  }
+  const unassigned = channelStats.find((c) => c.channel_id === 0 && c.errors > 0)
+  if (unassigned) {
+    items.push({
+      key: 'unassigned-failures',
+      summary: t('admin:dashboardChannelIssue'),
+      text: t('admin:attnUnassignedFailures', { span, n: unassigned.errors }),
+      action: t('admin:attnGoChannels'),
+      to: '/admin/quality',
+      search: { days, tab: 'channels' },
+      tone: 'warning',
     })
   }
 
