@@ -542,7 +542,7 @@ pub async fn channel_usage(
             "window_end": token_usage.window_end},
         "cost_usage": {"cost_micro": cost_usage.cost_micro, "window_start": cost_usage.window_start,
             "window_end": cost_usage.window_end},
-        "timezone": okapi_store::timezone::machine_timezone()?,
+        "timezone": okapi_store::timezone::reporting_timezone()?,
     })))
 }
 

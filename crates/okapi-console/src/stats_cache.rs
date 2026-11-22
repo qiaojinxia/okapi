@@ -23,8 +23,10 @@ pub(super) fn allowed(headers: &HeaderMap) -> bool {
         })
 }
 
+/// 同一条 SQL 在不同统计时区下切出的日 / 小时桶不同：时区是键的一部分，改时区后不会命中旧结果。
 fn key(sql: &str, params: &[(&str, &str)]) -> String {
-    serde_json::to_string(&(sql, params)).expect("string tuple is JSON serializable")
+    let zone = okapi_store::timezone::reporting_timezone().unwrap_or_default();
+    serde_json::to_string(&(zone, sql, params)).expect("string tuple is JSON serializable")
 }
 
 async fn load(

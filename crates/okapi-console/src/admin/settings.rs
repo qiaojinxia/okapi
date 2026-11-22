@@ -81,11 +81,19 @@ pub async fn set_setting(
     if is_pricing_base && okapi_kernel::pricing_loader::valid_base_price(&req.value).is_none() {
         return Err(AppError::bad_request().with_param("pricing_base_per_1m_micro"));
     }
+    let is_timezone = req.key == okapi_store::timezone::SETTING;
+    if is_timezone {
+        validate_reporting_timezone(&state, &req.value).await?;
+    }
     okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.actor_user_id()).await?;
     state.invalidate_routing_caches();
     // settings 热路径缓存按键失效：同进程立即生效（公告发布、限流阈值调整不必等 60s TTL），
     // 多副本靠 TTL 收敛——与鉴权缓存"本机即时、跨副本 TTL"同一取舍
     state.settings_cache.invalidate(&req.key).await;
+    if is_timezone && okapi_store::timezone::apply_setting(Some(&req.value)) {
+        // 本进程立即生效；别的副本由 routing.invalidate 广播 / 15s 轮询跟上
+        state.stats_query_cache.invalidate_all();
+    }
     audit(
         &state,
         &actor,
@@ -103,6 +111,47 @@ pub async fn set_setting(
     ))
 }
 
+/// 统计时区：null / 空串 = 跟随服务器；否则必须是 PG 与 ClickHouse 都认识的 IANA 名字——
+/// 两边任一不认识，之后每条统计查询（会话时区）都会失败。名字会拼进 ClickHouse SQL，
+/// 格式校验（`parse_setting`：只收 IANA 字符集）在任何查询之前。
+async fn validate_reporting_timezone(state: &AppState, value: &Value) -> Result<(), AppError> {
+    let invalid = || AppError::bad_request().with_param(okapi_store::timezone::SETTING);
+    let Some(zone) = okapi_store::timezone::parse_setting(value).map_err(|()| invalid())? else {
+        return Ok(());
+    };
+    let known: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = $1)")
+            .bind(&zone)
+            .fetch_one(&state.pg)
+            .await
+            .map_err(|error| AppError::from(okapi_store::StoreError::from(error)))?;
+    if !known {
+        return Err(invalid());
+    }
+    // 只收与 UTC 差整小时的时区（含夏令时期间）：按小时汇总的历史桶按 UTC 整点切，半小时 / 45 分钟
+    // 时差的时区（Asia/Kolkata、Asia/Kathmandu、Australia/Adelaide…）切不出精确的本地日界，
+    // 统计查询会按 `statistics_calendar_history_incomplete` 拒绝。前后各一年按周取样，覆盖夏令时。
+    let whole_hours: bool = sqlx::query_scalar(
+        "SELECT bool_and(mod(extract(epoch FROM (t AT TIME ZONE $1) - (t AT TIME ZONE 'UTC'))::bigint, 3600) = 0) \
+           FROM generate_series(now() - interval '1 year', now() + interval '1 year', interval '7 days') AS t",
+    )
+    .bind(&zone)
+    .fetch_one(&state.pg)
+    .await
+    .map_err(|error| AppError::from(okapi_store::StoreError::from(error)))?;
+    if !whole_hours {
+        return Err(AppError::bad_request().with_param("reporting_timezone_whole_hours"));
+    }
+    if let Some(ch) = state.ch.as_ref() {
+        ch.query_json_each_row(&format!(
+            "SELECT toString(toTimeZone(now(), '{zone}')) AS local_now"
+        ))
+        .await
+        .map_err(|_| invalid())?;
+    }
+    Ok(())
+}
+
 /// GET /admin/settings/{key}：单键读取（配置页回显；写权限同门槛防低权限窥探敏感配置）。
 pub async fn get_setting(
     State(state): State<AppState>,
@@ -111,6 +160,15 @@ pub async fn get_setting(
 ) -> Result<Json<Value>, AppError> {
     let _ = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
     let value = state.setting_fresh(&key).await?;
+    if key == okapi_store::timezone::SETTING {
+        // 配置页要显示「跟随服务器」时服务器是哪个时区，以及本进程实际在用的时区
+        return Ok(Json(json!({
+            "key": key,
+            "value": value,
+            "host_timezone": okapi_store::timezone::machine_timezone().ok(),
+            "effective_timezone": okapi_store::timezone::reporting_timezone().ok(),
+        })));
+    }
     Ok(Json(json!({ "key": key, "value": value })))
 }
 

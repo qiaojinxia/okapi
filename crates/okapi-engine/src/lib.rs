@@ -284,6 +284,19 @@ pub async fn sync_ssrf_policy(state: &AppState) {
             okapi_providers::profiles::apply_runtime_setting(key, value.as_ref().as_ref());
         }
     }
+    sync_reporting_timezone(state).await;
+}
+
+/// 后台「统计时区」同步到本进程（CH 查询与 PG 会话时区都读它）。读不到就沿用当前值；
+/// 真变了就清掉看板查询缓存，免得 1 分钟内还拿旧时区切出来的结果。
+pub async fn sync_reporting_timezone(state: &AppState) {
+    if let Ok(value) = state
+        .try_setting_cached(okapi_store::timezone::SETTING)
+        .await
+        && okapi_store::timezone::apply_setting(value.as_ref().as_ref())
+    {
+        state.stats_query_cache.invalidate_all();
+    }
 }
 
 /// 管理员改了 `ssrf_policy` 之后，各进程最迟一个 settings 缓存 TTL（60s）加一个轮询周期内跟上。

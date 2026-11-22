@@ -21,9 +21,14 @@ pub async fn connect_pg_with_max(database_url: &str, max: u32) -> Result<PgPool,
     let pool = PgPoolOptions::new()
         .max_connections(max)
         .acquire_timeout(Duration::from_secs(5))
+        // 后台改了统计时区：之前建立的连接会话时区还是旧的，取用时丢掉，池子按新时区重连
+        // （没改过时只是一次原子读）。
+        .before_acquire(|_, meta| {
+            Box::pin(async move { Ok(!crate::timezone::opened_before_change(meta.age)) })
+        })
         .after_connect(|connection, _| {
             Box::pin(async move {
-                let zone = crate::timezone::machine_timezone()
+                let zone = crate::timezone::reporting_timezone()
                     .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
                 sqlx::query!("SELECT set_config('TimeZone',$1,false)", zone)
                     .fetch_one(connection)
@@ -109,7 +114,7 @@ async fn migrate_in_utc(connection: &mut sqlx::PgConnection) -> Result<(), Store
         .fetch_one(&mut *connection)
         .await?;
     let migrated = sqlx::migrate!("./migrations").run(&mut *connection).await;
-    let zone = crate::timezone::machine_timezone()?;
+    let zone = crate::timezone::reporting_timezone()?;
     sqlx::query!("SELECT set_config('TimeZone',$1,false)", zone)
         .fetch_one(&mut *connection)
         .await?;

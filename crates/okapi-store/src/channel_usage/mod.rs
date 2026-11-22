@@ -41,7 +41,7 @@ pub async fn local_usage(
         "month" => "1 month",
         _ => return Err(StoreError::InvalidData("usage_period")),
     };
-    let zone = timezone::machine_timezone()?;
+    let zone = timezone::reporting_timezone()?;
     Ok(sqlx::query_as::<_, LocalUsage>(
         r"
         WITH bounds AS (SELECT date_trunc($2,now() AT TIME ZONE $3) AS start),
@@ -92,7 +92,7 @@ async fn read(
         "month" => "1 month",
         _ => return Err(StoreError::InvalidData("usage_period")),
     };
-    let zone = timezone::machine_timezone()?;
+    let zone = timezone::reporting_timezone()?;
     Ok(sqlx::query_as::<_, Snapshot>(r"
         WITH bounds AS (SELECT date_trunc($2,now() AT TIME ZONE $3) AS start,
                                date_trunc($2,now(),$3) AS window_start),
@@ -127,7 +127,7 @@ async fn read_requests_only(
         "month" => "1 month",
         _ => return Err(StoreError::InvalidData("usage_period")),
     };
-    let zone = timezone::machine_timezone()?;
+    let zone = timezone::reporting_timezone()?;
     // PostgreSQL short-circuits COALESCE: once channel_usage_windows has a row for
     // this window, the bucket fallback sum is never executed.
     Ok(sqlx::query_as(

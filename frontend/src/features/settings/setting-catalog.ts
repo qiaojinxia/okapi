@@ -8,10 +8,10 @@ export interface SettingRow {
 }
 
 /// 系统设置页的页签，顺序即显示顺序（高级设置固定在最后）；也是 `/admin/settings?tab=` 的合法值。
-export const SETTINGS_TABS = ['registration', 'notice', 'notify', 'smtp', 'privacy', 'ai', 'egress', 'values'] as const
+export const SETTINGS_TABS = ['registration', 'notice', 'notify', 'smtp', 'privacy', 'timezone', 'ai', 'egress', 'values'] as const
 export type SettingsTab = (typeof SETTINGS_TABS)[number]
 /// 有专用表单的页签：高级设置里对应的键给「前往设置」而不是通用编辑器。
-export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp' | 'egress'
+export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp' | 'timezone' | 'egress'
 export type SettingEditor = 'auto' | 'number' | 'price' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth' | 'oauth_refresh'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
@@ -55,6 +55,7 @@ const CATALOG: Record<string, SettingMeta> = {
   mcp_write_enabled: { label: 'admin:settingMcpWrite', description: 'admin:settingMcpWriteDesc', group: 'security', editor: 'auto' },
   web_session_limit: { label: 'admin:settingSessionLimit', description: 'admin:settingSessionLimitDesc', group: 'security', editor: 'number' },
   ssrf_policy: { label: 'admin:settingAccess', description: 'admin:settingAccessDesc', group: 'security', editor: 'ssrf' },
+  reporting_timezone: { label: 'analytics:tzTitle', description: 'analytics:tzDesc', group: 'other', editor: 'auto', section: 'timezone' },
 }
 
 export function settingMeta(key: string): SettingMeta {

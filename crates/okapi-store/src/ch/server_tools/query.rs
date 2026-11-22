@@ -95,7 +95,7 @@ pub(super) fn sql(q: &StatisticsQuery) -> Result<(String, Bindings), StoreError>
         ("tool_end".to_owned(), q.end.to_string()),
         (
             "tool_zone".to_owned(),
-            crate::timezone::machine_timezone()?.to_owned(),
+            crate::timezone::reporting_timezone()?.to_owned(),
         ),
     ];
     let scope = scope(q, &mut bindings)?;

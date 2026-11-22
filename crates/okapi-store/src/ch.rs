@@ -315,7 +315,7 @@ impl ChClient {
         sql: &str,
         params: &[(&str, &str)],
     ) -> Result<Vec<serde_json::Value>, StoreError> {
-        let zone = crate::timezone::machine_timezone()?;
+        let zone = crate::timezone::reporting_timezone()?;
         let sql = calendar_sql(sql, zone);
         let sql = population::sql(&sql)?;
         let url = self.query_url(zone, params);

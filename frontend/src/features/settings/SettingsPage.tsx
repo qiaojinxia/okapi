@@ -1,5 +1,5 @@
 import { getRouteApi } from '@tanstack/react-router'
-import { Bell, Bot, Globe, Mail, Megaphone, ShieldCheck, SlidersHorizontal, UserPlus } from 'lucide-react'
+import { Bell, Bot, Clock, Globe, Mail, Megaphone, ShieldCheck, SlidersHorizontal, UserPlus } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { EgressSettings } from '@/features/settings/EgressSettings'
@@ -10,6 +10,7 @@ import { PageHeader } from '@/components/ui/page'
 import { RegistrationCard } from '@/features/settings/RegistrationCard'
 import { SettingsCard } from '@/features/settings/SettingsKeyValues'
 import { SmtpCard } from '@/features/settings/SmtpCard'
+import { TimezoneCard } from '@/features/settings/TimezoneCard'
 import { McpSettings } from '@/features/settings/McpSettings'
 import { TabPanel, Tabs } from '@/components/ui/tabs'
 import { SETTINGS_TABS } from '@/features/settings/setting-catalog'
@@ -45,6 +46,7 @@ export function SettingsPage() {
     { id: 'notify', label: t('admin:notify'), icon: Bell },
     { id: 'smtp', label: t('admin:smtpTitle'), icon: Mail },
     { id: 'privacy', label: t('admin:privacyTitle'), icon: ShieldCheck },
+    { id: 'timezone', label: t('analytics:tzTab'), icon: Clock },
     { id: 'ai', label: t('admin:mcpTitle'), icon: Bot },
     { id: 'egress', label: t('admin:proxiesTitle'), icon: Globe },
     { id: 'values', label: t('admin:settingAdvanced'), icon: SlidersHorizontal },
@@ -55,6 +57,7 @@ export function SettingsPage() {
     notify: <NotifyCard />,
     smtp: <SmtpCard />,
     privacy: <PrivacyCard />,
+    timezone: <TimezoneCard />,
     ai: <McpSettings />,
     egress: <EgressSettings />,
     values: <SettingsCard onOpenSection={openSection} />,
