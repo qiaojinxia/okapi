@@ -102,7 +102,6 @@ async fn publish_sample_nodes(redis: &fred::clients::Client) {
         NodeMetricsRates {
             gateway_rps: 12.5,
             failovers_per_min: 2.0,
-            compactions_per_min: 1.0,
             recent_gw_p95_ms: Some(140.0),
             recent_ttft_p95_ms: Some(310.0),
             ..Default::default()
@@ -154,12 +153,11 @@ async fn monitor_metrics_aggregates_shared_nodes_and_exposes_raw_prometheus() {
         .unwrap();
     assert_eq!(forbid.status(), 403);
 
-    // 记录几条进程内指标（含 Phase 2 质量降级与压缩）
+    // 记录几条进程内指标（含调度池质量降级）
     let m = okapi_kernel::metrics::global();
     m.record_upstream_outcome("openai", "ok");
     m.record_upstream_ttft("openai", Duration::from_millis(260));
     m.record_pool_quality_event("mon-pool", "demote_error_rate");
-    m.record_cache_compaction(4_096);
 
     // 2. Redis 暂无心跳 -> 降级本进程（source = "local"）
     let local: Value = http
@@ -173,13 +171,6 @@ async fn monitor_metrics_aggregates_shared_nodes_and_exposes_raw_prometheus() {
         .unwrap();
     assert_eq!(local["source"], "local");
     assert_eq!(local["node_count"], 1);
-    assert!(local["summary"]["cache_compactions"].as_u64().unwrap() >= 1);
-    assert!(
-        local["summary"]["cache_compaction_saved_chars"]
-            .as_u64()
-            .unwrap()
-            >= 4_096
-    );
     assert!(
         local["pool_quality_events"]
             .as_array()
@@ -222,8 +213,6 @@ async fn monitor_metrics_aggregates_shared_nodes_and_exposes_raw_prometheus() {
         .unwrap_or("");
     assert!(ct.starts_with("text/plain"));
     let raw_text = raw_resp.text().await.unwrap();
-    assert!(raw_text.contains("okapi_cache_compactions_total"));
-    assert!(raw_text.contains("okapi_cache_compaction_saved_chars_total"));
     assert!(raw_text.contains(
         "okapi_pool_quality_events_total{pool=\"mon-pool\",action=\"demote_error_rate\"}"
     ));

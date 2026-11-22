@@ -92,7 +92,25 @@ impl PoolGraphNode {
     }
 }
 
-fn parse_policy(pool_code: &str, raw: serde_json::Value) -> PoolPolicy {
+fn strip_retired_policy_fields(raw: &mut serde_json::Value) {
+    let Some(obj) = raw.as_object_mut() else {
+        return;
+    };
+    obj.remove("compaction");
+    if let Some(rules) = obj.get_mut("rules").and_then(serde_json::Value::as_array_mut) {
+        for rule in rules {
+            if let Some(apply) = rule
+                .get_mut("apply")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                apply.remove("compaction");
+            }
+        }
+    }
+}
+
+fn parse_policy(pool_code: &str, mut raw: serde_json::Value) -> PoolPolicy {
+    strip_retired_policy_fields(&mut raw);
     serde_json::from_value(raw).unwrap_or_else(|error| {
         tracing::warn!(
             pool_code,
@@ -278,5 +296,25 @@ mod tests {
             ..Default::default()
         };
         assert!(!has_fallback_cycle(&nodes, "c", None, &ok));
+    }
+
+    #[test]
+    fn parse_policy_ignores_retired_compaction_field_in_stored_rows() {
+        let legacy = serde_json::json!({
+            "fallback_pools": ["backup"],
+            "quality": { "enabled": true, "min_samples": 12 },
+            "compaction": { "mode": "on_channel_switch", "min_prompt_tokens": 16000 },
+            "rules": [{
+                "name": "r1",
+                "when": { "models": ["claude-*"] },
+                "apply": { "canary_percent": 10, "compaction": { "mode": "off" } }
+            }]
+        });
+        let parsed = parse_policy("default", legacy);
+        assert_eq!(parsed.fallback_pools, vec!["backup"]);
+        assert_eq!(parsed.quality.enabled, Some(true));
+        assert_eq!(parsed.quality.min_samples, Some(12));
+        assert_eq!(parsed.rules.len(), 1);
+        assert_eq!(parsed.rules[0].apply.canary_percent, Some(10));
     }
 }

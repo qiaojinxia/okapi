@@ -21,7 +21,6 @@ pub const VALID_STRATEGIES: &[&str] = &[
 
 pub const VALID_AFFINITY_MODES: &[&str] = &["prefer_warm", "strict", "off"];
 pub const VALID_MEMBER_ROLES: &[&str] = &["primary", "backup", "canary"];
-pub const VALID_COMPACTION_MODES: &[&str] = &["off", "on_channel_switch", "always"];
 
 /// 单次请求的调度特征（供规则匹配与未来可插拔 `CandidateRanker` / 神经网络打分器使用）。
 #[derive(Debug, Clone, Default)]
@@ -51,9 +50,6 @@ pub struct PoolPolicy {
     /// 低质量自动降级策略（按渠道 key 滚动错误率与时延 EWMA 自动降权 / 硬摘流）。
     #[serde(default)]
     pub quality: QualityPolicy,
-    /// 切渠自动缓存压缩策略（L0/L1：跨渠道/失粘性时自动折叠旧工具输出与冗余缓存断点）。
-    #[serde(default)]
-    pub compaction: CompactionPolicy,
     /// 灰度流量百分比（0..=100）：命中桶的请求优先走 `role = 'canary'` 成员，失败再回落 `primary`。
     #[serde(default)]
     pub canary_percent: u8,
@@ -236,63 +232,6 @@ impl Default for ResolvedQualityPolicy {
     }
 }
 
-/// 切渠自动缓存压缩策略（L0 清理旧缓存断点/空白 + L1 折叠旧轮次超大工具输出）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompactionPolicy {
-    /// `off`（默认）| `on_channel_switch`（仅失粘性/failover 切渠触发）| `always`（超阈值即触发）。
-    #[serde(default)]
-    pub mode: Option<String>,
-    /// 触发压缩的最小估算输入 Token 数（1000..=500000；缺省 16000）。
-    #[serde(default)]
-    pub min_prompt_tokens: Option<u32>,
-    /// 原样保留尾部最新消息条数（2..=64；缺省 6）。
-    #[serde(default)]
-    pub keep_recent_messages: Option<u16>,
-    /// 旧消息工具输出超过此字符数即折叠头尾（100..=20000；缺省 600）。
-    #[serde(default)]
-    pub max_old_tool_chars: Option<u32>,
-    /// 切渠时是否清除旧消息上的冗余 `cache_control` 断点（缺省 true）。
-    #[serde(default)]
-    pub strip_stale_cache_breakpoints: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ResolvedCompactionPolicy {
-    pub mode: String,
-    pub min_prompt_tokens: u32,
-    pub keep_recent_messages: u16,
-    pub max_old_tool_chars: u32,
-    pub strip_stale_cache_breakpoints: bool,
-}
-
-impl Default for ResolvedCompactionPolicy {
-    fn default() -> Self {
-        Self {
-            mode: "off".to_owned(),
-            min_prompt_tokens: 16_000,
-            keep_recent_messages: 6,
-            max_old_tool_chars: 600,
-            strip_stale_cache_breakpoints: true,
-        }
-    }
-}
-
-impl ResolvedCompactionPolicy {
-    /// 判断本次尝试是否应当执行 L0/L1 上下文压缩。
-    #[must_use]
-    pub fn should_compact(&self, switched_channel: bool, est_prompt_tokens: u32) -> bool {
-        if est_prompt_tokens < self.min_prompt_tokens {
-            return false;
-        }
-        match self.mode.as_str() {
-            "always" => true,
-            "on_channel_switch" => switched_channel,
-            _ => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingRule {
@@ -334,8 +273,6 @@ pub struct RuleAction {
     #[serde(default)]
     pub quality: Option<QualityPolicy>,
     #[serde(default)]
-    pub compaction: Option<CompactionPolicy>,
-    #[serde(default)]
     pub canary_percent: Option<u8>,
     /// 直接改道至指定池链（例如超长上下文直切专用大上下文池）。
     #[serde(default)]
@@ -358,7 +295,6 @@ pub struct EffectivePoolPolicy {
     pub first_output_timeout_secs: Option<u64>,
     pub guardrails: GuardrailPolicy,
     pub quality: ResolvedQualityPolicy,
-    pub compaction: ResolvedCompactionPolicy,
     pub canary_percent: u8,
     pub matched_rules: Vec<String>,
 }
@@ -539,53 +475,6 @@ impl QualityPolicy {
     }
 }
 
-impl CompactionPolicy {
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if let Some(mode) = &self.mode
-            && !VALID_COMPACTION_MODES.contains(&mode.as_str())
-        {
-            return Err("policy.compaction.mode");
-        }
-        if self
-            .min_prompt_tokens
-            .is_some_and(|n| !(1_000..=500_000).contains(&n))
-        {
-            return Err("policy.compaction.min_prompt_tokens");
-        }
-        if self
-            .keep_recent_messages
-            .is_some_and(|n| !(2..=64).contains(&n))
-        {
-            return Err("policy.compaction.keep_recent_messages");
-        }
-        if self
-            .max_old_tool_chars
-            .is_some_and(|n| !(100..=20_000).contains(&n))
-        {
-            return Err("policy.compaction.max_old_tool_chars");
-        }
-        Ok(())
-    }
-
-    pub fn apply_to(&self, dst: &mut ResolvedCompactionPolicy) {
-        if let Some(m) = &self.mode {
-            dst.mode.clone_from(m);
-        }
-        if let Some(v) = self.min_prompt_tokens {
-            dst.min_prompt_tokens = v;
-        }
-        if let Some(v) = self.keep_recent_messages {
-            dst.keep_recent_messages = v;
-        }
-        if let Some(v) = self.max_old_tool_chars {
-            dst.max_old_tool_chars = v;
-        }
-        if let Some(v) = self.strip_stale_cache_breakpoints {
-            dst.strip_stale_cache_breakpoints = v;
-        }
-    }
-}
-
 impl RuleMatch {
     #[must_use]
     pub fn matches(&self, f: &RequestFeatures<'_>) -> bool {
@@ -627,7 +516,6 @@ impl PoolPolicy {
         self.failover.validate()?;
         self.guardrails.validate()?;
         self.quality.validate()?;
-        self.compaction.validate()?;
         if self.canary_percent > 100 {
             return Err("policy.canary_percent");
         }
@@ -663,9 +551,6 @@ impl PoolPolicy {
             }
             if let Some(q) = &rule.apply.quality {
                 q.validate()?;
-            }
-            if let Some(cp) = &rule.apply.compaction {
-                cp.validate()?;
             }
             if rule.apply.canary_percent.is_some_and(|p| p > 100) {
                 return Err("policy.rules.apply.canary_percent");
@@ -734,8 +619,6 @@ impl PoolPolicy {
 
         let mut quality = ResolvedQualityPolicy::default();
         self.quality.apply_to(&mut quality);
-        let mut compaction = ResolvedCompactionPolicy::default();
-        self.compaction.apply_to(&mut compaction);
 
         let mut eff = EffectivePoolPolicy {
             primary_pool: primary_pool.to_owned(),
@@ -759,7 +642,6 @@ impl PoolPolicy {
             first_output_timeout_secs: self.failover.first_output_timeout_secs,
             guardrails: self.guardrails.clone(),
             quality,
-            compaction,
             canary_percent: self.canary_percent,
             matched_rules: Vec::new(),
         };
@@ -814,9 +696,6 @@ fn apply_rule_action(eff: &mut EffectivePoolPolicy, action: &RuleAction) {
     }
     if let Some(q) = &action.quality {
         q.apply_to(&mut eff.quality);
-    }
-    if let Some(cp) = &action.compaction {
-        cp.apply_to(&mut eff.compaction);
     }
     if let Some(pct) = action.canary_percent {
         eff.canary_percent = pct;

@@ -49,7 +49,6 @@ function initialPolicyOf(pool: PoolRow | undefined): PoolPolicy {
     failover: { ...base.failover, ...raw?.failover },
     guardrails: { ...base.guardrails, ...raw?.guardrails },
     quality: { ...base.quality, ...raw?.quality },
-    compaction: { ...base.compaction, ...raw?.compaction },
     canary_percent: raw?.canary_percent ?? 0,
     rules: raw?.rules ? raw.rules.map((r) => ({ ...r, when: { ...r.when }, apply: { ...r.apply } })) : [],
   }

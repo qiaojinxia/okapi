@@ -86,7 +86,7 @@ use self::routing::{eligible_candidates, recovery_secs};
 use self::settle::{record_terminal, settle_commit, settle_failure};
 use self::stream::{attempt_stream, capture_response_event, with_relayed};
 use self::upstream::{
-    build_upstream_body, build_upstream_body_for_attempt, dispatch_chat, response_writer,
+    build_upstream_body, dispatch_chat, response_writer,
     shape_upstream_body,
 };
 

@@ -40,7 +40,7 @@ const samples = Array.from({ length: 30 }, (_, i) => ({
   disk_used: 74 * GB, disk_total: 80 * GB, net_rx: 1_000_000 + i * 10_000, net_tx: 300_000, pg_conns: 40 + (i % 3),
   pg_active: 2, redis_mem: 380 * 1024 ** 2, redis_clients: 37, redis_ops: 800, ch_mem: 1.1 * GB, ch_queries: 1,
   gw_rps: 14.2 + (i % 5), gw_5xx_rate: 0.4, gw_p95_ms: 185 + i * 2, ttft_p95_ms: 420 + i * 3,
-  failovers_pm: i % 3, compactions_pm: i % 2, settle_backlog: 4 + (i % 4),
+  failovers_pm: i % 3, settle_backlog: 4 + (i % 4),
 }))
 
 const metricsResp = {
@@ -68,9 +68,6 @@ const metricsResp = {
     settle_batches_fallback: 3,
     settle_batch_size: { count: 1_923, avg: 12.4, p50: 10, p95: 32, p99: 48 },
     settle_batch_duration_ms: { count: 1_923, avg: 9.2, p50: 7.5, p95: 22.4, p99: 45 },
-    cache_compactions: 19,
-    compactions_per_min: 0.6,
-    cache_compaction_saved_chars: 284_000,
     pool_quality_events_total: 8,
     routing_invalidations_local: 14,
     routing_invalidations_broadcast: 22,
@@ -134,7 +131,7 @@ const rawPrometheusText = [
   '# HELP okapi_http_in_flight Current in-flight HTTP requests.',
   '# TYPE okapi_http_in_flight gauge',
   'okapi_http_in_flight{role="gateway"} 11',
-  'okapi_cache_compactions_total 19',
+  'okapi_upstream_failovers_total 37',
 ].join('\n')
 
 const logs = {
@@ -217,7 +214,7 @@ test('运维监控：运行时指标展示集群 Prometheus 汇总、调度降�
   await expect(main.getByText('demote_error_rate')).toBeVisible()
   await expect(main.getByText('okapi-gw-1')).toBeVisible()
   await page.getByRole('button', { name: '查看 Prometheus 原文' }).click()
-  await expect(main.getByText('okapi_cache_compactions_total 19')).toBeVisible()
+  await expect(main.getByText('okapi_upstream_failovers_total 37')).toBeVisible()
   await shot(page, 'metrics')
 })
 

@@ -181,13 +181,12 @@ export function MetricsTab({ interval }: { interval: number | false }) {
         <Stat
           icon={Layers}
           layout="stacked"
-          label={t('monitor:metricsFailoverCompaction')}
-          value={`${formatCount(s.upstream_failovers, locale)} / ${formatCount(s.cache_compactions, locale)}`}
+          label={t('monitor:metricsFailoverQuality')}
+          value={`${formatCount(s.upstream_failovers, locale)} / ${formatCount(s.pool_quality_events_total, locale)}`}
           sub={t('monitor:metricsFailoverSub', {
             failovers: formatCount(s.upstream_failovers, locale),
+            rate: formatCount(s.failovers_per_min, locale),
             quality: formatCount(s.pool_quality_events_total, locale),
-            compactions: formatCount(s.cache_compactions, locale),
-            chars: formatCount(s.cache_compaction_saved_chars, locale),
           })}
         />
       </div>

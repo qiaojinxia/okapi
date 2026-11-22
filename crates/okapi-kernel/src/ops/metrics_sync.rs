@@ -19,14 +19,13 @@ struct RateTracker {
     console_req: u64,
     gw_5xx: u64,
     failovers: u64,
-    compactions: u64,
     gw_hist: HistogramData,
     ttft_hist: HistogramData,
 }
 
 impl RateTracker {
     fn capture() -> Self {
-        let (gw_req, console_req, gw_5xx, failovers, compactions, gw_hist, ttft_hist) =
+        let (gw_req, console_req, gw_5xx, failovers, gw_hist, ttft_hist) =
             metrics::global().rate_counters();
         Self {
             at: Instant::now(),
@@ -34,7 +33,6 @@ impl RateTracker {
             console_req,
             gw_5xx,
             failovers,
-            compactions,
             gw_hist,
             ttft_hist,
         }
@@ -48,7 +46,6 @@ impl RateTracker {
             let d_console = next.console_req.saturating_sub(self.console_req);
             let d_5xx = next.gw_5xx.saturating_sub(self.gw_5xx);
             let d_fail = next.failovers.saturating_sub(self.failovers);
-            let d_comp = next.compactions.saturating_sub(self.compactions);
             let d_gw_hist = next.gw_hist.delta_since(&self.gw_hist);
             let d_ttft_hist = next.ttft_hist.delta_since(&self.ttft_hist);
             NodeMetricsRates {
@@ -56,7 +53,6 @@ impl RateTracker {
                 console_rps: (d_console as f64) / secs,
                 gateway_5xx_rate: (d_gw > 0).then(|| (d_5xx as f64) * 100.0 / (d_gw as f64)),
                 failovers_per_min: (d_fail as f64) * 60.0 / secs,
-                compactions_per_min: (d_comp as f64) * 60.0 / secs,
                 recent_gw_p95_ms: d_gw_hist.summary_ms().p95,
                 recent_ttft_p95_ms: d_ttft_hist.summary_ms().p95,
             }

@@ -341,9 +341,8 @@ function TrendsTab({ interval }: { interval: number | false }) {
       format: (v: number) => `${formatCount(v, locale)} /min`,
       series: [
         { key: 'failovers', label: t('monitor:seriesFailoversPm'), color: chartColor(2) },
-        { key: 'compactions', label: t('monitor:seriesCompactionsPm'), color: chartColor(1) },
       ],
-      data: samples.map((s) => ({ ...point(s), failovers: s.failovers_pm ?? null, compactions: s.compactions_pm ?? null })),
+      data: samples.map((s) => ({ ...point(s), failovers: s.failovers_pm ?? null })),
     },
     {
       title: t('monitor:chartSettleBacklog'),

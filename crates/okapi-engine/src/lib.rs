@@ -13,7 +13,6 @@ pub mod channel_balance;
 pub mod channel_permit;
 pub mod channel_probe;
 pub mod channel_test;
-pub mod compaction;
 pub mod credentials;
 pub mod diagnostics;
 pub mod dialect;

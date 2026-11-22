@@ -92,7 +92,6 @@ async fn collect(probes: &Probes, node: &str, rates: Rates) -> Value {
         "gw_p95_ms": app.as_ref().and_then(|s| s.recent_gw_p95_ms.or(s.gateway_latency_ms.p95)),
         "ttft_p95_ms": app.as_ref().and_then(|s| s.recent_ttft_p95_ms.or(s.upstream_ttft_ms.p95)),
         "failovers_pm": app.as_ref().map(|s| s.failovers_per_min),
-        "compactions_pm": app.as_ref().map(|s| s.compactions_per_min),
         "settle_backlog": app.as_ref().map(|s| s.settle_backlog),
     })
 }

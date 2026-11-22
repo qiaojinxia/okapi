@@ -122,7 +122,6 @@ export interface Sample {
   gw_p95_ms?: number | null
   ttft_p95_ms?: number | null
   failovers_pm?: number | null
-  compactions_pm?: number | null
   settle_backlog?: number | null
 }
 
@@ -174,9 +173,6 @@ export interface ClusterMetricsSummary {
   settle_batches_fallback: number
   settle_batch_size: HistogramSummary
   settle_batch_duration_ms: HistogramSummary
-  cache_compactions: number
-  compactions_per_min: number
-  cache_compaction_saved_chars: number
   pool_quality_events_total: number
   routing_invalidations_local: number
   routing_invalidations_broadcast: number

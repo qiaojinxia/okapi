@@ -3,7 +3,7 @@ use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
 use super::{
     AttemptError, FailureReply, ForwardFailure, ProbeInfo, RequestBilling, attempt_json,
-    attempt_stream, build_upstream_body_for_attempt, eligible_candidates, failure_kind_of,
+    attempt_stream, build_upstream_body, eligible_candidates, failure_kind_of,
     lost_tools, max_attempts, recovery_secs, retriable, upstream_endpoint,
 };
 use axum::http::StatusCode;
@@ -60,17 +60,8 @@ pub(super) async fn try_model(
         attempted += 1;
 
         let upstream_model = cand.upstream_model(&bill.model).to_owned();
-        let switched_channel =
-            failover > 0 || (sticky_key.is_some() && sticky_key != Some(cand.channel_key_id));
-        let mut body_up = match build_upstream_body_for_attempt(
-            bill,
-            info,
-            &cand,
-            body,
-            &upstream_model,
-            parsed,
-            switched_channel,
-        ) {
+        let mut body_up =
+            match build_upstream_body(bill, info, &cand, body, &upstream_model, parsed) {
             Ok(body_up) => body_up,
             Err(err) => {
                 let rejection = match &err {
@@ -270,15 +261,7 @@ pub(super) async fn try_model(
                     "上游无 /responses，本次改走降级链（可在渠道设置关闭 responses_native）"
                 );
                 cand.responses_native = false;
-                match build_upstream_body_for_attempt(
-                    bill,
-                    info,
-                    &cand,
-                    body,
-                    &upstream_model,
-                    parsed,
-                    switched_channel,
-                ) {
+                match build_upstream_body(bill, info, &cand, body, &upstream_model, parsed) {
                     Ok(b) => {
                         body_up = b;
                         last_upstream = Some((

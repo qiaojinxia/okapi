@@ -140,7 +140,6 @@ pub struct NodeMetricsRates {
     pub console_rps: f64,
     pub gateway_5xx_rate: Option<f64>,
     pub failovers_per_min: f64,
-    pub compactions_per_min: f64,
     pub recent_gw_p95_ms: Option<f64>,
     pub recent_ttft_p95_ms: Option<f64>,
 }
@@ -234,8 +233,6 @@ pub struct NodeMetricsSnapshot {
     pub settlement_batch_duration: HistogramData,
     pub worker_maintenance_runs: Vec<WorkerMaintMetric>,
     pub pool_quality_events: Vec<PoolQualityMetric>,
-    pub cache_compactions: u64,
-    pub cache_compaction_saved_chars: u64,
     pub runtime: RuntimeMetricsJson,
 }
 
@@ -260,9 +257,6 @@ pub struct ClusterMetricsSummary {
     pub settle_batches_fallback: u64,
     pub settle_batch_size: HistogramSummary,
     pub settle_batch_duration_ms: HistogramSummary,
-    pub cache_compactions: u64,
-    pub compactions_per_min: f64,
-    pub cache_compaction_saved_chars: u64,
     pub pool_quality_events_total: u64,
     pub routing_invalidations_local: u64,
     pub routing_invalidations_broadcast: u64,
@@ -438,15 +432,13 @@ impl Metrics {
                     count,
                 })
                 .collect(),
-            cache_compactions: self.cache_compactions.load(Ordering::Relaxed),
-            cache_compaction_saved_chars: self.cache_compaction_saved_chars.load(Ordering::Relaxed),
             runtime: Self::snapshot_runtime(snap),
         }
     }
 
     /// 供 `metrics_sync` 跨周期计算瞬时速率与窗口 P95 的轻量读数。
     #[must_use]
-    pub fn rate_counters(&self) -> (u64, u64, u64, u64, u64, HistogramData, HistogramData) {
+    pub fn rate_counters(&self) -> (u64, u64, u64, u64, HistogramData, HistogramData) {
         let mut gw_req = 0u64;
         let mut console_req = 0u64;
         let mut gw_5xx = 0u64;
@@ -475,7 +467,6 @@ impl Metrics {
             console_req,
             gw_5xx,
             self.upstream_failovers.load(Ordering::Relaxed),
-            self.cache_compactions.load(Ordering::Relaxed),
             gw_hist,
             ttft_hist,
         )
@@ -638,9 +629,6 @@ struct SummaryAcc {
     settle_shedding: bool,
     settle_ok: u64,
     settle_fallback: u64,
-    compactions: u64,
-    compactions_pm: f64,
-    compaction_saved: u64,
     pool_quality_total: u64,
     inv_local: u64,
     inv_broadcast: u64,
@@ -669,11 +657,6 @@ impl SummaryAcc {
         self.settle_fallback = self
             .settle_fallback
             .saturating_add(n.settlement_batches_fallback);
-        self.compactions = self.compactions.saturating_add(n.cache_compactions);
-        self.compactions_pm += n.rates.compactions_per_min;
-        self.compaction_saved = self
-            .compaction_saved
-            .saturating_add(n.cache_compaction_saved_chars);
         self.inv_local = self.inv_local.saturating_add(n.routing_invalidations_local);
         self.inv_broadcast = self
             .inv_broadcast
@@ -730,9 +713,6 @@ impl SummaryAcc {
             settle_batches_fallback: self.settle_fallback,
             settle_batch_size: batch_size_hist.summary_raw(),
             settle_batch_duration_ms: batch_dur_hist.summary_ms(),
-            cache_compactions: self.compactions,
-            compactions_per_min: round2(self.compactions_pm),
-            cache_compaction_saved_chars: self.compaction_saved,
             pool_quality_events_total: self.pool_quality_total,
             routing_invalidations_local: self.inv_local,
             routing_invalidations_broadcast: self.inv_broadcast,
@@ -884,7 +864,6 @@ mod tests {
         m.record_auth_cache(true);
         m.record_auth_cache(false);
         m.record_pool_quality_event("default", "demote_error_rate");
-        m.record_cache_compaction(12_000);
 
         let rt = RuntimeSnapshot {
             role: "gateway",
@@ -907,7 +886,6 @@ mod tests {
             NodeMetricsRates {
                 gateway_rps: 2.5,
                 failovers_per_min: 3.0,
-                compactions_per_min: 1.5,
                 recent_gw_p95_ms: Some(180.0),
                 recent_ttft_p95_ms: Some(450.0),
                 ..Default::default()
@@ -919,7 +897,6 @@ mod tests {
             NodeMetricsRates {
                 gateway_rps: 1.5,
                 failovers_per_min: 1.0,
-                compactions_per_min: 0.5,
                 recent_gw_p95_ms: Some(220.0),
                 recent_ttft_p95_ms: Some(400.0),
                 ..Default::default()
@@ -934,8 +911,6 @@ mod tests {
         assert_eq!(cluster.summary.auth_cache_hit_ratio, Some(50.0));
         assert_eq!(cluster.summary.settle_backlog, 8);
         assert_eq!(cluster.summary.pool_quality_events_total, 2);
-        assert_eq!(cluster.summary.cache_compactions, 2);
-        assert_eq!(cluster.summary.cache_compaction_saved_chars, 24_000);
         assert_eq!(cluster.summary.recent_gw_p95_ms, Some(220.0));
         assert_eq!(cluster.summary.recent_ttft_p95_ms, Some(450.0));
         assert_eq!(cluster.providers.len(), 1);

@@ -275,8 +275,6 @@ pub struct Metrics {
     settlement_batch_duration: FixedHistogram,
     worker_maintenance_runs: BoundedCounterMap<(String, &'static str)>,
     pool_quality_events: BoundedCounterMap<(String, &'static str)>,
-    cache_compactions: AtomicU64,
-    cache_compaction_saved_chars: AtomicU64,
 }
 
 impl Metrics {
@@ -321,8 +319,6 @@ impl Metrics {
                 MAX_POOL_QUALITY_SERIES,
                 ("_other".into(), "other"),
             ),
-            cache_compactions: AtomicU64::new(0),
-            cache_compaction_saved_chars: AtomicU64::new(0),
         }
     }
 
@@ -400,14 +396,6 @@ impl Metrics {
     /// 调度池低质量自动降级 / 踢出事件计数（`action` 如 `demote_error_rate`、`demote_latency`、`eject_error_rate`、`failsafe_demote`）。
     pub fn record_pool_quality_event(&self, pool: &str, action: &'static str) {
         self.pool_quality_events.inc((pool.to_owned(), action));
-    }
-
-    /// 切渠 L0/L1 缓存压缩次数与节省字符数。
-    pub fn record_cache_compaction(&self, saved_chars: usize) {
-        self.cache_compactions.fetch_add(1, Ordering::Relaxed);
-        let chars = u64::try_from(saved_chars).unwrap_or(u64::MAX);
-        self.cache_compaction_saved_chars
-            .fetch_add(chars, Ordering::Relaxed);
     }
 
     /// 导出标准 Prometheus Text Exposition Format 0.0.4。
@@ -571,23 +559,6 @@ impl Metrics {
                 );
             }
         }
-
-        out.push_str(
-            "# HELP okapi_cache_compactions_total Failover L0/L1 cache compaction executions.\n",
-        );
-        out.push_str("# TYPE okapi_cache_compactions_total counter\n");
-        let _ = writeln!(
-            out,
-            "okapi_cache_compactions_total {}",
-            self.cache_compactions.load(Ordering::Relaxed)
-        );
-        out.push_str("# HELP okapi_cache_compaction_saved_chars_total Total prompt characters saved by L0/L1 cache compaction.\n");
-        out.push_str("# TYPE okapi_cache_compaction_saved_chars_total counter\n");
-        let _ = writeln!(
-            out,
-            "okapi_cache_compaction_saved_chars_total {}",
-            self.cache_compaction_saved_chars.load(Ordering::Relaxed)
-        );
     }
 
     fn render_runtime_snapshot(out: &mut String, snap: &RuntimeSnapshot) {

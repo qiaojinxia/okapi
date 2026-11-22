@@ -10,12 +10,10 @@ import { TagInput } from '@/components/ui/tag-input'
 import {
   AFFINITY_LABEL,
   AFFINITY_MODES,
-  COMPACTION_LABEL,
-  COMPACTION_MODES,
   ROUTING_STRATEGIES,
   STRATEGY_LABEL,
 } from '@/features/pools/types'
-import type { AffinityMode, CompactionMode, PoolPolicy, RoutingRule } from '@/features/pools/types'
+import type { AffinityMode, PoolPolicy, RoutingRule } from '@/features/pools/types'
 
 function parseOptInt(raw: string): number | null {
   const t = raw.trim()
@@ -455,97 +453,6 @@ export function PoolPolicyEditor({
             />
           </div>
         </div>
-      </FieldGroup>
-
-      <FieldGroup title={t('admin:poolCompactionGroup')} hint={t('admin:poolCompactionHint')}>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div className="flex flex-col gap-1.5 sm:col-span-2">
-            <Label htmlFor="policy-compact-mode">{t('admin:poolCompactionMode')}</Label>
-            <Select
-              id="policy-compact-mode"
-              value={policy.compaction?.mode ?? 'off'}
-              onChange={(v) =>
-                onChange({
-                  ...policy,
-                  compaction: { ...policy.compaction, mode: v as CompactionMode },
-                })
-              }
-              options={COMPACTION_MODES.map((m) => ({ value: m, label: t(COMPACTION_LABEL[m]) }))}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="policy-compact-min-tok">{t('admin:poolCompactionMinTokens')}</Label>
-            <Input
-              id="policy-compact-min-tok"
-              type="number"
-              min={1000}
-              max={500000}
-              placeholder="16000"
-              value={policy.compaction?.min_prompt_tokens ?? ''}
-              onChange={(e) =>
-                onChange({
-                  ...policy,
-                  compaction: {
-                    ...policy.compaction,
-                    min_prompt_tokens: parseOptInt(e.target.value),
-                  },
-                })
-              }
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="policy-compact-keep">{t('admin:poolCompactionKeepRecent')}</Label>
-            <Input
-              id="policy-compact-keep"
-              type="number"
-              min={2}
-              max={64}
-              placeholder="6"
-              value={policy.compaction?.keep_recent_messages ?? ''}
-              onChange={(e) =>
-                onChange({
-                  ...policy,
-                  compaction: {
-                    ...policy.compaction,
-                    keep_recent_messages: parseOptInt(e.target.value),
-                  },
-                })
-              }
-            />
-          </div>
-          <div className="flex flex-col gap-1.5 sm:col-span-2">
-            <Label htmlFor="policy-compact-chars">{t('admin:poolCompactionMaxToolChars')}</Label>
-            <Input
-              id="policy-compact-chars"
-              type="number"
-              min={100}
-              max={20000}
-              className="w-40"
-              placeholder="600"
-              value={policy.compaction?.max_old_tool_chars ?? ''}
-              onChange={(e) =>
-                onChange({
-                  ...policy,
-                  compaction: {
-                    ...policy.compaction,
-                    max_old_tool_chars: parseOptInt(e.target.value),
-                  },
-                })
-              }
-            />
-          </div>
-        </div>
-        <Switch
-          checked={policy.compaction?.strip_stale_cache_breakpoints !== false}
-          onChange={(strip_stale_cache_breakpoints) =>
-            onChange({
-              ...policy,
-              compaction: { ...policy.compaction, strip_stale_cache_breakpoints },
-            })
-          }
-          label={t('admin:poolCompactionStripBp')}
-          description={t('admin:poolCompactionStripBpDesc')}
-        />
       </FieldGroup>
 
       <FieldGroup title={t('admin:poolRulesGroup')} hint={t('admin:poolRulesHint')}>
