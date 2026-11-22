@@ -62,6 +62,38 @@ impl<'a> WorkingBody<'a> {
     }
 }
 
+/// 切渠自动缓存压缩（L0/L1）：仅在跨渠道/失粘性（或策略显式 always）且超过输入阈值时执行，
+/// 在入口方言转换前原地裁剪旧轮次超大工具输出与冗余缓存断点，避免新渠道冷启动高额重算。
+fn maybe_compact_on_switch(
+    bill: &RequestBilling,
+    working: &mut WorkingBody<'_>,
+    switched_channel: bool,
+) {
+    if !bill
+        .effective_policy
+        .compaction
+        .should_compact(switched_channel, bill.est_prompt)
+    {
+        return;
+    }
+    let report = okapi_engine::compaction::compact_request_value(
+        working.as_mut(),
+        &bill.effective_policy.compaction,
+    );
+    if report.applied {
+        bill.trace.set(
+            "cache_compaction",
+            serde_json::json!({
+                "switched_channel": switched_channel,
+                "chars_saved": report.chars_saved,
+                "est_tokens_saved": report.est_tokens_saved,
+                "folded_blocks": report.folded_blocks,
+                "stripped_breakpoints": report.stripped_breakpoints,
+            }),
+        );
+    }
+}
+
 pub(super) fn build_upstream_body(
     bill: &RequestBilling,
     info: &ProbeInfo,
@@ -69,6 +101,26 @@ pub(super) fn build_upstream_body(
     source: &Bytes,
     upstream_model: &str,
     source_value: Option<&serde_json::Value>,
+) -> Result<Bytes, UpstreamError> {
+    build_upstream_body_for_attempt(
+        bill,
+        info,
+        cand,
+        source,
+        upstream_model,
+        source_value,
+        false,
+    )
+}
+
+pub(super) fn build_upstream_body_for_attempt(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    cand: &ChannelCandidate,
+    source: &Bytes,
+    upstream_model: &str,
+    source_value: Option<&serde_json::Value>,
+    switched_channel: bool,
 ) -> Result<Bytes, UpstreamError> {
     let plan = ExecutionPlan::compile(
         bill.ingress,
@@ -96,6 +148,7 @@ pub(super) fn build_upstream_body(
         ),
     };
     let mut working = WorkingBody::new(source.clone(), parsed_source);
+    maybe_compact_on_switch(bill, &mut working, switched_channel);
 
     // 缺省输出上限写进入口方言的原文，由下面的出向转换器翻译成上游自己的字段：写在转换之后，
     // 跨方言时就落成上游不认的键（Gemini 上游的顶层 max_tokens，Anthropic / chat 上游的

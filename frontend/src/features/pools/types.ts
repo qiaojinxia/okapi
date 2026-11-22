@@ -4,6 +4,25 @@ export type MemberRole = (typeof MEMBER_ROLES)[number]
 export const AFFINITY_MODES = ['prefer_warm', 'strict', 'off'] as const
 export type AffinityMode = (typeof AFFINITY_MODES)[number]
 
+export const COMPACTION_MODES = ['off', 'on_channel_switch', 'always'] as const
+export type CompactionMode = (typeof COMPACTION_MODES)[number]
+
+export interface QualityPolicy {
+  enabled?: boolean | null
+  min_samples?: number | null
+  demote_error_rate_milli?: number | null
+  eject_error_rate_milli?: number | null
+  demote_latency_ms?: number | null
+}
+
+export interface CompactionPolicy {
+  mode?: CompactionMode | null
+  min_prompt_tokens?: number | null
+  keep_recent_messages?: number | null
+  max_old_tool_chars?: number | null
+  strip_stale_cache_breakpoints?: boolean | null
+}
+
 export interface UrgencyPolicy {
   short_window_weight?: number | null
   long_window_weight?: number | null
@@ -66,6 +85,8 @@ export interface PoolPolicy {
   affinity?: AffinityPolicy
   failover?: FailoverPolicy
   guardrails?: GuardrailPolicy
+  quality?: QualityPolicy
+  compaction?: CompactionPolicy
   canary_percent?: number
   rules?: RoutingRule[]
 }
@@ -99,6 +120,9 @@ export interface SelectedCandidateSummary {
   tags: string[]
   urgency_score?: number
   dominant_window?: string
+  quality_status?: string
+  error_rate_milli?: number
+  latency_ms?: number
 }
 
 export interface RejectedCandidate {
@@ -237,6 +261,12 @@ export const AFFINITY_LABEL = {
   off: 'admin:poolAffinityOff',
 } as const
 
+export const COMPACTION_LABEL = {
+  off: 'admin:poolCompactionOff',
+  on_channel_switch: 'admin:poolCompactionOnSwitch',
+  always: 'admin:poolCompactionAlways',
+} as const
+
 export function emptyPolicy(): PoolPolicy {
   return {
     fallback_pools: [],
@@ -244,6 +274,8 @@ export function emptyPolicy(): PoolPolicy {
     affinity: {},
     failover: {},
     guardrails: {},
+    quality: {},
+    compaction: {},
     canary_percent: 0,
     rules: [],
   }
@@ -347,12 +379,61 @@ export function normalizePolicyForSubmit(raw: PoolPolicy): PoolPolicy {
       return { name: r.name.trim(), when, apply }
     })
 
+  const quality: QualityPolicy = {}
+  if (raw.quality?.enabled === true) quality.enabled = true
+  if (raw.quality?.min_samples !== null && raw.quality?.min_samples !== undefined) {
+    quality.min_samples = raw.quality.min_samples
+  }
+  if (
+    raw.quality?.demote_error_rate_milli !== null &&
+    raw.quality?.demote_error_rate_milli !== undefined
+  ) {
+    quality.demote_error_rate_milli = raw.quality.demote_error_rate_milli
+  }
+  if (
+    raw.quality?.eject_error_rate_milli !== null &&
+    raw.quality?.eject_error_rate_milli !== undefined
+  ) {
+    quality.eject_error_rate_milli = raw.quality.eject_error_rate_milli
+  }
+  if (raw.quality?.demote_latency_ms !== null && raw.quality?.demote_latency_ms !== undefined) {
+    quality.demote_latency_ms = raw.quality.demote_latency_ms
+  }
+
+  const compaction: CompactionPolicy = {}
+  if (raw.compaction?.mode && raw.compaction.mode !== 'off') {
+    compaction.mode = raw.compaction.mode
+  }
+  if (
+    raw.compaction?.min_prompt_tokens !== null &&
+    raw.compaction?.min_prompt_tokens !== undefined
+  ) {
+    compaction.min_prompt_tokens = raw.compaction.min_prompt_tokens
+  }
+  if (
+    raw.compaction?.keep_recent_messages !== null &&
+    raw.compaction?.keep_recent_messages !== undefined
+  ) {
+    compaction.keep_recent_messages = raw.compaction.keep_recent_messages
+  }
+  if (
+    raw.compaction?.max_old_tool_chars !== null &&
+    raw.compaction?.max_old_tool_chars !== undefined
+  ) {
+    compaction.max_old_tool_chars = raw.compaction.max_old_tool_chars
+  }
+  if (raw.compaction?.strip_stale_cache_breakpoints === false) {
+    compaction.strip_stale_cache_breakpoints = false
+  }
+
   return {
     fallback_pools: cleanList(raw.fallback_pools),
     selection,
     affinity,
     failover,
     guardrails: cleanGuardrails(raw.guardrails),
+    quality,
+    compaction,
     canary_percent: Math.max(0, Math.min(100, Math.round(raw.canary_percent ?? 0))),
     rules,
   }

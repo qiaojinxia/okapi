@@ -913,3 +913,317 @@ async fn pool_expiry_urgency_strategy_crud_validation_and_dry_run_scoring() {
     );
     assert_eq!(ordered[1]["channel_id"], five_hour_ch_id);
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn pool_quality_auto_demotion_and_failover_cache_compaction_end_to_end() {
+    use tokio::sync::Mutex;
+
+    let bed = setup().await;
+    let pool_code = format!("pq-{}", &bed.suffix[..6]);
+    let model = format!("live-p2-{}", bed.suffix);
+
+    let (st, _) = admin_call(
+        &bed,
+        "POST",
+        "/admin/models",
+        Some(json!({
+            "model_name": model,
+            "display_name": model,
+            "vendor": "openai",
+            "pricing_mode": "ratio",
+            "model_ratio": "1",
+            "completion_ratio": "1"
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (st, _) = admin_call(&bed, "POST", "/admin/pricing/publish", None).await;
+    assert_eq!(st, 200);
+    okapi_engine::refresh_pricebook_if_newer(&bed.state)
+        .await
+        .unwrap();
+
+    // 1. 建池：启用低质量自动降级（15% 降权、60% 硬摘）+ 切渠自动缓存压缩
+    let (st, v) = admin_call(
+        &bed,
+        "POST",
+        "/admin/pools",
+        Some(json!({
+            "pool_code": pool_code,
+            "description": "phase2 quality & compaction pool",
+            "routing_strategy": "priority_weighted",
+            "policy": {
+                "quality": {
+                    "enabled": true,
+                    "min_samples": 10,
+                    "demote_error_rate_milli": 150,
+                    "eject_error_rate_milli": 600
+                },
+                "compaction": {
+                    "mode": "on_channel_switch",
+                    "min_prompt_tokens": 1000,
+                    "keep_recent_messages": 2,
+                    "max_old_tool_chars": 200,
+                    "strip_stale_cache_breakpoints": true
+                },
+                "failover": { "max_same_channel_retries": 0 }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, 200, "create phase2 pool: {v}");
+
+    // 启动捕获请求体的健康 mock upstream 与必败 500 mock upstream
+    let captured_bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap_clone = Arc::clone(&captured_bodies);
+    let cap_app = axum::Router::new().route(
+        "/v1/chat/completions",
+        post(move |axum::Json(payload): axum::Json<Value>| {
+            let cap = Arc::clone(&cap_clone);
+            async move {
+                cap.lock().await.push(payload);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(json!({
+                        "id": "chatcmpl-compacted",
+                        "object": "chat.completion",
+                        "created": 1_700_000_000,
+                        "model": "mock-model",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "CAPTURED_OK"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": { "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105 }
+                    })),
+                )
+            }
+        }),
+    );
+    let cap_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cap_base = format!("http://{}/v1", cap_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(cap_listener, cap_app).await.unwrap();
+    });
+
+    let (fail_base, _) = spawn_mock_openai("FAIL_500", true).await;
+
+    // 3 条同优先级渠道：healthy（0% 错）、noisy（30% 错 -> 降权）、broken（80% 错 -> 硬摘）
+    let (st, ch_healthy) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("p2-healthy-{}", bed.suffix),
+            "provider": "openai",
+            "api_base": cap_base,
+            "credential": "sk-h",
+            "models": [model],
+            "pools": [{ "pool_code": pool_code, "priority_override": 10 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let healthy_ch_id = ch_healthy["channel_id"].as_i64().unwrap();
+    let healthy_key_id = ch_healthy["channel_key_id"].as_i64().unwrap();
+
+    let (st, ch_noisy) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("p2-noisy-{}", bed.suffix),
+            "provider": "openai",
+            "api_base": cap_base,
+            "credential": "sk-n",
+            "models": [model],
+            "pools": [{ "pool_code": pool_code, "priority_override": 10 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let noisy_ch_id = ch_noisy["channel_id"].as_i64().unwrap();
+    let noisy_key_id = ch_noisy["channel_key_id"].as_i64().unwrap();
+
+    let (st, ch_broken) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("p2-broken-{}", bed.suffix),
+            "provider": "openai",
+            "api_base": fail_base,
+            "credential": "sk-b",
+            "models": [model],
+            "pools": [{ "pool_code": pool_code, "priority_override": 10 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let broken_ch_id = ch_broken["channel_id"].as_i64().unwrap();
+    let broken_key_id = ch_broken["channel_key_id"].as_i64().unwrap();
+
+    // 写入滚动质量样本
+    for _ in 0..10 {
+        bed.state
+            .sched
+            .channel_key_quality_record(healthy_key_id, true)
+            .await;
+    }
+    for _ in 0..7 {
+        bed.state
+            .sched
+            .channel_key_quality_record(noisy_key_id, true)
+            .await;
+    }
+    for _ in 0..3 {
+        bed.state
+            .sched
+            .channel_key_quality_record(noisy_key_id, false)
+            .await;
+    }
+    for _ in 0..2 {
+        bed.state
+            .sched
+            .channel_key_quality_record(broken_key_id, true)
+            .await;
+    }
+    for _ in 0..8 {
+        bed.state
+            .sched
+            .channel_key_quality_record(broken_key_id, false)
+            .await;
+    }
+
+    // 2. 验证 Dry-Run：healthy 第一、noisy 降权第二、broken 硬摘进 rejected_candidates
+    let (st, sim) = admin_call(
+        &bed,
+        "POST",
+        &format!("/admin/pools/{pool_code}/simulate"),
+        Some(json!({ "model": model, "prompt_tokens": 2000 })),
+    )
+    .await;
+    assert_eq!(st, 200, "simulate quality: {sim}");
+    let ordered = sim["saved"]["ordered_candidates"].as_array().unwrap();
+    assert_eq!(ordered.len(), 2, "broken 应被硬摘: {sim}");
+    assert_eq!(ordered[0]["channel_id"], healthy_ch_id);
+    assert_eq!(ordered[0]["quality_status"], "healthy");
+    assert_eq!(ordered[1]["channel_id"], noisy_ch_id);
+    assert_eq!(ordered[1]["quality_status"], "demoted_error_rate");
+    assert_eq!(ordered[1]["error_rate_milli"], 300);
+    assert!(
+        sim["saved"]["rejected_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["channel_id"] == broken_ch_id && r["reason"] == "quality_ejected_error_rate")
+    );
+
+    // 3. 验证真实网关切渠自动缓存压缩：
+    //    新建一个仅含 [高优必败 500 渠道 -> 次优捕获渠道] 的池，触发真实 failover 切渠
+    let compact_pool = format!("pc-{}", &bed.suffix[..6]);
+    let (st, _) = admin_call(
+        &bed,
+        "POST",
+        "/admin/pools",
+        Some(json!({
+            "pool_code": compact_pool,
+            "description": "compaction live pool",
+            "policy": {
+                "compaction": {
+                    "mode": "on_channel_switch",
+                    "min_prompt_tokens": 1000,
+                    "keep_recent_messages": 2,
+                    "max_old_tool_chars": 200,
+                    "strip_stale_cache_breakpoints": true
+                },
+                "failover": { "max_same_channel_retries": 0 }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+
+    let (st, _) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("p2-fail-top-{}", bed.suffix),
+            "provider": "openai",
+            "api_base": fail_base,
+            "credential": "sk-f1",
+            "models": [model],
+            "pools": [{ "pool_code": compact_pool, "priority_override": 100 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+
+    let (st, _) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("p2-cap-second-{}", bed.suffix),
+            "provider": "openai",
+            "api_base": cap_base,
+            "credential": "sk-c2",
+            "models": [model],
+            "pools": [{ "pool_code": compact_pool, "priority_override": 10 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200);
+
+    sqlx::query("UPDATE api_keys SET pool_override = $1 WHERE id = $2")
+        .bind(&compact_pool)
+        .bind(bed.user_key_id)
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+    bed.state.sched.auth_flush().await;
+    bed.state.invalidate_routing_caches();
+
+    let huge_tool_output = "VERBOSE_BUILD_LOG_LINE_0123456789 ".repeat(350);
+    let recent_user_msg = "please summarize the latest error";
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", bed.gateway))
+        .bearer_auth(&bed.user_token)
+        .json(&json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": "You are a concise assistant." },
+                { "role": "user", "content": "run cargo test" },
+                { "role": "tool", "tool_call_id": "call_old_1", "content": huge_tool_output },
+                { "role": "assistant", "content": "tests finished" },
+                { "role": "user", "content": recent_user_msg }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "CAPTURED_OK");
+
+    let recorded = captured_bodies.lock().await;
+    assert_eq!(recorded.len(), 1);
+    let sent_tool = recorded[0]["messages"][2]["content"].as_str().unwrap();
+    assert!(
+        sent_tool.contains("compacted"),
+        "切渠 failover 后的旧 tool 输出必须已被压缩，实际长度={}",
+        sent_tool.len()
+    );
+    assert!(
+        sent_tool.len() < 500,
+        "压缩后长度应显著下降: {}",
+        sent_tool.len()
+    );
+    assert_eq!(
+        recorded[0]["messages"][4]["content"].as_str().unwrap(),
+        recent_user_msg,
+        "最新轮次消息必须原样保留"
+    );
+}

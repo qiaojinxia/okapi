@@ -85,7 +85,10 @@ pub use self::routing::playground_parameters;
 use self::routing::{eligible_candidates, recovery_secs};
 use self::settle::{record_terminal, settle_commit, settle_failure};
 use self::stream::{attempt_stream, capture_response_event, with_relayed};
-use self::upstream::{build_upstream_body, dispatch_chat, response_writer, shape_upstream_body};
+use self::upstream::{
+    build_upstream_body, build_upstream_body_for_attempt, dispatch_chat, response_writer,
+    shape_upstream_body,
+};
 
 const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
 /// 首字窗口（连接 + 首个产出事件）；窗口内失败可无痕 failover。

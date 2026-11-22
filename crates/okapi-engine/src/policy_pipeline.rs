@@ -5,13 +5,17 @@
 //! 并为后续阶段预留零开销扩展接缝（`CandidateRanker`、`SchedulingOutcome`）。
 
 use crate::candidates::{cached_candidates, queue_with_options};
-use crate::scheduler::{CandidateQueue, CandidateSet as _, LayerOptions, Strategy};
+use crate::scheduler::{CandidateQueue, CandidateSet as _, LayerOptions, Strategy, role_rank};
 use crate::state::AppState;
-use okapi_domain::pool_policy::{EffectivePoolPolicy, RequestFeatures, wildcard_match};
+use okapi_domain::pool_policy::{
+    EffectivePoolPolicy, RequestFeatures, ResolvedQualityPolicy, wildcard_match,
+};
+use okapi_kernel::sched_redis::KeyQualitySample;
 use okapi_store::ChannelCandidate;
 use okapi_store::pool_policy::StoredPoolPolicy;
 use rand::RngExt;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 后续阶段（Phase 2 质量自动降级 / Phase 4 轻量在线神经 Bandit）的可插拔候选打分器接缝。
@@ -68,6 +72,15 @@ pub struct SelectedCandidateSummary {
     /// 贡献最大紧迫度的主导窗口名（如 `seven_day`、`five_hour`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dominant_window: Option<String>,
+    /// 启用质量自动降级时的质量状态（`healthy` / `demoted_error_rate` / `demoted_latency` / `ejected_fallback`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_status: Option<&'static str>,
+    /// 近 10 分钟滚动错误率（千分比）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_rate_milli: Option<u16>,
+    /// 实时时延 EWMA（毫秒）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u32>,
 }
 
 /// 策略模拟（Dry-Run）与决策解释结果。
@@ -186,6 +199,116 @@ pub fn filter_raw(
     Arc::new(kept)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityDecision {
+    Healthy,
+    DemotedErrorRate,
+    DemotedLatency,
+    EjectedErrorRate,
+}
+
+impl QualityDecision {
+    #[must_use]
+    pub const fn tier(self) -> u8 {
+        match self {
+            Self::Healthy => 0,
+            Self::DemotedErrorRate | Self::DemotedLatency => 1,
+            Self::EjectedErrorRate => 2,
+        }
+    }
+
+    #[must_use]
+    pub const fn status_label(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::DemotedErrorRate => "demoted_error_rate",
+            Self::DemotedLatency => "demoted_latency",
+            Self::EjectedErrorRate => "ejected_fallback",
+        }
+    }
+}
+
+/// 按质量策略判定单条候选质量等级；样本不足 `min_samples` 时不触发错误率降级，避免误杀新 key。
+#[must_use]
+pub fn classify_quality(
+    sample: Option<KeyQualitySample>,
+    policy: &ResolvedQualityPolicy,
+) -> QualityDecision {
+    let Some(sample) = sample else {
+        return QualityDecision::Healthy;
+    };
+    if sample.total() >= policy.min_samples {
+        let rate = sample.error_rate_milli();
+        if policy
+            .eject_error_rate_milli
+            .is_some_and(|eject| rate >= eject)
+        {
+            return QualityDecision::EjectedErrorRate;
+        }
+        if rate >= policy.demote_error_rate_milli {
+            return QualityDecision::DemotedErrorRate;
+        }
+    }
+    if let (Some(max_ms), Some(lat)) = (policy.demote_latency_ms, sample.latency_ms)
+        && lat >= max_ms
+    {
+        return QualityDecision::DemotedLatency;
+    }
+    QualityDecision::Healthy
+}
+
+/// 对排好序的候选队列应用低质量自动降级与保底硬摘流：
+/// - 仅当至少存在 1 条非硬摘候选时才真正移除 `EjectedErrorRate` 候选（全员异常时自动保底不黑洞）；
+/// - 其余候选在 `(pool_rank, role_rank, priority)` 同层内稳定按质量等级 `Healthy -> Demoted` 排布。
+pub fn apply_quality_to_queue<S: std::hash::BuildHasher>(
+    queue: &mut CandidateQueue,
+    qualities: &HashMap<i64, KeyQualitySample, S>,
+    policy: &ResolvedQualityPolicy,
+    respect_priority: bool,
+    rejected_out: Option<&mut Vec<RejectedCandidate>>,
+) {
+    if !policy.enabled || queue.is_empty() {
+        return;
+    }
+    let has_survivor = queue.iter().any(|c| {
+        classify_quality(qualities.get(&c.channel_key_id).copied(), policy)
+            != QualityDecision::EjectedErrorRate
+    });
+    if has_survivor {
+        if let Some(out) = rejected_out {
+            for c in queue.iter() {
+                if classify_quality(qualities.get(&c.channel_key_id).copied(), policy)
+                    == QualityDecision::EjectedErrorRate
+                {
+                    out.push(RejectedCandidate {
+                        channel_id: c.channel_id,
+                        channel_key_id: c.channel_key_id,
+                        channel_name: c.channel_name.clone(),
+                        provider: c.provider.clone(),
+                        pool_rank: c.pool_rank,
+                        pool_role: c.pool_role.clone(),
+                        reason: "quality_ejected_error_rate",
+                    });
+                }
+            }
+        }
+        queue.retain(|c| {
+            classify_quality(qualities.get(&c.channel_key_id).copied(), policy)
+                != QualityDecision::EjectedErrorRate
+        });
+    }
+    queue.sort_by_key(|c| {
+        let prio = if respect_priority { c.priority } else { 0 };
+        let decision = classify_quality(qualities.get(&c.channel_key_id).copied(), policy);
+        (
+            c.pool_rank,
+            role_rank(&c.pool_role),
+            std::cmp::Reverse(prio),
+            decision.tier(),
+        )
+    });
+}
+
 /// 根据生效策略构建过滤并分层排好序的 `CandidateQueue`，同时返回是否命中灰度桶。
 pub async fn build_queue(
     state: &AppState,
@@ -202,11 +325,24 @@ pub async fn build_queue(
         ignore_cost_in_weight: policy.ignore_cost_in_weight,
         canary_active,
     };
-    let queue = queue_with_options(state, filtered, strategy, opts).await;
+    let mut queue = queue_with_options(state, filtered, strategy, opts).await;
+    if policy.quality.enabled && !queue.is_empty() {
+        let qualities = state
+            .sched
+            .channel_key_qualities(queue.iter().map(|c| c.channel_key_id))
+            .await;
+        apply_quality_to_queue(
+            &mut queue,
+            &qualities,
+            &policy.quality,
+            policy.respect_priority_layers,
+            None,
+        );
+    }
     (queue, canary_active)
 }
 
-/// 策略 Dry-Run 模拟：复用与生产热路径完全一致的规则求值、灰度分桶、硬过滤与分层选路，
+/// 策略 Dry-Run 模拟：复用与生产热路径完全一致的规则求值、灰度分桶、硬过滤、质量降级与分层选路，
 /// 返回完整决策追踪，供控制台验证已保存策略或未保存草稿。
 pub async fn simulate(
     state: &AppState,
@@ -236,6 +372,22 @@ pub async fn simulate(
         canary_active,
     };
     let mut queue = queue_with_options(state, filtered, strategy, opts).await;
+    let qualities = if effective_policy.quality.enabled && !queue.is_empty() {
+        let q = state
+            .sched
+            .channel_key_qualities(queue.iter().map(|c| c.channel_key_id))
+            .await;
+        apply_quality_to_queue(
+            &mut queue,
+            &q,
+            &effective_policy.quality,
+            effective_policy.respect_priority_layers,
+            Some(&mut rejected_candidates),
+        );
+        q
+    } else {
+        HashMap::new()
+    };
     let mut urgency_scores = std::collections::HashMap::new();
     if strategy == Strategy::ExpiryUrgency {
         let now = chrono::Utc::now().timestamp();
@@ -261,6 +413,11 @@ pub async fn simulate(
         .iter()
         .map(|c| {
             let urg = urgency_scores.get(&c.channel_key_id);
+            let sample = qualities.get(&c.channel_key_id).copied();
+            let quality_status = effective_policy
+                .quality
+                .enabled
+                .then(|| classify_quality(sample, &effective_policy.quality).status_label());
             SelectedCandidateSummary {
                 channel_id: c.channel_id,
                 channel_key_id: c.channel_key_id,
@@ -274,6 +431,11 @@ pub async fn simulate(
                 tags: c.pool_tags.clone(),
                 urgency_score: urg.map(|u| u.score),
                 dominant_window: urg.map(|u| u.dominant_window.clone()),
+                quality_status,
+                error_rate_milli: sample
+                    .filter(|s| s.total() > 0)
+                    .map(KeyQualitySample::error_rate_milli),
+                latency_ms: sample.and_then(|s| s.latency_ms),
             }
         })
         .collect();
@@ -405,5 +567,78 @@ mod tests {
         );
         let ids: Vec<i64> = q.iter().map(|c| c.channel_key_id).collect();
         assert_eq!(ids, vec![3, 2, 1], "canary -> primary -> backup");
+    }
+
+    #[test]
+    fn quality_auto_demotes_slow_or_noisy_and_ejects_with_failsafe() {
+        let c1 = make_cand(1, "primary", "openai", 1000); // 80% err -> ejected
+        let c2 = make_cand(2, "primary", "openai", 1000); // 25% err -> demoted
+        let c3 = make_cand(3, "primary", "openai", 1000); // slow latency -> demoted
+        let c4 = make_cand(4, "primary", "openai", 1000); // healthy
+
+        let policy = ResolvedQualityPolicy {
+            enabled: true,
+            min_samples: 10,
+            demote_error_rate_milli: 150,
+            eject_error_rate_milli: Some(600),
+            demote_latency_ms: Some(5_000),
+        };
+        let qualities = HashMap::from([
+            (
+                1,
+                KeyQualitySample {
+                    ok: 2,
+                    err: 8,
+                    latency_ms: Some(200),
+                },
+            ),
+            (
+                2,
+                KeyQualitySample {
+                    ok: 15,
+                    err: 5,
+                    latency_ms: Some(300),
+                },
+            ),
+            (
+                3,
+                KeyQualitySample {
+                    ok: 10,
+                    err: 0,
+                    latency_ms: Some(8_000),
+                },
+            ),
+            (
+                4,
+                KeyQualitySample {
+                    ok: 10,
+                    err: 0,
+                    latency_ms: Some(250),
+                },
+            ),
+        ]);
+
+        let raw = Arc::new(vec![c1.clone(), c2, c3, c4]);
+        let mut q = CandidateQueue::weighted(raw);
+        let mut rejected = Vec::new();
+        apply_quality_to_queue(&mut q, &qualities, &policy, true, Some(&mut rejected));
+        let ids: Vec<i64> = q.iter().map(|c| c.channel_key_id).collect();
+        assert_eq!(ids[0], 4, "健康候选应排首位");
+        assert!(!ids.contains(&1), "80% 错误率候选在有健康替代时应被硬摘");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].reason, "quality_ejected_error_rate");
+
+        // 保底测试：全员 80% 错误率时绝不清空候选池
+        let mut only_bad = CandidateQueue::weighted(Arc::new(vec![c1]));
+        let mut bad_rejected = Vec::new();
+        apply_quality_to_queue(
+            &mut only_bad,
+            &qualities,
+            &policy,
+            true,
+            Some(&mut bad_rejected),
+        );
+        assert_eq!(only_bad.len(), 1, "全员劣质时必须保底放行");
+        assert_eq!(bad_rejected.len(), 0);
     }
 }

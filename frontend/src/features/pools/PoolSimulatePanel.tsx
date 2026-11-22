@@ -110,6 +110,18 @@ function TraceView({ title, trace }: { title: string; trace: DecisionTrace }) {
                     })}
                   </Badge>
                 )}
+                {c.quality_status && (
+                  <Badge
+                    variant={c.quality_status === 'healthy' ? 'muted' : 'destructive'}
+                    className="text-[10px]"
+                  >
+                    {t(`admin:poolSimQuality_${c.quality_status}`)}
+                    {c.error_rate_milli !== undefined && c.error_rate_milli > 0
+                      ? ` ${(c.error_rate_milli / 10).toFixed(1)}%`
+                      : ''}
+                    {c.latency_ms !== undefined ? ` · ${c.latency_ms}ms` : ''}
+                  </Badge>
+                )}
                 <span className="ml-auto font-mono text-[11px] text-muted-foreground">
                   P{c.priority} · W{c.weight} · {c.cost_milli}‰
                 </span>

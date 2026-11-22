@@ -1,6 +1,32 @@
 //! 渠道 key 的选路输入：key 级 RPM 窗、当日消费、在途、时延 EWMA，以及负毛利熔断名单。
 use super::SchedulerRedis;
-use fred::interfaces::{KeysInterface, SortedSetsInterface};
+use fred::interfaces::{HashesInterface, KeysInterface, SortedSetsInterface};
+
+/// 渠道 key 近 10 分钟（双 5 分钟桶）滚动质量读数：成功数、失败数与实时时延 EWMA。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyQualitySample {
+    pub ok: u32,
+    pub err: u32,
+    pub latency_ms: Option<u32>,
+}
+
+impl KeyQualitySample {
+    #[must_use]
+    pub const fn total(self) -> u32 {
+        self.ok.saturating_add(self.err)
+    }
+
+    /// 滚动错误率（千分比，0..=1000）；无样本时为 0。
+    #[must_use]
+    pub fn error_rate_milli(self) -> u16 {
+        let total = u64::from(self.total());
+        if total == 0 {
+            return 0;
+        }
+        let rate = (u64::from(self.err) * 1_000 / total).min(1_000);
+        u16::try_from(rate).unwrap_or(1_000)
+    }
+}
 
 /// key 的并发租约集合：成员是一次在途尝试，分数是租约到期的毫秒时刻。
 #[must_use]
@@ -159,5 +185,82 @@ impl SchedulerRedis {
         {
             tracing::debug!(error = %err, "时延 EWMA 写入失败");
         }
+    }
+
+    fn channel_key_quality_bucket(channel_key_id: i64, bucket: i64) -> String {
+        format!("qual:ck:{channel_key_id}:{bucket}")
+    }
+
+    /// 登记一次渠道 key 的成功/失败质量样本（5 分钟桶 + 600s TTL，供低质量自动降级读取）。
+    pub async fn channel_key_quality_record(&self, channel_key_id: i64, ok: bool) {
+        let bucket = chrono::Utc::now().timestamp() / 300;
+        let key = Self::channel_key_quality_bucket(channel_key_id, bucket);
+        let field = if ok { "ok" } else { "err" };
+        let pipe = self.client.pipeline();
+        if pipe.hincrby::<(), _, _>(&key, field, 1).await.is_err()
+            || pipe.expire::<(), _>(&key, 600, None).await.is_err()
+        {
+            return;
+        }
+        if let Err(err) = pipe.last::<()>().await {
+            tracing::debug!(channel_key_id, error = %err, "质量样本写入失败");
+        }
+    }
+
+    /// 批量读取候选集合的双桶（当前 + 上一个 5 分钟桶）质量统计与时延 EWMA；
+    /// 单次管道往返，Redis 故障时返回空表（安全退化为不降级）。
+    pub async fn channel_key_qualities(
+        &self,
+        ids: impl Iterator<Item = i64>,
+    ) -> std::collections::HashMap<i64, KeyQualitySample> {
+        let ids: Vec<i64> = ids.collect();
+        if ids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let now_bucket = chrono::Utc::now().timestamp() / 300;
+        let prev_bucket = now_bucket - 1;
+
+        let mut qual_keys = Vec::with_capacity(ids.len() * 2);
+        for &id in &ids {
+            qual_keys.push(Self::channel_key_quality_bucket(id, now_bucket));
+            qual_keys.push(Self::channel_key_quality_bucket(id, prev_bucket));
+        }
+
+        let pipe = self.client.pipeline();
+        for key in &qual_keys {
+            if pipe
+                .hmget::<(), _, _>(key, vec!["ok", "err"])
+                .await
+                .is_err()
+            {
+                return std::collections::HashMap::new();
+            }
+        }
+        let counts: Vec<Vec<Option<u32>>> = pipe.all().await.unwrap_or_default();
+        let latencies = self.channel_key_latencies(ids.iter().copied()).await;
+
+        let mut out = std::collections::HashMap::with_capacity(ids.len());
+        for (idx, id) in ids.into_iter().enumerate() {
+            let mut ok = 0u32;
+            let mut err = 0u32;
+            for offset in [0usize, 1usize] {
+                if let Some(pair) = counts.get(idx * 2 + offset) {
+                    ok = ok.saturating_add(pair.first().copied().flatten().unwrap_or(0));
+                    err = err.saturating_add(pair.get(1).copied().flatten().unwrap_or(0));
+                }
+            }
+            let latency_ms = latencies.get(&id).copied();
+            if ok > 0 || err > 0 || latency_ms.is_some() {
+                out.insert(
+                    id,
+                    KeyQualitySample {
+                        ok,
+                        err,
+                        latency_ms,
+                    },
+                );
+            }
+        }
+        out
     }
 }
