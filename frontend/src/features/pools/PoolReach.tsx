@@ -24,10 +24,19 @@ export function PoolReach({ poolCode }: { poolCode: string }) {
   if (!d) {
     return <p className="text-xs text-muted-foreground">{t('common:loading')}</p>
   }
-  const enabled = d.members.filter((m) => m.status === 1)
+  const members = d.members ?? []
+  const models = d.models ?? []
+  const groups = d.groups ?? []
+  const enabled = members.filter((m) => m.status === 1 && m.enabled !== false)
   const reachable = enabled.filter((m) => m.active_keys > 0)
-  const shown = d.models.slice(0, MAX_MODELS)
-  const more = d.models.length - shown.length
+  const shown = models.slice(0, MAX_MODELS)
+  const more = models.length - shown.length
+  const fallbacks =
+    d.policy?.fallback_pools && d.policy.fallback_pools.length > 0
+      ? d.policy.fallback_pools
+      : d.fallback_pool_code
+        ? [d.fallback_pool_code]
+        : []
 
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
@@ -35,14 +44,14 @@ export function PoolReach({ poolCode }: { poolCode: string }) {
         <span className="text-muted-foreground">
           {t('admin:poolReachChannels', { n: enabled.length, ok: reachable.length })}
         </span>
-        {d.fallback_pool_code && (
+        {fallbacks.length > 0 && (
           <span className="text-muted-foreground">
-            {t('admin:poolReachFallback', { pool: d.fallback_pool_code })}
+            {t('admin:poolReachFallback', { pool: fallbacks.join(' → ') })}
           </span>
         )}
-        {d.groups.length > 0 && (
+        {groups.length > 0 && (
           <span className="text-muted-foreground">
-            {t('admin:poolReachGroups', { groups: d.groups.join(', ') })}
+            {t('admin:poolReachGroups', { groups: groups.join(', ') })}
           </span>
         )}
       </div>

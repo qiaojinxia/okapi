@@ -258,7 +258,7 @@ async function openPools(page: Page) {
 }
 
 async function showPools(drawer: ReturnType<Page['getByRole']>) {
-  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
+  await drawer.getByRole('tab', { name: '模型与调度池', exact: true }).click()
   await drawer.locator('#channel-pools > summary').click()
 }
 
@@ -288,7 +288,7 @@ test('a single credential hides its internal id and creates a selected pool with
   await drawer.locator('#channel-key-options-2').getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => calls[0]).toEqual({ path: '/admin/channels/42/keys/2', body: { weight: 1, max_concurrency: 3 } })
   await showPools(drawer)
-  await drawer.getByRole('button', { name: '新建池', exact: true }).click()
+  await drawer.getByRole('button', { name: '新建调度池', exact: true }).click()
   await drawer.getByRole('textbox', { name: '池代码', exact: true }).fill(' fast ')
   await drawer.getByRole('button', { name: '创建并选中', exact: true }).click()
   await expect(drawer.getByRole('checkbox', { name: 'fast', exact: true })).toBeChecked()
@@ -326,22 +326,22 @@ test('inline pool creation rejects existing codes, preserves failed drafts and j
     return route.fulfill({ json: { ok: true } })
   })
   await drawer.locator('#channel-pools > summary').click()
-  await drawer.getByRole('button', { name: '新建池', exact: true }).click()
+  await drawer.getByRole('button', { name: '新建调度池', exact: true }).click()
   const input = drawer.getByRole('textbox', { name: '池代码', exact: true })
   await input.fill('default')
-  await expect(drawer.getByRole('alert').filter({ hasText: '此池已存在' })).toBeVisible()
+  await expect(drawer.getByRole('alert').filter({ hasText: '此调度池已存在' })).toBeVisible()
   await expect(drawer.getByRole('button', { name: '创建并选中', exact: true })).toBeDisabled()
   expect(posts).toBe(0)
   await input.fill('stable')
   failCatalog = true
   await drawer.getByRole('button', { name: '创建并选中', exact: true }).click()
-  await expect(drawer.getByRole('form', { name: '新建池' }).getByRole('alert')).toContainText('服务内部错误')
+  await expect(drawer.getByRole('form', { name: '新建调度池' }).getByRole('alert')).toContainText('服务内部错误')
   await expect(input).toHaveValue('stable')
   expect(posts).toBe(0)
   failCatalog = false
   await drawer.getByRole('button', { name: '创建并选中', exact: true }).click()
   await expect.poll(() => posts).toBe(1)
-  await expect(drawer.getByRole('form', { name: '新建池' }).getByRole('alert')).toContainText('服务内部错误')
+  await expect(drawer.getByRole('form', { name: '新建调度池' }).getByRole('alert')).toContainText('服务内部错误')
   await expect(input).toHaveValue('stable')
   await expect(drawer.locator('#d-name')).toHaveValue('new-controlled-channel')
   expect(await drawer.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
@@ -378,7 +378,7 @@ test('pool selectors load all pages and retained multi-credential channels keep 
   await expect(drawer.getByText('#2', { exact: true })).toBeVisible()
   await expect(drawer.getByText('#3', { exact: true })).toBeVisible()
   await showPools(drawer)
-  await drawer.getByRole('button', { name: '新建池', exact: true }).click()
+  await drawer.getByRole('button', { name: '新建调度池', exact: true }).click()
   await drawer.getByRole('textbox', { name: '池代码', exact: true }).fill('pool-20')
   await expect(drawer.getByRole('button', { name: '创建并选中', exact: true })).toBeDisabled()
   await drawer.locator('form').getByRole('button', { name: '取消', exact: true }).click()
@@ -409,7 +409,7 @@ test('users without global channel write cannot change pool membership', async (
   await page.reload()
   await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '编辑', exact: true }).click()
   const drawer = page.getByRole('dialog')
-  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
+  await drawer.getByRole('tab', { name: '模型与调度池', exact: true }).click()
   await expect(drawer.getByRole('note').filter({ hasText: '联系管理员审核' })).toBeVisible()
   await expect(drawer.locator('#channel-pools')).toHaveCount(0)
   await expect(drawer.getByRole('checkbox', { name: 'default（内置默认池）' })).toHaveCount(0)

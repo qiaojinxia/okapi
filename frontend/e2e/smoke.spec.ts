@@ -112,7 +112,7 @@ test('权限分级：普通用户被管理面拒绝，且前端不因 403 崩溃
   // 导航按权限裁剪：无权的入口不该出现，而不是点进去再吃 403。
   // 普通用户 permissions=[] → 所有带 permission 标注的管理入口都应消失。
   const sidebar = page.getByRole('complementary')
-  for (const label of [/渠道池|Channel pools/, /价格分组|Price groups/, /角色与权限|Roles & permissions/]) {
+  for (const label of [/调度池|Routing Pools/, /价格分组|Price groups/, /角色与权限|Roles & permissions/]) {
     await expect(sidebar.getByRole('link', { name: label })).toHaveCount(0)
   }
   // 不需要权限的入口仍在（否则就是把导航整个裁没了）

@@ -187,7 +187,7 @@ test('视觉评审：渠道编辑抽屉截图', async ({ page }) => {
   await expect(drawer.getByRole('heading', { name: /编辑渠道/ })).toBeVisible()
   await page.waitForTimeout(350)
   await page.screenshot({ path: 'test-results/channel-drawer-conn.png', fullPage: true })
-  for (const [tab, name] of [['模型与渠道池', 'models'], ['调度', 'sched'], ['请求与计费行为', 'behavior']] as const) {
+  for (const [tab, name] of [['模型与调度池', 'models'], ['调度', 'sched'], ['请求与计费行为', 'behavior']] as const) {
     await drawer.getByRole('tab', { name: tab, exact: true }).click()
     await page.waitForTimeout(200)
     await page.screenshot({ path: `test-results/channel-drawer-${name}.png`, fullPage: true })
@@ -782,7 +782,7 @@ test('渠道列表：所见即可点——未入池/模型/优先级/额度直�
   const openai = rowOf(page, 'openai-main')
   await openai.getByRole('button', { name: '未入池', exact: true }).click()
   const drawer = page.getByRole('dialog')
-  await expect(drawer.getByRole('tab', { name: '模型与渠道池', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(drawer.getByRole('tab', { name: '模型与调度池', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(drawer.locator('#channel-pools')).toHaveAttribute('open', '')
   await page.keyboard.press('Escape')
   await expect(drawer).toHaveCount(0)
@@ -792,7 +792,7 @@ test('渠道列表：所见即可点——未入池/模型/优先级/额度直�
   await modelsBtn.hover()
   await expect(page.getByRole('tooltip')).toContainText('gpt-5, gpt-5-mini, o4-mini')
   await modelsBtn.click()
-  await expect(drawer.getByRole('tab', { name: '模型与渠道池', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(drawer.getByRole('tab', { name: '模型与调度池', exact: true })).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('Escape')
 
   // 4. 点击优先级直达「调度」且「调度与成本设置」已展开

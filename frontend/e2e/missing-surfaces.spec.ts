@@ -1490,11 +1490,11 @@ test('总览待办：服务状态一句话、全清不占位、死信/未定价/
   await expect(card.getByText(/outbox 积压 1000 条/)).toBeVisible()
   await expect(card.getByText(/2 把渠道 key 处于冷却/)).toBeVisible()
   await expect(card.getByText(/1 个模型未配定价（如 gpt-5）/)).toBeVisible()
-  await expect(card.getByText(/1 个渠道池是空的（如 empty-pool）/)).toBeVisible()
+  await expect(card.getByText(/1 个调度池是空的（如 empty-pool）/)).toBeVisible()
   await expect(card.getByText(/1 个渠道错误率超 5%（如 openai-main）/)).toBeVisible()
   await expect(card.getByText(/1 个用户三方对账存在漂移/)).toBeVisible()
   await expect(card.getByRole('link', { name: /未配定价/ })).toHaveAttribute('href', '/admin/pricing')
-  await expect(card.getByRole('link', { name: /渠道池是空的/ })).toHaveAttribute('href', '/admin/pools')
+  await expect(card.getByRole('link', { name: /调度池是空的/ })).toHaveAttribute('href', '/admin/pools')
   await expect(card.getByRole('link', { name: /死信队列/ })).toHaveAttribute('href', '/admin/ops')
   await expect(card.getByRole('link', { name: /错误率超 5%/ })).toHaveAttribute('href', '/admin/quality?days=7&tab=channels')
   expect(channelDays[0]).toBe('7')
@@ -3618,7 +3618,7 @@ test('渠道池列表：内置/空池/策略与被引用明细', async ({ page }
   )
 
   await page.goto('/admin/pools')
-  await expect(page.locator('#main-content').getByRole('heading', { name: '渠道池' })).toBeVisible()
+  await expect(page.locator('#main-content').getByRole('heading', { name: '调度池与策略' })).toBeVisible()
   const def = page.getByRole('row').filter({ hasText: 'default' }).first()
   await expect(def.getByText('内置')).toBeVisible()
   await expect(def.getByText('优先级 + 加权')).toBeVisible()
@@ -3631,13 +3631,13 @@ test('渠道池列表：内置/空池/策略与被引用明细', async ({ page }
 
   await page.route('**/admin/pools?*', (route) => route.fulfill({ json: { data: [], total: 0 } }))
   await page.reload()
-  await expect(page.getByText('只有内置 default 池：所有分组走它，新渠道也缺省进它。需要按档位区分上游时再建新池。')).toBeVisible()
+  await expect(page.getByText('只有内置 default 调度池：所有分组走它，新渠道也缺省进它。需要按档位或策略分流上游时再建新池。')).toBeVisible()
   await page
-    .getByText('只有内置 default 池：所有分组走它，新渠道也缺省进它。需要按档位区分上游时再建新池。')
+    .getByText('只有内置 default 调度池：所有分组走它，新渠道也缺省进它。需要按档位或策略分流上游时再建新池。')
     .locator('xpath=ancestor::div[contains(@class,"border-dashed")]')
-    .getByRole('button', { name: '新建池' })
+    .getByRole('button', { name: '新建调度池' })
     .click()
-  await expect(page.getByRole('dialog').getByRole('heading', { name: '新建池' })).toBeVisible()
+  await expect(page.getByRole('dialog').getByRole('heading', { name: '新建调度池' })).toBeVisible()
 
   await page.route('**/admin/pools?*', (route) => {
     if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()

@@ -1,18 +1,19 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Pencil, Play, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { ActionGroup, IconButton } from '@/components/ui/icon-button'
+import { ListState } from '@/components/ui/list-state'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
-import { ListState } from '@/components/ui/list-state'
 import { EmptyState } from '@/components/ui/state'
-import { toast } from '@/components/ui/toast'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { toast } from '@/components/ui/toast'
 import { PoolDrawer } from '@/features/pools/PoolDrawer'
+import type { PoolDrawerTab } from '@/features/pools/PoolDrawer'
 import { STRATEGY_LABEL, strategyOf } from '@/features/pools/types'
 import type { PoolRow } from '@/features/pools/types'
 import { pagedPath, usePagedQuery } from '@/hooks/use-paged-query'
@@ -21,15 +22,14 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 
-/// 渠道池页。
+/// 调度池与策略页（Routing Pools & Policies）。
 ///
-/// 池回答的是"打哪些上游、怎么在里面选"，与价格分组的"付多少钱"是两个决策。
-/// 列表把引用数摆出来：被分组或令牌引用的池删不掉（后端 409），先看到数字
-/// 就不必去试。
+/// 调度池承载渠道成员集合 + 声明式调度策略（多跳降级、灰度切流、长短上下文分流、护栏与 Dry-Run 模拟），
+/// 与价格分组的"付多少钱"正交分离。
 export function PoolsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [drawer, setDrawer] = useState<{ pool?: PoolRow } | null>(null)
+  const [drawer, setDrawer] = useState<{ pool?: PoolRow; tab?: PoolDrawerTab } | null>(null)
   const { confirm, dialog } = useConfirm()
   const { query: pools, pager, rows } = usePagedQuery({
     queryKey: (page) => qk.adminPoolsPage(page),
@@ -50,7 +50,7 @@ export function PoolsPage() {
   return (
     <div className="list-page">
       <PageHeader
-        title={t('admin:poolsTitle')}
+        title={t('admin:poolsPageTitle')}
         description={t('admin:poolsDesc')}
         meta={t('common:totalCount', { n: pools.data?.total ?? 0 })}
         action={
@@ -92,6 +92,14 @@ export function PoolsPage() {
           <TBody>
             {rows.map((p) => {
               const refs = p.group_count + p.key_count + p.fallback_ref_count
+              const fallbacks =
+                p.policy?.fallback_pools && p.policy.fallback_pools.length > 0
+                  ? p.policy.fallback_pools
+                  : p.fallback_pool_code
+                    ? [p.fallback_pool_code]
+                    : []
+              const rulesCount = p.policy?.rules?.length ?? 0
+              const canaryPct = p.policy?.canary_percent ?? 0
               return (
                 <Tr key={p.pool_code}>
                   <Td>
@@ -104,17 +112,40 @@ export function PoolsPage() {
                         {p.pool_code}
                       </button>
                       {p.builtin && <Badge variant="muted">{t('admin:poolBuiltin')}</Badge>}
+                      {(p.policy_version ?? 1) > 1 && (
+                        <Badge variant="muted" className="font-mono text-[10px]">
+                          {t('admin:poolPolicyVersion', { v: p.policy_version })}
+                        </Badge>
+                      )}
                     </span>
                   </Td>
                   <Td>
-                    <Badge variant={strategyOf(p.routing_strategy) === 'priority_weighted' ? 'muted' : 'default'}>
-                      {t(STRATEGY_LABEL[strategyOf(p.routing_strategy)])}
-                    </Badge>
+                    <div className="flex flex-wrap items-center gap-1">
+                      <Badge
+                        variant={
+                          strategyOf(p.routing_strategy) === 'priority_weighted'
+                            ? 'muted'
+                            : 'default'
+                        }
+                      >
+                        {t(STRATEGY_LABEL[strategyOf(p.routing_strategy)])}
+                      </Badge>
+                      {canaryPct > 0 && (
+                        <Badge variant="default" className="text-[10px]">
+                          {t('admin:poolPolicyCanaryBadge', { pct: canaryPct })}
+                        </Badge>
+                      )}
+                      {rulesCount > 0 && (
+                        <Badge variant="muted" className="text-[10px]">
+                          {t('admin:poolPolicyRulesCount', { n: rulesCount })}
+                        </Badge>
+                      )}
+                    </div>
                   </Td>
                   <Td>
-                    {p.fallback_pool_code ? (
+                    {fallbacks.length > 0 ? (
                       <span className="inline-flex max-w-full items-center truncate rounded bg-muted/85 px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted-foreground ring-1 ring-inset ring-border/60 dark:bg-white/[0.06]">
-                        {p.fallback_pool_code}
+                        {fallbacks.join(' → ')}
                       </span>
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>
@@ -144,11 +175,15 @@ export function PoolsPage() {
                   <Td>
                     <div className="flex items-center justify-end">
                       <ActionGroup label={t('common:actions')}>
-                        {/* 抽屉早就支持 pool 回填（策略/说明），页面却一直没给编辑入口 */}
+                        <IconButton
+                          icon={Play}
+                          label={t('admin:poolSimAction')}
+                          onClick={() => setDrawer({ pool: p, tab: 'simulate' })}
+                        />
                         <IconButton
                           icon={Pencil}
                           label={t('common:edit')}
-                          onClick={() => setDrawer({ pool: p })}
+                          onClick={() => setDrawer({ pool: p, tab: 'basic' })}
                         />
                         <IconButton
                           icon={Trash2}
@@ -178,6 +213,7 @@ export function PoolsPage() {
       {drawer !== null && (
         <PoolDrawer
           pool={drawer.pool}
+          initialTab={drawer.tab}
           onClose={() => setDrawer(null)}
           onDone={() => {
             toast.success(t('common:success'))

@@ -1690,14 +1690,15 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
 
   await rowOf('premium').getByRole('button', { name: '编辑', exact: true }).click()
   const edit = await openedDialog(page)
-  await expect(edit.getByRole('heading', { name: '编辑 premium' })).toBeVisible()
+  await expect(edit.getByRole('heading', { name: '配置 premium' })).toBeVisible()
   await expect(edit.locator('#pool-code')).toHaveAttribute('readonly', '')
   await expect(edit.locator('#pool-strategy')).toHaveValue('least_latency')
-  await expect(edit.locator('#pool-fallback')).toHaveValue('default')
+  await expect(edit).toContainText('1.default')
   // 降级目标里不能有自己
-  await expect(edit.locator('#pool-fallback option[value="premium"]')).toHaveCount(0)
+  await expect(edit.locator('#pool-fallback-add option[value="premium"]')).toHaveCount(0)
   await edit.locator('#pool-strategy').selectOption('priority_weighted')
-  await edit.locator('#pool-fallback').selectOption('')
+  // 移除已选降级池 default
+  await edit.getByRole('button', { name: '删除', exact: true }).click()
   await edit.locator('#pool-desc').fill('paid tier')
   await page.route('**/admin/pools', (route) => {
     if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
@@ -1710,25 +1711,37 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
     if (route.request().isNavigationRequest()) return route.fallback()
     if (route.request().method() === 'GET') return route.fulfill({ json: { data: pools } })
     posts.push(route.request().postDataJSON() as Json)
-    await route.fulfill({ json: { ok: true } })
+    await route.fulfill({ json: { ok: true, policy_version: 2 } })
   })
   let saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pools'))
   await edit.getByRole('button', { name: '保存', exact: true }).click()
   await saved
-  expect(posts[0]).toEqual({ pool_code: 'premium', description: 'paid tier', routing_strategy: 'priority_weighted', fallback_pool_code: null })
+  expect(posts[0]).toMatchObject({
+    pool_code: 'premium',
+    description: 'paid tier',
+    routing_strategy: 'priority_weighted',
+    fallback_pool_code: null,
+    policy: { fallback_pools: [], canary_percent: 0, rules: [] },
+  })
 
-  await page.getByRole('button', { name: '新建池' }).click()
+  await page.getByRole('button', { name: '新建调度池' }).click()
   const create = await openedDialog(page)
   const save = create.getByRole('button', { name: '保存', exact: true })
   await expect(save).toBeDisabled()
   await create.locator('#pool-code').fill(' stable ')
   await create.locator('#pool-strategy').selectOption('least_usage')
   await expect(create).toContainText('当日消费最少')
-  await create.locator('#pool-fallback').selectOption('default')
+  await create.locator('#pool-fallback-add').selectOption('default')
   saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pools'))
   await save.click()
   await saved
-  expect(posts[1]).toEqual({ pool_code: 'stable', description: '', routing_strategy: 'least_usage', fallback_pool_code: 'default' })
+  expect(posts[1]).toMatchObject({
+    pool_code: 'stable',
+    description: '',
+    routing_strategy: 'least_usage',
+    fallback_pool_code: 'default',
+    policy: { fallback_pools: ['default'], canary_percent: 0, rules: [] },
+  })
 
   await rowOf('spare').getByRole('button', { name: '删除', exact: true }).click()
   const confirm = page.getByRole('alertdialog')
@@ -1820,7 +1833,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
   // 模型页签：拉上游模型并入清单（手填的保留），并提示发现与新增数量
-  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
+  await drawer.getByRole('tab', { name: '模型与调度池', exact: true }).click()
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('status').filter({ hasText: '发现 3 个模型' })).toBeVisible()
   expect(calls[1]).toMatchObject({ path: '/admin/channels/42/fetch-models', method: 'GET' })
@@ -1835,7 +1848,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await drawer.locator('#d-priority').fill('7')
   await drawer.locator('#d-cost').fill('0.5')
   // 池成员与模型同页签；切页签不丢上面未保存的调度草稿
-  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
+  await drawer.getByRole('tab', { name: '模型与调度池', exact: true }).click()
   await drawer.locator('#channel-pools > summary').click()
   await drawer.getByRole('checkbox', { name: 'premium', exact: true }).check()
   const premiumRow = drawer.getByRole('checkbox', { name: 'premium', exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded-md")][1]')

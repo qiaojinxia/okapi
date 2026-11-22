@@ -1591,7 +1591,7 @@ for (const width of [1024, 1440]) {
     const listId = await less.getAttribute('aria-controls')
     await expect(page.locator(`[id="${listId}"]`).getByRole('link')).toHaveCount(9)
     await expect(actions.getByRole('link', { name: /渠道错误率超 5%/ })).toHaveAttribute('href', '/admin/quality?days=30&tab=channels')
-    await expect(actions.getByRole('link', { name: /渠道池是空的/ })).toHaveAttribute('href', '/admin/pools')
+    await expect(actions.getByRole('link', { name: /调度池是空的/ })).toHaveAttribute('href', '/admin/pools')
     // 严重的排在前面，提醒（积压、冷却中的 key、空池）在后
     await expect(actions.getByRole('link', { name: /outbox 积压/ })).toContainText('提醒')
     expect(requests.length).toBe(before)
