@@ -32,6 +32,7 @@ interface IconButtonProps {
   variant?: 'outline' | 'ghost' | 'destructive'
   disabled?: boolean
   loading?: boolean
+  pressed?: boolean
   className?: string
 }
 
@@ -55,6 +56,7 @@ export function IconButton({
   variant = 'ghost',
   disabled = false,
   loading = false,
+  pressed,
   className,
 }: IconButtonProps) {
   return (
@@ -63,6 +65,7 @@ export function IconButton({
         size="icon"
         variant={variant === 'destructive' ? 'ghost' : variant}
         aria-label={label}
+        aria-pressed={pressed}
         disabled={disabled}
         loading={loading}
         onClick={(e) => {

@@ -11,21 +11,21 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-const HOURLY_SLOTS: usize = 24;
-const HOUR_SECS: i64 = 3_600;
+const HOURLY_SLOTS: usize = 48;
+const SLOT_SECS: i64 = 1_800;
 
-/// 构造单渠道最近 24 小时的连续小时槽（按时间升序，共 24 格，无流量的时段补零）。
-fn build_hourly_slots(start_hour: i64, by_hour: Option<&HashMap<i64, (i64, i64)>>) -> Vec<Value> {
+/// 构造单渠道最近 24 小时的连续 30 分钟槽（按时间升序，共 48 格，无流量的时段补零）。
+fn build_hourly_slots(start_slot: i64, by_slot: Option<&HashMap<i64, (i64, i64)>>) -> Vec<Value> {
     (0..HOURLY_SLOTS)
         .map(|i| {
-            let ts = start_hour + i64::try_from(i).unwrap_or(0) * HOUR_SECS;
-            let (requests, errors) = by_hour.and_then(|m| m.get(&ts)).copied().unwrap_or((0, 0));
+            let ts = start_slot + i64::try_from(i).unwrap_or(0) * SLOT_SECS;
+            let (requests, errors) = by_slot.and_then(|m| m.get(&ts)).copied().unwrap_or((0, 0));
             json!({ "ts": ts, "requests": requests, "errors": errors })
         })
         .collect()
 }
 
-/// GET /admin/stats/channels：渠道健康（错误率 / TTFT 分位 / 切换 / 粘性命中；days=1 附 24h 小时成功率桶）。
+/// GET /admin/stats/channels：渠道健康（错误率 / TTFT 分位 / 切换 / 粘性命中；days=1 附 24h 分段成功率桶）。
 /// 数据源 mv_channel_5min——此前该视图的 errors 与分位数列无任何查询出口。
 #[allow(clippy::too_many_lines)]
 pub async fn channels(
@@ -42,8 +42,8 @@ pub async fn channels(
     let now_ts = chrono::Utc::now().timestamp();
     let since = now_ts - i64::from(days) * 86_400;
     let hourly_start = (days == 1).then(|| {
-        now_ts.div_euclid(HOUR_SECS) * HOUR_SECS
-            - (i64::try_from(HOURLY_SLOTS).unwrap_or(24) - 1) * HOUR_SECS
+        now_ts.div_euclid(SLOT_SECS) * SLOT_SECS
+            - (i64::try_from(HOURLY_SLOTS).unwrap_or(48) - 1) * SLOT_SECS
     });
     let sql = format!(
         "SELECT channel_id, \
@@ -77,9 +77,9 @@ pub async fn channels(
         .map(|r| (r.id, (r.name, r.provider)))
         .collect();
 
-    // 24h 视图附带每条渠道 24 个整点小时的请求与失败计数，一次批量聚合避免前端 N+1
+    // 24h 视图附带每条渠道 48 个 30 分钟时段的请求与失败计数，一次批量聚合避免前端 N+1
     let mut hourly_by_channel: HashMap<i64, HashMap<i64, (i64, i64)>> = HashMap::new();
-    if let Some(start_hour) = hourly_start
+    if let Some(start_slot) = hourly_start
         && !ids.is_empty()
     {
         let id_csv = ids
@@ -89,13 +89,13 @@ pub async fn channels(
             .join(",");
         let hourly_sql = format!(
             "SELECT channel_id, \
-                    toUnixTimestamp(toStartOfHour(ts5)) AS hour_ts, \
+                    intDiv(toUnixTimestamp(ts5), {SLOT_SECS}) * {SLOT_SECS} AS slot_ts, \
                     countMerge(requests) AS requests, \
                     sumMerge(errors) AS errors \
              FROM mv_channel_5min \
-             WHERE channel_id IN ({id_csv}) AND ts5 >= fromUnixTimestamp({start_hour}) \
-             GROUP BY channel_id, hour_ts \
-             ORDER BY channel_id, hour_ts"
+             WHERE channel_id IN ({id_csv}) AND ts5 >= fromUnixTimestamp({start_slot}) \
+             GROUP BY channel_id, slot_ts \
+             ORDER BY channel_id, slot_ts"
         );
         let hourly_rows = ch
             .query_json_each_row(&hourly_sql)
@@ -103,13 +103,13 @@ pub async fn channels(
             .map_err(AppError::from)?;
         for hr in &hourly_rows {
             let cid = ch_i64(hr, "channel_id");
-            let hour_ts = ch_i64(hr, "hour_ts");
+            let slot_ts = ch_i64(hr, "slot_ts");
             let reqs = ch_i64(hr, "requests");
             let errs = ch_i64(hr, "errors");
             hourly_by_channel
                 .entry(cid)
                 .or_default()
-                .insert(hour_ts, (reqs, errs));
+                .insert(slot_ts, (reqs, errs));
         }
     }
 
@@ -299,29 +299,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hourly_slots_fill_24_contiguous_hours_and_preserve_counts() {
-        let start = 1_760_000_000 / 3_600 * 3_600;
+    fn hourly_slots_fill_48_contiguous_half_hours_and_preserve_counts() {
+        let start = 1_760_000_000 / SLOT_SECS * SLOT_SECS;
         let mut counts = HashMap::new();
         counts.insert(start, (10, 0));
-        counts.insert(start + 5 * HOUR_SECS, (25, 2));
-        counts.insert(start + 23 * HOUR_SECS, (4, 4));
+        counts.insert(start + 5 * SLOT_SECS, (25, 2));
+        counts.insert(start + 47 * SLOT_SECS, (4, 4));
         let slots = build_hourly_slots(start, Some(&counts));
-        assert_eq!(slots.len(), 24);
+        assert_eq!(slots.len(), 48);
         assert_eq!(
             slots[0],
             json!({ "ts": start, "requests": 10, "errors": 0 })
         );
         assert_eq!(
             slots[1],
-            json!({ "ts": start + HOUR_SECS, "requests": 0, "errors": 0 })
+            json!({ "ts": start + SLOT_SECS, "requests": 0, "errors": 0 })
         );
         assert_eq!(
             slots[5],
-            json!({ "ts": start + 5 * HOUR_SECS, "requests": 25, "errors": 2 })
+            json!({ "ts": start + 5 * SLOT_SECS, "requests": 25, "errors": 2 })
         );
         assert_eq!(
-            slots[23],
-            json!({ "ts": start + 23 * HOUR_SECS, "requests": 4, "errors": 4 })
+            slots[47],
+            json!({ "ts": start + 47 * SLOT_SECS, "requests": 4, "errors": 4 })
         );
     }
 }

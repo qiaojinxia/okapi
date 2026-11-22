@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Tooltip } from '@/components/ui/tooltip'
 import { ChannelTimelineDrawer } from '@/features/channels/ChannelTimelineDrawer'
 import type { ChannelBalance, ChannelKeyRow, ChannelProbe } from '@/features/channels/types'
-import type { ChannelRow as ChannelStatRow } from '@/features/stats/types'
+import type { ChannelHourlyBucket, ChannelRow as ChannelStatRow } from '@/features/stats/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
@@ -360,23 +360,177 @@ export function LastBalance({
   )
 }
 
-/// 近 24h 健康：错误率 + 请求数，取自 mv_channel_5min（与统计页渠道健康卡同源、同阈值）。
+/// 近 24h 健康：错误率 + 请求数 + 24 小时逐时成功率桶，取自 mv_channel_5min（与统计页渠道健康卡同源、同阈值）。
 export function useChannelHealth24h() {
   return useQuery({
     queryKey: qk.statsChannels(1, 100),
-    queryFn: () => apiFetch<{ data: ChannelStatRow[] }>('/admin/stats/channels?days=1&limit=100'),
+    queryFn: () =>
+      apiFetch<{ data: ChannelStatRow[]; hourly_start?: number }>('/admin/stats/channels?days=1&limit=100'),
     retry: false,
     staleTime: 60_000,
   })
 }
 
-/// 近 24h 健康遥测块：整块区域均可点击打开健康时间线（无论点错误率、TTFT 还是渠道切换，都符合直觉）。
+const DEFAULT_SLOT_COUNT = 48
+const DEFAULT_SLOT_SECS = 1_800
+
+function defaultHourlySlots(hourlyStart?: number): ChannelHourlyBucket[] {
+  const start =
+    hourlyStart ??
+    Math.floor(Date.now() / (DEFAULT_SLOT_SECS * 1000)) * DEFAULT_SLOT_SECS -
+      (DEFAULT_SLOT_COUNT - 1) * DEFAULT_SLOT_SECS
+  return Array.from({ length: DEFAULT_SLOT_COUNT }, (_, i) => ({
+    ts: start + i * DEFAULT_SLOT_SECS,
+    requests: 0,
+    errors: 0,
+  }))
+}
+
+function slotStateOf(slot: ChannelHourlyBucket): 'idle' | 'ok' | 'warn' | 'bad' {
+  if (slot.requests <= 0) return 'idle'
+  if (slot.errors <= 0) return 'ok'
+  const errBp = Math.round((slot.errors / slot.requests) * 10_000)
+  return errBp >= BAD_BP ? 'bad' : 'warn'
+}
+
+const SLOT_BAR_CLASS: Record<'idle' | 'ok' | 'warn' | 'bad', string> = {
+  idle: 'bg-border/90 dark:bg-white/[0.11]',
+  ok: 'bg-success/85 dark:bg-success/85',
+  warn: 'bg-warning/90',
+  bad: 'bg-destructive/90',
+}
+
+/// 近 24 小时分段成功率细柱（默认 48 根 30 分钟纤细圆角竖条，左→右为 24h 前→现在）：
+/// 该时段全成功 = 绿，少量失败 (<5%) = 黄，高错误率 (≥5%) = 红，无请求 = 浅灰。
+export function SuccessRate24hBars({
+  hourly,
+  hourlyStart,
+  variant = 'compact',
+}: {
+  hourly?: ChannelHourlyBucket[]
+  hourlyStart?: number
+  variant?: 'compact' | 'expanded'
+}) {
+  const { t, i18n } = useTranslation()
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null)
+  const slots = hourly && hourly.length > 0 ? hourly : defaultHourlySlots(hourlyStart)
+  const stepSecs = slots.length >= 2 && slots[1].ts > slots[0].ts ? slots[1].ts - slots[0].ts : DEFAULT_SLOT_SECS
+  const activeSlot = hoveredIdx !== null ? slots[hoveredIdx] : slots[slots.length - 1]
+
+  const hoverCard = (() => {
+    const start = dayjs.unix(activeSlot.ts)
+    const end = dayjs.unix(activeSlot.ts + stepSecs)
+    const sameDay = start.isSame(dayjs(), 'day')
+    const range = sameDay
+      ? `${start.format('HH:mm')} – ${end.format('HH:mm')}`
+      : `${start.format('MM-DD HH:mm')} – ${end.format('HH:mm')}`
+    const state = slotStateOf(activeSlot)
+    const okCount = Math.max(0, activeSlot.requests - activeSlot.errors)
+    const successBp = activeSlot.requests > 0 ? Math.max(0, 10_000 - Math.round((activeSlot.errors / activeSlot.requests) * 10_000)) : null
+    const dotClass = {
+      idle: 'bg-muted-foreground/45',
+      ok: 'bg-success',
+      warn: 'bg-warning',
+      bad: 'bg-destructive',
+    }[state]
+    const statusTextClass = {
+      idle: 'text-muted-foreground',
+      ok: 'text-success',
+      warn: 'text-warning',
+      bad: 'text-destructive',
+    }[state]
+    return (
+      <div className="w-[224px] max-w-full space-y-1.5 text-left whitespace-normal">
+        <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-1.5">
+          <span className="font-mono text-[11px] font-medium text-foreground tabular-nums">{range}</span>
+          <span className={cn('inline-flex items-center gap-1 text-[11px] font-semibold tabular-nums', statusTextClass)}>
+            <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', dotClass)} />
+            {state === 'idle'
+              ? t('admin:health24hNoTraffic')
+              : state === 'ok'
+                ? `${formatBp(10_000, i18n.language)} · ${t('admin:health24hAllSuccess')}`
+                : formatBp(successBp ?? 0, i18n.language)}
+          </span>
+        </div>
+        {activeSlot.requests > 0 && (
+          <div className="flex items-center justify-between gap-3 text-[11.5px] tabular-nums">
+            <span className="text-muted-foreground">
+              {t('admin:channelUsageRequests', { n: formatCount(activeSlot.requests, i18n.language) })}
+            </span>
+            <span className="font-medium text-foreground/90">
+              {t('admin:health24hSlotSuccess', {
+                ok: formatCount(okCount, i18n.language),
+                err: formatCount(activeSlot.errors, i18n.language),
+              })}
+            </span>
+          </div>
+        )}
+        <div className="border-t border-border/55 pt-1 text-[10.5px] text-muted-foreground/85">
+          {t('admin:timelineOpen')}
+        </div>
+      </div>
+    )
+  })()
+
+  return (
+    <span className={cn('flex w-full min-w-0 flex-col gap-1', variant === 'compact' && 'max-w-[264px]')} title="">
+      <Tooltip content={hoverCard} className="block w-full">
+        <span
+          data-slot="health-24h-bars"
+          aria-label={t('admin:health24hBarsLabel')}
+          onMouseLeave={() => setHoveredIdx(null)}
+          className={cn(
+            'flex w-full items-center',
+            variant === 'expanded' ? 'h-[18px]' : 'h-3.5',
+          )}
+        >
+          {slots.map((slot, idx) => {
+            const state = slotStateOf(slot)
+            const hovered = hoveredIdx === idx
+            return (
+              <span
+                key={slot.ts}
+                data-slot="health-24h-bar"
+                data-state={state}
+                onMouseEnter={() => setHoveredIdx(idx)}
+                className="flex h-full min-w-0 flex-1 items-center justify-center"
+              >
+                <span
+                  aria-hidden
+                  className={cn(
+                    'block h-full rounded-full transition-[transform,opacity,filter] duration-100',
+                    variant === 'expanded' ? 'w-[3.5px] sm:w-[4px]' : 'w-[2.5px]',
+                    SLOT_BAR_CLASS[state],
+                    hovered && 'scale-y-115 scale-x-125 brightness-110',
+                    hoveredIdx !== null && !hovered && 'opacity-65',
+                  )}
+                />
+              </span>
+            )
+          })}
+        </span>
+      </Tooltip>
+      {variant === 'expanded' && (
+        <span className="flex items-center justify-between text-[10.5px] leading-3 text-muted-foreground/65 tabular-nums">
+          <span>{t('admin:health24hAgo')}</span>
+          <span>{t('admin:health24hNow')}</span>
+        </span>
+      )}
+    </span>
+  )
+}
+
+/// 近 24h 健康遥测块：整块区域均可点击打开健康时间线（无论点错误率、24h 绿色柱还是 TTFT，都符合直觉）。
 export function Health24h({
   stat,
+  hourlyStart,
   channel,
+  layout = 'list',
 }: {
   stat: ChannelStatRow | undefined
+  hourlyStart?: number
   channel: { id: number; name: string; provider: string }
+  layout?: 'list' | 'card'
 }) {
   const { t, i18n } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -389,13 +543,71 @@ export function Health24h({
         ? 'warning'
         : 'success'
   const tone = { muted: 'text-muted-foreground', destructive: 'text-destructive', warning: 'text-warning', success: 'text-foreground' }[variant]
+  const successTone = { muted: 'text-muted-foreground', destructive: 'text-destructive', warning: 'text-warning', success: 'text-success' }[variant]
   const showLatency = !idle && (stat.ttft_p50_ms > 0 || stat.ttft_p95_ms > 0 || stat.failovers > 0)
+  const successBp = idle ? null : Math.max(0, 10_000 - stat.error_rate_bp)
+
+  if (layout === 'card') {
+    return (
+      <>
+        <button
+          type="button"
+          className="group/health flex w-full min-w-0 cursor-pointer flex-col gap-2 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
+          onClick={() => setOpen(true)}
+        >
+          <span className="flex w-full min-w-0 items-baseline justify-between gap-2 tabular-nums">
+            <span className="inline-flex items-center gap-1 text-[11px] leading-4 font-medium text-muted-foreground/85">
+              <span>{t('admin:health24hSuccessRate')}</span>
+              <ChevronRight
+                aria-hidden
+                className="h-3 w-3 shrink-0 text-muted-foreground/50 transition-[transform,color] group-hover/health:translate-x-0.5 group-hover/health:text-foreground"
+              />
+            </span>
+            <span data-slot="health-24h" className="inline-flex min-w-0 items-baseline gap-1.5 whitespace-nowrap">
+              {idle ? (
+                <span className="text-xs text-muted-foreground/75">{t('admin:health24hIdle')}</span>
+              ) : (
+                <>
+                  <span className={cn('text-[15px] leading-5 font-semibold tracking-[-0.015em]', successTone)}>
+                    {formatBp(successBp ?? 0, i18n.language)}
+                  </span>
+                  <span className="text-[11.5px] text-muted-foreground">
+                    · {t('admin:channelUsageRequests', { n: formatCount(stat.requests, i18n.language) })}
+                  </span>
+                </>
+              )}
+            </span>
+          </span>
+          <SuccessRate24hBars hourly={stat?.hourly} hourlyStart={hourlyStart} variant="expanded" />
+          {showLatency && (
+            <span data-slot="health-ttft" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-4 text-muted-foreground tabular-nums">
+              {stat.ttft_p50_ms > 0 && (
+                <span className="whitespace-nowrap">
+                  TTFT p50 <span className="font-medium text-foreground/80">{formatCount(stat.ttft_p50_ms, i18n.language)} ms</span>
+                  {stat.ttft_p95_ms > 0 && (
+                    <> · p95 <span className="font-medium text-foreground/80">{formatCount(stat.ttft_p95_ms, i18n.language)} ms</span></>
+                  )}
+                </span>
+              )}
+              {stat.failovers > 0 && (
+                <span className="inline-flex shrink-0 items-center rounded-md bg-warning/12 px-1.5 py-px text-[10.5px] font-medium whitespace-nowrap text-warning ring-1 ring-inset ring-warning/25">
+                  {t('admin:statFailovers')} {formatCount(stat.failovers, i18n.language)}
+                </span>
+              )}
+            </span>
+          )}
+        </button>
+        {open && <ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} />}
+      </>
+    )
+  }
 
   return (
     <>
       <button
         type="button"
-        className="group/health -mx-2 -my-1 flex w-[calc(100%+1rem)] min-w-0 cursor-pointer flex-col gap-1 rounded-lg px-2 py-1 text-left outline-none transition-colors hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-primary/40"
+        className="group/health -mx-2 -my-1 flex w-[calc(100%+1rem)] min-w-0 cursor-pointer flex-col gap-1.5 rounded-lg px-2 py-1 text-left outline-none transition-colors hover:bg-accent/70 focus-visible:ring-2 focus-visible:ring-primary/40"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >
@@ -424,6 +636,7 @@ export function Health24h({
             </span>
           )}
         </span>
+        <SuccessRate24hBars hourly={stat?.hourly} hourlyStart={hourlyStart} variant="compact" />
         {showLatency && (
           <span data-slot="health-ttft" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] leading-4 text-muted-foreground tabular-nums">
             {stat.ttft_p50_ms > 0 && (

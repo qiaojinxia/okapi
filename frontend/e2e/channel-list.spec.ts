@@ -820,4 +820,99 @@ test('渠道列表：所见即可点——未入池/模型/优先级/额度直�
   await expect(aliceUsage).toHaveAttribute('href', '/admin/logs?channel_id=1')
 })
 
+test('渠道列表：置顶 / 取消置顶、横向卡片视图切换持久化、24 小时逐时成功率绿色柱与悬停明细', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const pinnedIds = new Set<number>()
+  const pinCalls: { path: string; body: Json | null }[] = []
+  const slotStart = Math.floor(nowSec / 1800) * 1800 - 47 * 1800
+  const makeHourly = (pattern: (i: number) => [number, number]) =>
+    Array.from({ length: 48 }, (_, i) => {
+      const [requests, errors] = pattern(i)
+      return { ts: slotStart + i * 1800, requests, errors }
+    })
+  const richHealth = {
+    hourly_start: slotStart,
+    data: [
+      { ...HEALTH.data[0], requests: 480, errors: 0, error_rate_bp: 0, hourly: makeHourly(() => [10, 0]) },
+      { ...HEALTH.data[1], requests: 536, errors: 4, error_rate_bp: 75, hourly: makeHourly((i) => (i === 36 ? [50, 1] : [12, 0])) },
+      { ...HEALTH.data[2], requests: 80, errors: 12, error_rate_bp: 1500, hourly: makeHourly((i) => (i < 12 ? [0, 0] : i === 40 ? [10, 6] : i === 41 ? [25, 1] : [2, 0])) },
+    ],
+  }
+
+  await prepare(page)
+  await page.route('**/admin/stats/channels?*', (route) => route.fulfill({ json: richHealth }))
+  await page.route('**/admin/channels?*', (route) => {
+    const sorted = [...CHANNELS]
+      .map((c) => ({ ...c, pinned: pinnedIds.has(Number(c.id)), pinned_at: pinnedIds.has(Number(c.id)) ? NOW.toISOString() : null }))
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || Number(b.priority) - Number(a.priority) || Number(a.id) - Number(b.id))
+    return route.fulfill({ json: { data: sorted, total: sorted.length, enabled: sorted.filter((c) => c.status === 1).length } })
+  })
+  await page.route('**/admin/channels/*/pin', async (route) => {
+    const req = route.request()
+    const path = new URL(req.url()).pathname
+    const id = Number(/\/admin\/channels\/(\d+)\/pin$/.exec(path)?.[1] ?? 0)
+    const body = (req.postDataJSON() ?? null) as Json | null
+    pinCalls.push({ path, body })
+    if (body?.pinned) pinnedIds.add(id)
+    else pinnedIds.delete(id)
+    await route.fulfill({ json: { ok: true, pinned: pinnedIds.has(id), pinned_at: pinnedIds.has(id) ? NOW.toISOString() : null } })
+  })
+  await page.reload()
+
+  // 1. 列表视图下的 24h 纤细成功率柱（全成功 48 根绿柱 / 异常混合绿黄红灰）
+  const alice = rowOf(page, ALICE_MASKED)
+  await expect(alice.locator('[data-slot="health-24h-bar"]')).toHaveCount(48)
+  await expect(alice.locator('[data-slot="health-24h-bar"][data-state="ok"]')).toHaveCount(48)
+  const carol = rowOf(page, CAROL_MASKED)
+  await expect(carol.locator('[data-slot="health-24h-bar"][data-state="idle"]')).toHaveCount(12)
+  await expect(carol.locator('[data-slot="health-24h-bar"][data-state="bad"]')).toHaveCount(1)
+  await expect(carol.locator('[data-slot="health-24h-bar"][data-state="warn"]')).toHaveCount(1)
+  await expect(carol.locator('[data-slot="health-24h-bar"][data-state="ok"]')).toHaveCount(34)
+
+  // 2. 置顶操作：点置顶按钮发 POST /pin，渠道移到列表首位并展示置顶徽章，再点取消置顶
+  const spare = rowOf(page, 'spare-compat')
+  await spare.getByRole('button', { name: '置顶', exact: true }).click()
+  await expect.poll(() => pinCalls.length).toBe(1)
+  expect(pinCalls[0]).toEqual({ path: '/admin/channels/5/pin', body: { pinned: true } })
+  const firstRow = page.locator('tbody tr').first()
+  await expect(firstRow).toContainText('spare-compat')
+  await expect(firstRow.locator('[data-slot="channel-pinned-badge"]')).toHaveText('置顶')
+  await expect(firstRow.getByRole('button', { name: '取消置顶', exact: true })).toHaveAttribute('aria-pressed', 'true')
+
+  // 3. 切换到横向卡片视图：多列横向并排，展示 24h 成功率大号绿柱与悬停单时段明细，刷新后保持卡片模式
+  const viewToggle = page.locator('[data-slot="channel-view-toggle"]')
+  await viewToggle.getByRole('button', { name: '卡片', exact: true }).click()
+  const grid = page.locator('[data-slot="channel-card-grid"]')
+  await expect(grid).toBeVisible()
+  const cards = grid.locator('[data-slot="channel-card"]')
+  await expect(cards).toHaveCount(5)
+  const firstBox = (await cards.nth(0).boundingBox())!
+  const secondBox = (await cards.nth(1).boundingBox())!
+  // 1440px 下两张卡横向并排（第二张卡 x 明显在第一张卡右侧、y 对齐）
+  expect(secondBox.x).toBeGreaterThan(firstBox.x + firstBox.width - 2)
+  expect(Math.abs(secondBox.y - firstBox.y)).toBeLessThanOrEqual(2)
+  // 无横向溢出
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+  // 悬停某根全绿时段柱：弹出结构化时段明细卡片
+  const aliceCard = cards.filter({ hasText: ALICE_MASKED })
+  await expect(aliceCard.locator('[data-slot="health-24h"]')).toContainText('100.0%')
+  await aliceCard.locator('[data-slot="health-24h-bar"]').nth(12).hover()
+  const tip = page.getByRole('tooltip')
+  await expect(tip).toContainText('全部成功')
+  await expect(tip).toContainText('成功 10 · 失败 0')
+
+  // 刷新后保留卡片视图偏好
+  await page.reload()
+  await expect(page.locator('[data-slot="channel-card-grid"]')).toBeVisible()
+  await expect(page.locator('[data-slot="channel-view-toggle"]').getByRole('button', { name: '卡片', exact: true })).toHaveAttribute('aria-pressed', 'true')
+
+  // 在卡片视图里取消置顶并切回列表视图
+  await page.locator('[data-slot="channel-card"]').first().getByRole('button', { name: '取消置顶', exact: true }).click()
+  await expect.poll(() => pinCalls.length).toBe(2)
+  expect(pinCalls[1]).toEqual({ path: '/admin/channels/5/pin', body: { pinned: false } })
+  await page.locator('[data-slot="channel-view-toggle"]').getByRole('button', { name: '列表', exact: true }).click()
+  await expect(page.locator('tbody tr')).toHaveCount(5)
+})
+
 

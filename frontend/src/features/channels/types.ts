@@ -191,6 +191,9 @@ export interface ChannelRow {
   api_base: string | null
   status: number
   priority: number
+  /// 是否在管理端列表置顶（不影响路由调度优先级）。
+  pinned?: boolean
+  pinned_at?: string | null
   models: string[]
   keys: ChannelKeyRow[]
   settings: Partial<ChannelSettings> | null

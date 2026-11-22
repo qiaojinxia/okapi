@@ -3,6 +3,13 @@ export { BAD_BP, WARN_BP } from '@/lib/health'
 
 
 
+export interface ChannelHourlyBucket {
+  /// 小时起点（unix 秒）
+  ts: number
+  requests: number
+  errors: number
+}
+
 export interface ChannelRow {
   channel_id: number
   name: string
@@ -17,6 +24,8 @@ export interface ChannelRow {
   sticky_rate_bp: number
   tokens_per_1k_sec: number
   amount_micro: number
+  /// 近 24 小时逐小时请求与失败统计（days=1 时返回，共 24 格，按时间升序）
+  hourly?: ChannelHourlyBucket[]
 }
 
 

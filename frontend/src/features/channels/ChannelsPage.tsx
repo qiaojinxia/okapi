@@ -7,9 +7,12 @@ import {
   Gauge,
   Globe,
   KeyRound,
+  LayoutGrid,
+  LayoutList,
   Loader2,
   MessageSquareText,
   Pencil,
+  Pin,
   Plus,
   Power,
   PowerOff,
@@ -26,6 +29,7 @@ import { Button } from '@/components/ui/button'
 import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
 import { ChannelDrawer, type ChannelEditFocus } from '@/features/channels/ChannelDrawer'
+import { ChannelGridCard } from '@/features/channels/ChannelGridCard'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
 import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import { Switch } from '@/components/ui/switch'
@@ -78,6 +82,17 @@ import { cn } from '@/lib/utils'
 
 const routeApi = getRouteApi('/admin/channels')
 
+const CHANNEL_VIEW_KEY = 'okapi.channels.view'
+type ChannelViewMode = 'list' | 'cards'
+
+function readChannelViewMode(): ChannelViewMode {
+  try {
+    return localStorage.getItem(CHANNEL_VIEW_KEY) === 'cards' ? 'cards' : 'list'
+  } catch {
+    return 'list'
+  }
+}
+
 /// 界面上显示的渠道名：渠道名就是订阅账号（邮箱，或等于某把 key 的账号标识）时遮住中间，其余原样。
 const shownName = (c: ChannelRow) => maskChannelName(c.name, c.keys.map((k) => k.account_label))
 
@@ -99,6 +114,15 @@ export function ChannelsPage() {
   const queryClient = useQueryClient()
   const [picked, setPicked] = useState<Set<number>>(new Set())
   const [attentionOnly, setAttentionOnly] = useState(false)
+  const [viewMode, setViewModeState] = useState<ChannelViewMode>(readChannelViewMode)
+  const setViewMode = (mode: ChannelViewMode) => {
+    setViewModeState(mode)
+    try {
+      localStorage.setItem(CHANNEL_VIEW_KEY, mode)
+    } catch {
+      /* ignore storage failure */
+    }
+  }
   const search = routeApi.useSearch()
   const navigate = routeApi.useNavigate()
   const query = search.q ?? ''
@@ -115,6 +139,7 @@ export function ChannelsPage() {
   const proxyGroups = useQuery(proxyGroupOptions())
   const [testingId, setTestingId] = useState<number | null>(null)
   const [balancingId, setBalancingId] = useState<number | null>(null)
+  const [pinningId, setPinningId] = useState<number | null>(null)
   const { confirm, dialog } = useConfirm()
   const pager = usePagination()
 
@@ -158,6 +183,22 @@ export function ChannelsPage() {
       }),
     onSuccess: invalidate,
     onError: fail,
+  })
+
+  const setPinned = useMutation({
+    mutationFn: (arg: { id: number; pinned: boolean }) => {
+      setPinningId(arg.id)
+      return apiFetch<{ ok: boolean; pinned: boolean; pinned_at: string | null }>(
+        `/admin/channels/${arg.id}/pin`,
+        {
+          method: 'POST',
+          body: { pinned: arg.pinned },
+        },
+      )
+    },
+    onSuccess: invalidate,
+    onError: fail,
+    onSettled: () => setPinningId(null),
   })
 
   const remove = useMutation({
@@ -429,6 +470,148 @@ export function ChannelsPage() {
             data-slot="table-viewport"
             className="min-h-0 min-w-0 w-full flex-1 overflow-y-auto overscroll-contain px-0.5 pb-1"
           >
+            {(() => {
+              const listControlBar = (
+                <div className="flex items-center justify-between gap-3 px-4 py-1 sm:px-5">
+                  <Checkbox
+                    checked={allPicked}
+                    indeterminate={somePicked && !allPicked}
+                    label={t('admin:batchPickAll')}
+                    className="text-muted-foreground [&_span.text-sm]:text-xs [&_span.text-sm]:font-medium [&_span.text-sm]:text-muted-foreground"
+                    onChange={(on) =>
+                      setPicked((prev) => {
+                        const next = new Set(prev)
+                        for (const r of visibleRows) {
+                          if (on) next.add(r.channel.id)
+                          else next.delete(r.channel.id)
+                        }
+                        return next
+                      })
+                    }
+                  />
+                  <div className="flex items-center gap-2">
+                    {issueCount > 0 && (
+                      <button
+                        type="button"
+                        data-slot="channel-attention-filter"
+                        aria-pressed={focusingIssues}
+                        onClick={() => setAttentionOnly((v) => !v)}
+                        className={cn(
+                          'inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium tabular-nums ring-1 ring-inset outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
+                          focusingIssues
+                            ? 'bg-warning/15 text-warning ring-warning/35'
+                            : 'bg-card text-muted-foreground ring-border/80 hover:border-warning/40 hover:text-foreground',
+                        )}
+                      >
+                        <AlertTriangle aria-hidden className={cn('h-3 w-3', focusingIssues ? 'text-warning' : 'text-warning/85')} />
+                        <span>{t('admin:channelAttentionOnly')}</span>
+                        <span className={cn('rounded-full px-1.5 text-[10.5px] font-semibold', focusingIssues ? 'bg-warning/20 text-warning' : 'bg-muted text-foreground/80')}>
+                          {issueCount}
+                        </span>
+                      </button>
+                    )}
+                    <div
+                      role="group"
+                      aria-label={t('admin:channelViewMode')}
+                      data-slot="channel-view-toggle"
+                      className="inline-flex h-7 items-center rounded-lg border border-border/80 bg-muted/40 p-0.5 text-[11.5px]"
+                    >
+                      <button
+                        type="button"
+                        aria-pressed={viewMode === 'list'}
+                        onClick={() => setViewMode('list')}
+                        className={cn(
+                          'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
+                          viewMode === 'list'
+                            ? 'bg-card font-medium text-foreground shadow-xs'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        <LayoutList aria-hidden className="h-3.5 w-3.5" />
+                        <span>{t('admin:channelViewList')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={viewMode === 'cards'}
+                        onClick={() => setViewMode('cards')}
+                        className={cn(
+                          'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
+                          viewMode === 'cards'
+                            ? 'bg-card font-medium text-foreground shadow-xs'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        <LayoutGrid aria-hidden className="h-3.5 w-3.5" />
+                        <span>{t('admin:channelViewCards')}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+
+              if (viewMode === 'cards') {
+                return (
+                  <div className="flex flex-col gap-2">
+                    <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
+                      {listControlBar}
+                    </div>
+                    <div
+                      data-slot="channel-card-grid"
+                      aria-label={t('admin:channelsTitle')}
+                      className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3"
+                    >
+                      {visibleRows.map(({ channel: c, enabled, orphan, rowStat, rowUsage, rowHealth }) => {
+                        const selected = picked.has(c.id)
+                        const egress =
+                          c.egress !== undefined && c.egress.mode !== 'inherit'
+                            ? {
+                                label: egressLabel(c),
+                                title: describeEgress(t, c.egress, proxies.data, proxyGroups.data),
+                                mono: c.egress.mode === 'proxy',
+                              }
+                            : undefined
+                        return (
+                          <ChannelGridCard
+                            key={c.id}
+                            channel={c}
+                            enabled={enabled}
+                            orphan={orphan}
+                            selected={selected}
+                            rowHealth={rowHealth}
+                            rowStat={rowStat}
+                            hourlyStart={health.data?.hourly_start}
+                            rowUsage={rowUsage}
+                            usageSettled={usage.data !== undefined}
+                            egress={egress}
+                            testing={testingId === c.id}
+                            balancing={balancingId === c.id}
+                            pinning={pinningId === c.id}
+                            statusPending={setStatus.isPending}
+                            onTogglePick={() => togglePick(c.id)}
+                            onToggleStatus={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
+                            onTogglePin={() => setPinned.mutate({ id: c.id, pinned: !c.pinned })}
+                            onTest={() => test.mutate(c)}
+                            onBalance={() => balance.mutate(c)}
+                            onEdit={(focus) => openEdit(c, focus)}
+                            onTry={() => setTrying(c)}
+                            onDuplicate={() => duplicate.mutate(c)}
+                            onDelete={() =>
+                              confirm({
+                                title: t('common:confirmDeleteTitle', { name: shownName(c) }),
+                                description: t('common:confirmChannelDelete'),
+                                requireText: shownName(c),
+                                onConfirm: () => remove.mutate(c.id),
+                              })
+                            }
+                          />
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              }
+
+              return (
             <table
               aria-label={t('admin:channelsTitle')}
               className="-mt-2 w-full border-separate border-spacing-x-0 border-spacing-y-2"
@@ -436,50 +619,14 @@ export function ChannelsPage() {
               <thead>
                 <tr>
                   <th className="sticky top-0 z-10 bg-background/95 p-0 text-left font-normal backdrop-blur-sm">
-                    <div className="flex items-center justify-between gap-3 px-4 py-1 sm:px-5">
-                      <Checkbox
-                        checked={allPicked}
-                        indeterminate={somePicked && !allPicked}
-                        label={t('admin:batchPickAll')}
-                        className="text-muted-foreground [&_span.text-sm]:text-xs [&_span.text-sm]:font-medium [&_span.text-sm]:text-muted-foreground"
-                        onChange={(on) =>
-                          setPicked((prev) => {
-                            const next = new Set(prev)
-                            for (const r of visibleRows) {
-                              if (on) next.add(r.channel.id)
-                              else next.delete(r.channel.id)
-                            }
-                            return next
-                          })
-                        }
-                      />
-                      {issueCount > 0 && (
-                        <button
-                          type="button"
-                          data-slot="channel-attention-filter"
-                          aria-pressed={focusingIssues}
-                          onClick={() => setAttentionOnly((v) => !v)}
-                          className={cn(
-                            'inline-flex h-6 cursor-pointer items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium tabular-nums ring-1 ring-inset outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
-                            focusingIssues
-                              ? 'bg-warning/15 text-warning ring-warning/35'
-                              : 'bg-card text-muted-foreground ring-border/80 hover:border-warning/40 hover:text-foreground',
-                          )}
-                        >
-                          <AlertTriangle aria-hidden className={cn('h-3 w-3', focusingIssues ? 'text-warning' : 'text-warning/85')} />
-                          <span>{t('admin:channelAttentionOnly')}</span>
-                          <span className={cn('rounded-full px-1.5 text-[10.5px] font-semibold', focusingIssues ? 'bg-warning/20 text-warning' : 'bg-muted text-foreground/80')}>
-                            {issueCount}
-                          </span>
-                        </button>
-                      )}
-                    </div>
+                    {listControlBar}
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {visibleRows.map(({ channel: c, enabled, orphan, rowStat, rowUsage, rowHealth }) => {
                   const selected = picked.has(c.id)
+                  const pinned = Boolean(c.pinned)
                   const hasKeyAlert = enabled && c.keys.length > 0 && c.keys.some((k) => k.status !== 1)
                   const canQueryBalance = enabled && balanceSupported(c.provider)
                   const egress =
@@ -496,6 +643,7 @@ export function ChannelsPage() {
                       key={c.id}
                       data-selected={selected || undefined}
                       data-enabled={enabled || undefined}
+                      data-pinned={pinned || undefined}
                       data-health={rowHealth}
                       className="group/row"
                     >
@@ -510,12 +658,14 @@ export function ChannelsPage() {
                                 ? 'border-destructive/30 hover:border-destructive/50'
                                 : rowHealth === 'warning'
                                   ? 'border-warning/35 hover:border-warning/55'
-                                  : enabled
-                                    ? 'border-border/80 hover:border-border hover:shadow-[0_4px_14px_-4px_oklch(0.24_0.015_70/0.09),0_1px_2px_oklch(0.24_0.015_70/0.04)] dark:hover:shadow-[inset_0_1px_0_oklch(1_0_0/0.07),0_8px_22px_-6px_oklch(0_0_0/0.55)]'
-                                    : 'border-border/65 bg-card/70 hover:border-border/90 hover:bg-card/90',
+                                  : pinned
+                                    ? 'border-primary/30 hover:border-primary/50 hover:shadow-[0_4px_14px_-4px_oklch(0.24_0.015_70/0.09),0_1px_2px_oklch(0.24_0.015_70/0.04)] dark:hover:shadow-[inset_0_1px_0_oklch(1_0_0/0.07),0_8px_22px_-6px_oklch(0_0_0/0.55)]'
+                                    : enabled
+                                      ? 'border-border/80 hover:border-border hover:shadow-[0_4px_14px_-4px_oklch(0.24_0.015_70/0.09),0_1px_2px_oklch(0.24_0.015_70/0.04)] dark:hover:shadow-[inset_0_1px_0_oklch(1_0_0/0.07),0_8px_22px_-6px_oklch(0_0_0/0.55)]'
+                                      : 'border-border/65 bg-card/70 hover:border-border/90 hover:bg-card/90',
                           )}
                         >
-                          {/* 左侧 3px 圆角语义状态条：内缩避开圆角裁切，异常与选中常亮，健康态悬停轻亮 */}
+                          {/* 左侧 3px 圆角语义状态条：内缩避开圆角裁切，异常、置顶与选中常亮，健康态悬停轻亮 */}
                           <span
                             aria-hidden
                             className={cn(
@@ -526,9 +676,11 @@ export function ChannelsPage() {
                                   ? 'bg-destructive'
                                   : rowHealth === 'warning'
                                     ? 'bg-warning'
-                                    : enabled
-                                      ? 'bg-transparent group-hover/row:bg-primary/45'
-                                      : 'bg-transparent',
+                                    : pinned
+                                      ? 'bg-primary/55'
+                                      : enabled
+                                        ? 'bg-transparent group-hover/row:bg-primary/45'
+                                        : 'bg-transparent',
                             )}
                           />
 
@@ -601,6 +753,16 @@ export function ChannelsPage() {
                                     onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
                                   />
                                   <ActionGroup label={t('common:actions')}>
+                                    <IconButton
+                                      icon={Pin}
+                                      label={pinned ? t('admin:channelUnpin') : t('admin:channelPin')}
+                                      pressed={pinned}
+                                      loading={pinningId === c.id}
+                                      onClick={() => setPinned.mutate({ id: c.id, pinned: !pinned })}
+                                      className={cn(
+                                        pinned && 'bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary [&_svg]:fill-current',
+                                      )}
+                                    />
                                     <IconButton
                                       icon={Activity}
                                       label={t('admin:testChannel')}
@@ -744,6 +906,7 @@ export function ChannelsPage() {
                               >
                                 <Health24h
                                   stat={rowStat}
+                                  hourlyStart={health.data?.hourly_start}
                                   channel={{ id: c.id, name: c.name, provider: c.provider }}
                                 />
                               </div>
@@ -765,6 +928,8 @@ export function ChannelsPage() {
                 })}
               </tbody>
             </table>
+              )
+            })()}
           </div>
         </div>
       )}
@@ -937,6 +1102,15 @@ function ChannelIdentity({
           <span className="shrink-0 font-mono text-[11px] font-normal text-muted-foreground/55 tabular-nums">
             #{c.id}
           </span>
+          {c.pinned && (
+            <span
+              data-slot="channel-pinned-badge"
+              className="inline-flex h-[18px] shrink-0 items-center gap-0.5 rounded bg-primary/10 px-1.5 text-[10.5px] font-medium text-primary ring-1 ring-inset ring-primary/20"
+            >
+              <Pin aria-hidden className="h-2.5 w-2.5 fill-current" />
+              {t('admin:channelPinned')}
+            </span>
+          )}
           <ProviderChip provider={c.provider} plans={plans} compact className={cn(!enabled && 'opacity-75')} />
           {consoleUrl !== null && (
             <a
