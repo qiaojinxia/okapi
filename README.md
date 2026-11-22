@@ -103,6 +103,9 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   三方对账（事件重放 ↔ Redis 热余额 ↔ PG 快照）并可按账本修复；采集上游成本算毛利，负毛利自动熔断。
 - **自用订阅凭证也能进网关。** 站长自己的 Claude Pro / Max、ChatGPT Codex 订阅经 OAuth 登录成渠道，
   token 刷新走四步锁；Claude Code / Codex CLI 直接切到网关（实验性）。
+- **调度可编排，上游可验真。** 每个调度池一份带版本的策略文档（多跳降级、条件规则、灰度、护栏），
+  改之前先 Dry-Run 对比新旧选路；订阅账号按 5 小时 / 7 天额度窗口排先后，快过期的额度先用掉；
+  渠道背后是不是声称的模型，可以从协议、分词器、行为指纹三层核验。
 - **AI 直接管网关。** console 内置 MCP 服务（Streamable HTTP），22 个工具按 RBAC 裁剪；写操作过三道闸
   （站点总开关 + 权限点 + dry-run / confirm）。
 - **单二进制，热路径干净。** `okapi gateway|console|worker|all` 一个二进制跑任意组合；gateway 只碰
@@ -153,7 +156,7 @@ flowchart LR
 </details>
 
 <details>
-<summary><b>上游供应商</b>（8 项，待办 1）</summary>
+<summary><b>上游供应商</b>（10 项，待办 1）</summary>
 
 - [x] OpenAI / OpenAI 兼容、Anthropic、Gemini、Azure OpenAI（部署名映射）
 - [x] AWS Bedrock（SigV4 或 Bedrock API key，EventStream 流解码）
@@ -163,25 +166,32 @@ flowchart LR
 - [x] 渠道自定义请求头；请求字段剥离 / 注入；上游响应头白名单
 - [x] 上游模型发现（fetch-models）、上游余额查询、上游倍率在线同步（fetch / apply，不自动改价）
 - [x] 渠道凭证 AES-GCM 信封加密、上游 URL SSRF 校验
+- [x] 一个渠道挂多把 key：逐把增删、单独设上限、单独清冷却；批量设池 / 批量清冷却
+- [x] 渠道模型验真：协议与能力探针、分词器指纹（开集贝叶斯）、行为指纹归因三层核验，结果逐层给结论；请求走正常数据面（出口代理照常生效），行为指纹参考库按需下载，也可用 `OKAPI_MODEL_VERIFY_DIR` 指向离线目录
 - [ ] Bedrock 非 Anthropic 模型（Converse 转换）
 
 </details>
 
 <details>
-<summary><b>reasoning 与模型修饰符</b>（4 项）</summary>
+<summary><b>reasoning 与模型修饰符</b>（5 项）</summary>
 
 - [x] `reasoning_effort` / `thinking` / `reasoning:{effort,max_tokens}` 三写法归一，按 openai / anthropic / gemini 方言展开
 - [x] 模型名修饰符 `模型名@effort:high`、`-thinking-128` 后缀，变体可单独定价
 - [x] thinking-to-content（客户端不支持 reasoning 输出时转正文）
 - [x] 按上游实际响应模型计费、service_tier 档位倍率（只降不升）
+- [x] 跨协议转换保留 `cache_control` 断点与 reasoning 强度 / `thinkingConfig`；转不过去的字段记进请求诊断（`dropped_fields`）
 
 </details>
 
 <details>
-<summary><b>路由与容错</b>（11 项）</summary>
+<summary><b>路由与容错</b>（15 项）</summary>
 
-- [x] 渠道池 + 优先级加权 / least_latency 策略，能力感知过滤，成本感知权重
-- [x] 三层会话粘性、双层并发控制、重试矩阵（全局缺省 + 渠道级覆盖）
+- [x] 调度池六种选路策略：优先级加权、最低时延、最少用量、最少并发、最早重置、过期紧迫度；能力感知过滤，成本感知权重
+- [x] 调度策略中心：每个池一份带版本号的策略文档——多跳降级链、按模型 / 上下文长度的条件规则、硬护栏、灰度成员按会话分桶，成员分主 / 备 / 灰度角色并可单独摘流；保存前可 Dry-Run，对比已保存与草稿策略的选路结果
+- [x] 订阅额度窗口调度（`expiry_urgency`）：综合 5 小时 / 7 天两个窗口的剩余额度与剩余时间，先用掉快过期作废的额度；大上下文请求避开快见底的账号
+- [x] 低质量自动降级（按池开启，缺省关）：key 的错误率 / 时延超阈值就排到同层健康 key 之后；另设了摘流阈值时，错误率更高的直接摘掉（全员超限时保底不摘空）
+- [x] 三层会话粘性（按模型隔离，辅助小模型请求不抢主对话的缓存账号；没有会话 ID 时按 system / tools 前缀归桶）、双层并发控制、重试矩阵（全局缺省 + 渠道级覆盖）
+- [x] 上游错误跨协议归一分类；模型级短冷却（某个模型没开通 / 地区受限只冷却这把 key 上的这个模型）；529 过载指数退避（15 秒起，最长 5 分钟）
 - [x] key 级状态机（冷却 / 限流 / 配额耗尽 / 失效）与冷却到期自动恢复
 - [x] 渠道 key 后台探测与自动恢复（缺省关；探通的 key 放回轮转，只探静态 key 的直连渠道，人工停用的不碰）
 - [x] 请求策略可配：最大尝试次数、追加的重试状态码、追加的凭证失效 / 配额耗尽判定（状态码与错误正文关键词），缺省保持内置行为
@@ -189,37 +199,42 @@ flowchart LR
 - [x] Gemini 工具参数 schema 清洗（additionalProperties / $ref / 类型数组 / 非字符串 enum 等不再让请求 400）；Anthropic API key 渠道转发客户端的 anthropic-beta，上游点名拒收时自愈
 - [x] 首字前跨渠道 failover；首字后同渠道换 key 重试，不串流
 - [x] 请求级路由偏好（OpenRouter 形状）、路由诊断器
-- [x] 结算积压背压闸（超上界 503，不预扣不打上游）、优雅下线（SIGTERM 排水后再退出）
-- [x] 多副本一致：在途计数汇总、路由失效广播、定价 epoch 热更
+- [x] 结算积压背压闸（超上界 503，不预扣不打上游）、优雅下线（SIGTERM 排水后再退出）、后台任务统一监管（panic 后退避重启）
+- [x] 多副本一致：在途计数汇总、路由失效广播、定价 epoch 热更；周期任务走 Redis 维护租约（同一时刻只有一个副本在跑）；NATS 订阅断线自愈并补拉；key / 代理故障标记跨副本同步
 
 </details>
 
 <details>
-<summary><b>计费与账本</b>（9 项，待办 1）</summary>
+<summary><b>计费与账本</b>（12 项，待办 1）</summary>
 
 - [x] 三种计价模式（倍率 / 阶梯 / 按次）× 分组倍率 × 用户系数
 - [x] 四类修饰器规则（量级 / 时段 / 折扣 / 负载加价），每步落快照
 - [x] 缓存读 / 写双轴、音频 token 独立倍率、媒体乘数
 - [x] Redis Lua 原子预扣 → usage 结算 → PG 同事务记账 + outbox
+- [x] 结算微批组提交：2 毫秒窗口内最多 64 笔普通结算合成一次 PG 事务；个别被锁住的用户退回单笔路径，不拖累同批
 - [x] 失败原额退款、按日志退款 / 调整打标、`request_id` 幂等
 - [x] 三方对账 + 按账本修复热余额；DLQ 处置
 - [x] 上游成本采集与毛利、负毛利自动熔断（可手动解除）
 - [x] 订阅套餐（周期配额池，订阅池优先）、余额有效期、邀请返利
 - [x] 限流四件套：分组级 `[rpm, rph]`、key 级 RPD / 日 token 上限、用户×模型 RPM、无效 key 每 IP 限流
-- [ ] `reserve` 侧 Redis 缺键回源兜底；gateway 微批组提交（等压测确认 PG 写瓶颈）
+- [x] 密钥周期预算：每把 key 可设日 / 月消费上限（按 UTC 自然日 / 自然月）
+- [x] 用户专属价：按用户 × 模型覆盖倍率或绝对单价，可设到期时间；模型别名
+- [ ] `reserve` 侧 Redis 缺键回源兜底
 
 </details>
 
 <details>
-<summary><b>用户、身份与安全</b>（10 项，待办 1）</summary>
+<summary><b>用户、身份与安全</b>（12 项，待办 1）</summary>
 
 - [x] 邮箱密码（argon2id）+ 邮件验证码 / 找回密码（SMTP）
 - [x] GitHub / Discord / LinuxDO 预设 + 任意标准 OAuth2 / OIDC 自定义接入
 - [x] TOTP 两步验证、Turnstile 注册风控、注册策略与邀请赠送
-- [x] web 会话列举 / 单条吊销 / 一键全吊 / 会话数上限；网页登录换到的 key 绑定会话，会话结束即失效
+- [x] web 会话列举 / 单条吊销 / 一键全吊 / 会话数上限；网页登录换到的 key 绑定会话，会话结束即失效；控制台走 HttpOnly 会话 Cookie，写操作校验同源（CSRF）
 - [x] RBAC 权限点 + 三内置角色 + 自定义角色；渠道属主 own / all；分组可见性矩阵；代客操作
 - [x] Team 层（成员限额、分账、团队 key）
-- [x] key 级 IP 白名单 + 转发头信任闸（信任代理 CIDR / Edge key 两模式）
+- [x] key 级 IP 白名单、模型白名单（支持 `claude-*` 这类通配，填别名自动归一到真名）+ 转发头信任闸（信任代理 CIDR / Edge key 两模式）
+- [x] 门户自助：密钥一键轮换（原子换新）、自己把密钥限流调紧（只能调紧不能调松）、低余额 / 密钥到期提醒（邮件或 webhook，可设最短间隔）
+- [x] 对话存档（缺省关，在「系统设置 → 隐私与留痕」开启）：保存请求与响应原文，有 ClickHouse 存 ClickHouse、没有就存 PG；单侧截断上限与保留天数可配，到期自动清理；可选让用户在门户看自己的存档
 - [x] 关键接口每 IP 限流（登录 / 注册 / TOTP / 兑换）
 - [x] 审计日志与登录审计
 - [x] 单用户模式（release 下需二次确认）
@@ -228,14 +243,16 @@ flowchart LR
 </details>
 
 <details>
-<summary><b>运营与控制面</b>（7 项）</summary>
+<summary><b>运营与控制面</b>（9 项）</summary>
 
-- [x] 渠道 / 池 / 模型 / 定价 / 规则 / 分组 / 用户 / 套餐 / 兑换码 / 团队 / 角色 全量 CRUD
-- [x] 定价 epoch 发布 + NATS 广播热更；new-api 倍率 JSON 一键导入
+- [x] 渠道 / 池 / 模型 / 定价 / 规则 / 分组 / 用户 / 套餐 / 兑换码 / 团队 / 角色 / 模型别名 / 用户专属价 全量 CRUD
+- [x] 定价 epoch 发布 + NATS 广播热更；历史版本任意两版对比、一键回滚、发布前模拟；new-api 倍率 JSON 一键导入
 - [x] 支付闭环：epay（支付宝 / 微信）+ Stripe Checkout，回调验签与幂等
 - [x] 兑换码（限用户 / 限 IP / 兑套餐，并发核销恰一成功）、站点公告
 - [x] 通知多路（webhook / email）× 事件订阅 × 频率限制
 - [x] 用量分析立方体（ClickHouse）：趋势 / 拆解 / 流向三视图，质量看板，经营报表
+- [x] 统计时区在后台设置（「系统设置 → 时区」）：整小时时差的 IANA 时区，切换即时生效、不用重启；不设就跟随服务器时区
+- [x] 可观测：gateway / console 暴露 Prometheus `/metrics`，W3C `traceparent` 贯穿请求诊断与 NATS；监控页汇总各节点指标与 24 小时网关趋势
 - [x] 日志检索、对账页、缓存清理、Setup 初始化向导
 
 </details>
@@ -250,9 +267,10 @@ flowchart LR
 </details>
 
 <details>
-<summary><b>前端</b>（5 项）</summary>
+<summary><b>前端</b>（6 项）</summary>
 
 - [x] 管理后台 + 用户门户 + 公开价格页同一 SPA，按角色分区
+- [x] 渠道列表：每一格都能点进对应操作（测活、请求日志、限额、调度池、模型、代理、余额刷新），只看异常、置顶、卡片视图与 24 小时成功率条
 - [x] 账单解释器、定价模拟器、Playground 试用台（控制面同源中继）
 - [x] 新手引导与接入指南；密钥一键导入 Claude Code / Codex（cc-switch）、NextChat、Cherry Studio
 - [x] i18n zh-CN / en（守卫零裸文案、中英键对齐）、暗色主题、响应式
@@ -261,9 +279,10 @@ flowchart LR
 </details>
 
 <details>
-<summary><b>部署与迁移</b>（4 项，待办 1）</summary>
+<summary><b>部署与迁移</b>（5 项，待办 1）</summary>
 
 - [x] 单二进制多角色，前端产物 `embed-web` 嵌入
+- [x] console 可单独部署：配 `OKAPI_GATEWAY_INTERNAL_URL` 后试用台、渠道测试经 HTTP 数据面桥接调用远端 gateway（渠道指定用 30 秒有效的 HMAC 签名头，验不过就拒）
 - [x] Docker Compose 单机 / 多角色双 profile，K8s manifests（gateway HPA），Nginx SSE 反代模板
 - [x] `okapi migrate newapi` / `okapi migrate okapi-old` 双源迁移（幂等、dry-run）
 - [x] 压测：容器 8 vCPU json 10874 / stream 10402 RPS 全 0 错误
@@ -312,7 +331,12 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
 
 `deploy/nginx-sse.conf` 是前置反代模板（SSE 不缓冲、长超时、来源 IP 头归一化）。
 
-**横向扩展前必须核两件事**：
+**`/metrics` 别经反代对外。** gateway 与 console 的 Prometheus `/metrics` 在没配 `OKAPI_METRICS_TOKEN` 时
+只按 socket 对端判定：回环 / 内网地址放行。反代和 okapi 在同一台机器或同一私网时，对端永远是内网地址，
+经反代转发的公网请求也会被放行。上公网前在反代里屏蔽 `/metrics`，或者设 `OKAPI_METRICS_TOKEN`，设了以后只认
+`Authorization: Bearer <token>`。`deploy/docker-compose.yml` 的环境变量清单里默认没有这一项，要用就自己加上。
+
+**横向扩展前必须核三件事**：
 
 1. **连接数**。每个 pod 各开一套 PG 池，总连接 = Σ(副本数 × `OKAPI_PG_POOL`)；`all` 单进程模式里
    gateway / console / worker 三个角色各开一套，一个进程就占 3 × `OKAPI_PG_POOL`。
@@ -326,12 +350,14 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
    同值的 `X-Okapi-Edge-Key` 头。信任一台自己的反代（不是 CDN）时，那台反代还得清掉或重设
    `True-Client-IP` / `CF-Connecting-IP` / `X-Real-IP`——网关在可信来源下先读这三个头、再看
    `X-Forwarded-For`，它们调用方可写；`deploy/nginx-sse.conf` 已经处理，换成别的反代要照做。
-3. **时区一致**。时段折扣的分钟窗与星期按进程本地时区判定（`TZ` 环境变量），统计页的"今天 /
-   本月"缺省也按它翻页；所有副本必须设同一个 `TZ`，否则同一请求落到不同副本会按不同价计费。
-   用量限额与渠道日 / 月计数器固定按 UTC 自然日 / 自然月重置，与 `TZ` 无关——对账时注意两种口径。
+3. **时区一致**。时段折扣的分钟窗与星期按进程本地时区判定（`TZ` 环境变量），所有副本必须设同一个
+   `TZ`，否则同一请求落到不同副本会按不同价计费。统计页的"今天 / 本月"和渠道额度上限的日 / 周 / 月窗口
+   按后台「系统设置 → 时区」切分，没设时跟随 `TZ`。key 用量限额与密钥日 / 月预算固定按 UTC 自然日 /
+   自然月重置，与这两者都无关——对账时注意口径。
 
-worker 保持单副本即可：周期任务（对账 / 清扫 / 分区 / 冷却恢复）不互斥，多副本只是重复劳动；
-只有 chsink 吞吐不够时才值得加（relay/chsink 走 `SKIP LOCKED` + JetStream durable，多副本安全）。
+worker 单副本就够。周期任务（对账 / 清扫 / 分区 / 冷却恢复等）走 Redis 维护租约，多副本时同一时刻只有一个
+副本在跑，多开只是多一份接替。chsink 吞吐不够时可以加副本（relay / chsink 走 `SKIP LOCKED` + JetStream
+durable，可以并行）。
 气隙或只读部署可用 `OKAPI_WORKER_DISABLE` 关掉只观测 / 只外联的任务（`egress_probe`、`ops_sampler`、`unit_calibration`）。
 
 主要环境变量见 [.env.example](.env.example)，每项都带了"为什么要有它"的注释。
@@ -404,4 +430,6 @@ Copyright (C) 2026 The Okapi Developers
 [qiaojinxia77@gmail.com](mailto:qiaojinxia77@gmail.com) 商谈商业授权。
 
 `frontend/public/vendor-icons/` 下的供应商图标来自 [LobeHub Icons](https://github.com/lobehub/lobe-icons)，
-按其 MIT 许可证分发（见该目录下的 LICENSE）。
+按其 MIT 许可证分发（见该目录下的 LICENSE）。渠道模型验真的分词器指纹算法与
+`crates/okapi-engine/src/model_verify/tokenizer_bank.json` 来自 [Ikaleio/lm-detector](https://github.com/Ikaleio/lm-detector)，
+行为指纹打分器是 crates.io 上的 [lmfpd](https://crates.io/crates/lmfpd)，两者都是 MIT 许可证。
