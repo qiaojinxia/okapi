@@ -35,6 +35,14 @@ pub struct ChannelRow {
     pub pinned_at: Option<DateTime<Utc>>,
 }
 
+fn default_member_role() -> String {
+    "primary".to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// 渠道在某个池里的成员关系：覆盖为 None 时继承渠道 / key 自身的调度参数。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PoolMember {
@@ -43,6 +51,32 @@ pub struct PoolMember {
     pub priority_override: Option<i32>,
     #[serde(default)]
     pub weight_override: Option<i32>,
+    /// 成员角色：`primary`（默认主力）| `backup`（兜底）| `canary`（灰度）。
+    #[serde(default = "default_member_role")]
+    pub role: String,
+    /// 在该池内是否参与调度（false = 仅在本池摘流，不影响渠道在其他池的状态）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 成员标签（供池护栏 `required_tags / excluded_tags` 匹配）。
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 成员在该池内的模型通配过滤（None = 继承渠道全部模型）。
+    #[serde(default)]
+    pub model_filter: Option<Vec<String>>,
+}
+
+impl Default for PoolMember {
+    fn default() -> Self {
+        Self {
+            pool_code: String::new(),
+            priority_override: None,
+            weight_override: None,
+            role: default_member_role(),
+            enabled: true,
+            tags: Vec::new(),
+            model_filter: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
@@ -171,7 +205,11 @@ pub async fn list_channels(
                    (SELECT jsonb_agg(jsonb_build_object(
                                'pool_code', pc.pool_code,
                                'priority_override', pc.priority_override,
-                               'weight_override', pc.weight_override
+                               'weight_override', pc.weight_override,
+                               'role', pc.role,
+                               'enabled', pc.enabled,
+                               'tags', pc.tags,
+                               'model_filter', pc.model_filter
                            ) ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
                    '[]'::jsonb
@@ -291,19 +329,38 @@ pub async fn set_channel_pools(
     .execute(&mut *tx)
     .await?;
     for m in members {
-        sqlx::query!(
-            r#"
-            INSERT INTO pool_channels (pool_code, channel_id, priority_override, weight_override)
-            VALUES ($1, $2, $3, $4)
+        let role = if m.role.is_empty() {
+            "primary"
+        } else {
+            m.role.as_str()
+        };
+        let tags_json = serde_json::to_value(&m.tags).unwrap_or_else(|_| serde_json::json!([]));
+        let filter_json = m
+            .model_filter
+            .as_ref()
+            .map(|f| serde_json::to_value(f).unwrap_or_else(|_| serde_json::json!([])));
+        sqlx::query(
+            r"
+            INSERT INTO pool_channels
+                (pool_code, channel_id, priority_override, weight_override, role, enabled, tags, model_filter)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (pool_code, channel_id) DO UPDATE SET
                 priority_override = EXCLUDED.priority_override,
-                weight_override   = EXCLUDED.weight_override
-            "#,
-            m.pool_code,
-            channel_id,
-            m.priority_override,
-            m.weight_override
+                weight_override   = EXCLUDED.weight_override,
+                role              = EXCLUDED.role,
+                enabled           = EXCLUDED.enabled,
+                tags              = EXCLUDED.tags,
+                model_filter      = EXCLUDED.model_filter
+            ",
         )
+        .bind(&m.pool_code)
+        .bind(channel_id)
+        .bind(m.priority_override)
+        .bind(m.weight_override)
+        .bind(role)
+        .bind(m.enabled)
+        .bind(tags_json)
+        .bind(filter_json)
         .execute(&mut *tx)
         .await?;
     }
@@ -321,8 +378,7 @@ pub async fn set_channel_pool_codes(
         .iter()
         .map(|p| PoolMember {
             pool_code: p.clone(),
-            priority_override: None,
-            weight_override: None,
+            ..PoolMember::default()
         })
         .collect();
     set_channel_pools(pool, channel_id, &members).await

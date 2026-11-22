@@ -5,9 +5,11 @@
 //! `capabilities.<面> = false` 单独关掉。此前 embeddings / audio / images / videos / realtime 各写一份
 //! provider 黑名单，口径互不相同，名单之外的 provider（含 custom_pass）一律放行。
 use super::account_control::QuotaOrder;
-use super::scheduler::{CandidateQueue, CandidateSet, Strategy};
+use super::policy_pipeline;
+use super::scheduler::{CandidateQueue, CandidateSet, LayerOptions, Strategy};
 use super::state::AppState;
 use axum::http::StatusCode;
+use okapi_domain::pool_policy::RequestFeatures;
 use okapi_kernel::error::AppError;
 use okapi_providers::registry::{self, MediaSurface};
 use okapi_store::{AuthedKey, ChannelCandidate};
@@ -67,25 +69,37 @@ pub async fn queue(
     raw: Arc<Vec<ChannelCandidate>>,
     strategy: Strategy,
 ) -> CandidateQueue {
+    queue_with_options(state, raw, strategy, LayerOptions::default()).await
+}
+
+/// 与 [`queue`] 相同，但按池策略指定的 [`LayerOptions`] 控制角色层级、priority 分层与成本权重开关。
+pub async fn queue_with_options(
+    state: &AppState,
+    raw: Arc<Vec<ChannelCandidate>>,
+    strategy: Strategy,
+    opts: LayerOptions,
+) -> CandidateQueue {
     let keys = || raw.iter().map(|c| c.channel_key_id);
     match strategy {
-        Strategy::PriorityWeighted | Strategy::SoonestReset => CandidateQueue::weighted(raw),
+        Strategy::PriorityWeighted | Strategy::SoonestReset => {
+            CandidateQueue::weighted_with(raw, opts)
+        }
         Strategy::LeastLatency => {
             let latency = state.sched.channel_key_latencies(keys()).await;
-            CandidateQueue::by_latency(raw, &latency)
+            CandidateQueue::by_latency_with(raw, &latency, opts)
         }
         Strategy::LeastUsage => {
             let spend = state.sched.channel_key_spends(keys()).await;
-            CandidateQueue::by_load(raw, &spend)
+            CandidateQueue::by_load_with(raw, &spend, opts)
         }
         Strategy::LeastConcurrency => {
             let in_flight = state.sched.channel_key_in_flight(keys()).await;
-            CandidateQueue::by_load(raw, &in_flight).counting_in_flight()
+            CandidateQueue::by_load_with(raw, &in_flight, opts).counting_in_flight()
         }
     }
 }
 
-/// 媒体端点的候选：模型在池链上的候选按池的选路策略排好 failover 序（同对话，见 [`queue`]），
+/// 媒体端点的候选：加载渠道池策略文档并解析生效策略（多跳降级链、护栏、灰度、角色分层与选路策略），
 /// 只留能接 `surface` 的，再过额度与毛利护栏。一个都不剩时回 503（`no_candidates_code` 区分是不是
 /// 护栏筛掉的）。取出时每个候选重抽一次出口轮换组，`least_concurrency` 池的候选带上在途登记。
 pub async fn media(
@@ -94,9 +108,30 @@ pub async fn media(
     model: &str,
     surface: MediaSurface,
 ) -> Result<Vec<ChannelCandidate>, AppError> {
-    let strategy = Strategy::parse(key.pool_strategy.as_deref());
-    let raw = cached_candidates(state, model, &key.pool_chain(), false).await?;
-    let mut candidates = queue(state, raw, strategy).await;
+    Box::pin(media_inner(state, key, model, surface)).await
+}
+
+async fn media_inner(
+    state: &AppState,
+    key: &AuthedKey,
+    model: &str,
+    surface: MediaSurface,
+) -> Result<Vec<ChannelCandidate>, AppError> {
+    let primary_pool = key
+        .pool_code
+        .as_deref()
+        .unwrap_or(okapi_store::channels::DEFAULT_POOL);
+    let stored = state.load_pool_policy(primary_pool).await;
+    let features = RequestFeatures {
+        model,
+        ..Default::default()
+    };
+    let effective = stored.resolve(&features);
+    let strategy = Strategy::parse(Some(&effective.strategy));
+    let chain: Vec<&str> = effective.pool_chain.iter().map(String::as_str).collect();
+    let raw = cached_candidates(state, model, &chain, false).await?;
+    let (mut candidates, _) =
+        policy_pipeline::build_queue(state, raw, model, &effective, None).await;
     candidates.retain(|c| serves(c, surface));
     let margin_removed = state
         .retain_margin_ok_ordered(

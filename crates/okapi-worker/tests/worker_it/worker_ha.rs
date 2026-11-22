@@ -61,6 +61,7 @@ async fn maintenance_lease_coordinates_multi_replica_workers() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn cross_replica_key_health_clears_failures_on_other_node() {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
@@ -131,6 +132,9 @@ async fn cross_replica_key_health_clears_failures_on_other_node() {
         same_key_retries: 1,
         first_output_timeout_secs: 30,
         pool_rank: 0,
+        pool_role: "primary".to_owned(),
+        pool_tags: Vec::new(),
+        pool_model_filter: None,
         count_in_flight: false,
         warm_affinity: false,
     };

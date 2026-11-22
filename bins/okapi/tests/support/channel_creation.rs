@@ -146,8 +146,7 @@ async fn invalid_creation_options_do_not_exchange_or_leave_partial_channels() {
     // A database failure after the credential insert must roll back both inserts.
     let pools = [okapi_store::admin::PoolMember {
         pool_code: "missing-pool".into(),
-        priority_override: None,
-        weight_override: None,
+        ..Default::default()
     }];
     let result = okapi_store::provision::create_channel_configured(
         &env.pg,

@@ -182,9 +182,26 @@ pub(super) async fn prepare_chat(
         ..TokenUsage::default()
     };
     let pin = super::super::channel_test::current();
+    let primary_pool = key
+        .pool_code
+        .as_deref()
+        .unwrap_or(okapi_store::channels::DEFAULT_POOL);
+    let stored_policy = state.load_pool_policy(primary_pool).await;
+    let req_features = okapi_domain::pool_policy::RequestFeatures {
+        model: &canonical,
+        prompt_tokens: est_prompt,
+        has_tools: info.needs_tools || server_tools.has_tools(),
+        has_warm_cache: false,
+        session_key: info.session.as_deref(),
+    };
+    let effective_policy = Arc::new(stored_policy.resolve(&req_features));
     let pool_chain: Vec<&str> = match &pin {
         Some(pin) => pin.pools.iter().map(String::as_str).collect(),
-        None => key.pool_chain(),
+        None => effective_policy
+            .pool_chain
+            .iter()
+            .map(String::as_str)
+            .collect(),
     };
     let est_usage = with_admission_hints(
         base_usage,
@@ -340,6 +357,13 @@ pub(super) async fn prepare_chat(
             serde_json::json!(directive.effective_effort().as_str()),
         );
     }
+    if !effective_policy.matched_rules.is_empty() {
+        trace.set(
+            "pool_policy_rules",
+            serde_json::json!(&effective_policy.matched_rules),
+        );
+    }
+    let effective_strategy = Some(effective_policy.strategy.clone());
     let bill = RequestBilling {
         trace,
         state: state.clone(),
@@ -378,7 +402,8 @@ pub(super) async fn prepare_chat(
         client_headers: Arc::new(super::super::oauth_cred::client_headers(headers)),
         pool_chain: pool_chain.iter().map(|p| (*p).to_owned()).collect(),
         pin: pin.map(Arc::new),
-        pool_strategy: key.pool_strategy.clone(),
+        pool_strategy: effective_strategy,
+        effective_policy,
         service_tier: info.service_tier.clone(),
         has_tier_pricing: book.has_tiers(&ModelCode::from(bill_model_for_tier.as_str())),
         fallback_models: Arc::new(fallback_models),

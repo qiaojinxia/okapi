@@ -32,11 +32,25 @@ pub(super) async fn eligible_candidates(
     .await
     .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
     let strategy = Strategy::parse(bill.pool_strategy.as_deref());
-    let mut candidates =
-        super::super::candidates::queue(&bill.state, Arc::clone(&raw), strategy).await;
+    let mut candidates = if bill.pin.is_some() {
+        super::super::candidates::queue(&bill.state, Arc::clone(&raw), strategy).await
+    } else {
+        let (queue, _) = okapi_engine::policy_pipeline::build_queue(
+            &bill.state,
+            Arc::clone(&raw),
+            &bill.model,
+            &bill.effective_policy,
+            bill.session.as_deref(),
+        )
+        .await;
+        queue
+    };
     // 与诊断和接入示例共用入口规则；配置正常但入口错误时不要报服务不可用。
+    // 仅当过滤后还有候选却全被入口协议挡下时才报 UNSUPPORTED_ENDPOINT；
+    // 若已被池护栏 / 成员过滤筛空，应走后面的 503 NO_AVAILABLE_CHANNEL。
+    let before_ingress = candidates.len();
     candidates.retain(|c| bill.ingress.accepts(c, &bill.model));
-    if !raw.is_empty() && candidates.is_empty() {
+    if before_ingress > 0 && candidates.is_empty() {
         return Err(ForwardFailure::app(
             AppError::new(StatusCode::BAD_REQUEST, codes::UNSUPPORTED_ENDPOINT)
                 .with_param(Ingress::available_endpoints(raw.as_ref(), &bill.model).join(",")),
@@ -141,7 +155,8 @@ pub(super) async fn eligible_candidates(
     // L2 会话粘性映射：额度准入要先知道缓存还热不热（热会话可以用到保留线，冷请求按整段 prompt
     // 估增量），所以读取放在准入之前；把它提到候选首位仍在准入之后——被额度挡下的账号，
     // 亲和不越过准入。
-    let sticky_hit = match bill.session.as_ref().filter(|_| bill.pin.is_none()) {
+    let affinity_enabled = bill.pin.is_none() && bill.effective_policy.affinity_mode != "off";
+    let sticky_hit = match bill.session.as_ref().filter(|_| affinity_enabled) {
         Some(session) => {
             bill.state
                 .sched

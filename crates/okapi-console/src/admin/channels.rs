@@ -69,8 +69,7 @@ impl PoolMemberReq {
         match self {
             Self::Code(pool_code) => okapi_store::admin::PoolMember {
                 pool_code,
-                priority_override: None,
-                weight_override: None,
+                ..Default::default()
             },
             Self::Full(m) => m,
         }
@@ -103,9 +102,51 @@ pub(crate) async fn normalize_members(
         if pool_code.is_empty() || members.iter().any(|x| x.pool_code == pool_code) {
             continue;
         }
+        let role = m.role.trim();
+        let role = if role.is_empty() { "primary" } else { role };
+        if !okapi_domain::pool_policy::VALID_MEMBER_ROLES.contains(&role) {
+            return Err(AppError::bad_request().with_param("role"));
+        }
+        if m.tags.len() > 16 {
+            return Err(AppError::bad_request().with_param("tags"));
+        }
+        let mut tags = Vec::with_capacity(m.tags.len());
+        for raw_tag in &m.tags {
+            let t = raw_tag.trim();
+            if t.is_empty() || t.len() > 64 || t.chars().any(char::is_control) {
+                return Err(AppError::bad_request().with_param("tags"));
+            }
+            if !tags.iter().any(|x| x == t) {
+                tags.push(t.to_owned());
+            }
+        }
+        let model_filter = match &m.model_filter {
+            None => None,
+            Some(list) => {
+                if list.len() > 32 {
+                    return Err(AppError::bad_request().with_param("model_filter"));
+                }
+                let mut normalized = Vec::with_capacity(list.len());
+                for pat in list {
+                    let p = pat.trim();
+                    if p.is_empty() || p.len() > 128 || p.chars().any(char::is_control) {
+                        return Err(AppError::bad_request().with_param("model_filter"));
+                    }
+                    if !normalized.iter().any(|x| x == p) {
+                        normalized.push(p.to_owned());
+                    }
+                }
+                Some(normalized)
+            }
+        };
         members.push(okapi_store::admin::PoolMember {
             pool_code: pool_code.to_owned(),
-            ..m
+            priority_override: m.priority_override,
+            weight_override: m.weight_override,
+            role: role.to_owned(),
+            enabled: m.enabled,
+            tags,
+            model_filter,
         });
     }
     let codes: Vec<String> = members.iter().map(|m| m.pool_code.clone()).collect();

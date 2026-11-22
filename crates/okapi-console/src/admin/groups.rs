@@ -168,9 +168,12 @@ pub struct UpsertPoolReq {
     /// 本池对某模型无可用候选时退到的池（单跳；不能是自己）。
     #[serde(default)]
     pub fallback_pool_code: Option<String>,
+    /// 声明式调度策略文档（多跳降级链、护栏、灰度、条件覆写规则）；省略时更新不覆盖既有策略。
+    #[serde(default)]
+    pub policy: Option<okapi_domain::pool_policy::PoolPolicy>,
 }
 
-/// 渠道池 upsert（池 = 一组渠道 + 在这组里怎么选，docs/database.md §3.7）。
+/// 渠道池 upsert（池 = 调度策略中心：成员集合 + 策略文档，docs/database.md §3.7）。
 pub async fn upsert_pool(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -199,26 +202,71 @@ pub async fn upsert_pool(
         }
         ensure_pool_exists(&state, fb).await?;
     }
-    okapi_store::admin::upsert_channel_pool(
+    if let Some(policy) = &req.policy {
+        policy
+            .validate(pool_code)
+            .map_err(|param| AppError::bad_request().with_param(param))?;
+    }
+
+    // 池拓扑校验：目标池存在性 + 无环检查（覆盖单跳 fallback 与多跳 policy.fallback_pools）
+    let graph = okapi_store::pool_policy::list_pool_graph(&state.pg).await?;
+    let existing = graph.iter().find(|n| n.pool_code == pool_code);
+    let effective_policy = req
+        .policy
+        .as_ref()
+        .or_else(|| existing.map(|n| &n.policy))
+        .cloned()
+        .unwrap_or_default();
+    if let Some(policy) = &req.policy {
+        for target in policy.referenced_pools() {
+            if target != pool_code && !graph.iter().any(|n| n.pool_code == target) {
+                return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND)
+                    .with_param(target.to_owned()));
+            }
+        }
+    }
+    if okapi_store::pool_policy::has_fallback_cycle(&graph, pool_code, fallback, &effective_policy)
+    {
+        return Err(AppError::bad_request().with_param("policy.fallback_pools.cycle"));
+    }
+
+    let legacy_columns_changed = existing
+        .is_none_or(|prev| prev.fallback_pool_code.as_deref() != fallback)
+        || okapi_store::pool_policy::load_pool_policy(&state.pg, pool_code)
+            .await?
+            .is_none_or(|prev| prev.routing_strategy != strategy);
+
+    let policy_version = okapi_store::pool_policy::upsert_pool_with_policy(
         &state.pg,
         pool_code,
         &req.description,
         strategy,
         fallback,
+        req.policy.as_ref(),
     )
     .await?;
-    // 池的策略 / 降级目标随鉴权缓存下发，改了要让持有旧值的 key 重新解析
-    state.sched.auth_flush().await;
+    // 仅当旧列（routing_strategy / fallback_pool_code）变化时才刷新鉴权缓存；
+    // 纯 policy 变更只走轻量 `routing.invalidate` 广播，不触发全站 auth_flush。
+    if legacy_columns_changed {
+        state.sched.auth_flush().await;
+    }
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "channel.upsert_pool",
         pool_code,
-        json!({ "routing_strategy": strategy, "fallback_pool_code": fallback }),
+        json!({
+            "routing_strategy": strategy,
+            "fallback_pool_code": fallback,
+            "policy_version": policy_version,
+            "policy_updated": req.policy.is_some(),
+        }),
     )
     .await;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(
+        json!({ "ok": true, "policy_version": policy_version }),
+    ))
 }
 
 #[derive(Deserialize)]

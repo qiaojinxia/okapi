@@ -446,8 +446,7 @@ async fn pin_to_pool(env: &TestEnv, strategy: &str) -> i64 {
     .unwrap();
     let member = okapi_store::admin::PoolMember {
         pool_code: pool.clone(),
-        priority_override: None,
-        weight_override: None,
+        ..Default::default()
     };
     okapi_store::admin::set_channel_pools(&env.pg, channel, &[member])
         .await

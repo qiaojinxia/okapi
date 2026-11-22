@@ -29,6 +29,7 @@ pub mod netmatch;
 pub mod oauth_credentials;
 pub mod payments;
 pub mod pg;
+pub mod pool_policy;
 pub mod pricing;
 pub mod provision;
 pub mod redis;

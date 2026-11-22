@@ -43,16 +43,74 @@ impl Strategy {
     }
 }
 
-/// 层内抽样权重（整数运算，非计费路径）。
-fn effective_weight(c: &ChannelCandidate) -> i64 {
-    (i64::from(c.weight.max(1)) * 1000 / c.cost_milli.max(1)).max(1)
+/// 分层与权重控制开关（由 `EffectivePoolPolicy` 派生；缺省行为与既有调度完全一致）。
+#[derive(Debug, Clone, Copy)]
+pub struct LayerOptions {
+    /// 是否严格按 priority 分层（缺省 true）。
+    pub respect_priority_layers: bool,
+    /// 加权抽样时是否忽略 `cost_milli` 除数（缺省 false）。
+    pub ignore_cost_in_weight: bool,
+    /// 是否命中灰度流量桶（true: canary → primary → backup；false: primary → backup）。
+    pub canary_active: bool,
 }
 
-/// 分层键：池序升序（主池先）、层内 priority 降序。
-type LayerKey = (i32, std::cmp::Reverse<i32>);
+impl Default for LayerOptions {
+    fn default() -> Self {
+        Self {
+            respect_priority_layers: true,
+            ignore_cost_in_weight: false,
+            canary_active: false,
+        }
+    }
+}
 
-fn layer_key(c: &ChannelCandidate) -> LayerKey {
-    (c.pool_rank, std::cmp::Reverse(c.priority))
+/// 层内抽样权重（整数运算，非计费路径）。
+fn effective_weight_with(c: &ChannelCandidate, ignore_cost: bool) -> i64 {
+    if ignore_cost {
+        i64::from(c.weight.max(1))
+    } else {
+        (i64::from(c.weight.max(1)) * 1000 / c.cost_milli.max(1)).max(1)
+    }
+}
+
+#[cfg(test)]
+fn effective_weight(c: &ChannelCandidate) -> i64 {
+    effective_weight_with(c, false)
+}
+
+/// 分层键：池序升序（主池先）、成员角色层级升序（canary/primary/backup）、层内 priority 降序。
+type LayerKey = (i32, u8, std::cmp::Reverse<i32>);
+
+/// 成员角色固定层级：`canary(0) < primary(1) < backup(2)`。
+/// 灰度未命中时 `canary` 已被前置过滤，因此剩余候选在任意二次排序中沿用同一角色层级均保序。
+#[must_use]
+pub fn role_rank(role: &str) -> u8 {
+    match role {
+        "canary" => 0,
+        "backup" => 2,
+        _ => 1,
+    }
+}
+
+fn role_tier(role: &str, canary_active: bool) -> u8 {
+    if canary_active {
+        role_rank(role)
+    } else {
+        u8::from(role == "backup")
+    }
+}
+
+fn layer_key(c: &ChannelCandidate, opts: LayerOptions) -> LayerKey {
+    let prio = if opts.respect_priority_layers {
+        c.priority
+    } else {
+        0
+    };
+    (
+        c.pool_rank,
+        role_tier(&c.pool_role, opts.canary_active),
+        std::cmp::Reverse(prio),
+    )
 }
 
 /// Shared candidate snapshots remain borrowed until a wire attempt needs ownership.
@@ -108,14 +166,24 @@ impl CandidateSet for CandidateQueue {
 
 impl CandidateQueue {
     pub fn weighted(source: Arc<Vec<ChannelCandidate>>) -> Self {
-        let indices = weighted_indices(&source);
+        Self::weighted_with(source, LayerOptions::default())
+    }
+    pub fn weighted_with(source: Arc<Vec<ChannelCandidate>>, opts: LayerOptions) -> Self {
+        let indices = weighted_indices(&source, opts);
         Self::ordered(source, indices)
     }
     pub fn by_latency<S: std::hash::BuildHasher>(
         source: Arc<Vec<ChannelCandidate>>,
         latency: &HashMap<i64, u32, S>,
     ) -> Self {
-        let indices = latency_indices(&source, latency);
+        Self::by_latency_with(source, latency, LayerOptions::default())
+    }
+    pub fn by_latency_with<S: std::hash::BuildHasher>(
+        source: Arc<Vec<ChannelCandidate>>,
+        latency: &HashMap<i64, u32, S>,
+        opts: LayerOptions,
+    ) -> Self {
+        let indices = latency_indices(&source, latency, opts);
         Self::ordered(source, indices)
     }
     /// `least_usage` / `least_concurrency`：层内按 读数 ÷ 权重 升序。
@@ -123,7 +191,14 @@ impl CandidateQueue {
         source: Arc<Vec<ChannelCandidate>>,
         load: &HashMap<i64, i64, S>,
     ) -> Self {
-        let indices = load_indices(&source, load);
+        Self::by_load_with(source, load, LayerOptions::default())
+    }
+    pub fn by_load_with<S: std::hash::BuildHasher>(
+        source: Arc<Vec<ChannelCandidate>>,
+        load: &HashMap<i64, i64, S>,
+        opts: LayerOptions,
+    ) -> Self {
+        let indices = load_indices(&source, load, opts);
         Self::ordered(source, indices)
     }
     fn ordered(source: Arc<Vec<ChannelCandidate>>, indices: Vec<usize>) -> Self {
@@ -190,16 +265,19 @@ impl Iterator for CandidateIter {
     }
 }
 
-fn layers(candidates: &[ChannelCandidate]) -> BTreeMap<LayerKey, Vec<usize>> {
+fn layers(candidates: &[ChannelCandidate], opts: LayerOptions) -> BTreeMap<LayerKey, Vec<usize>> {
     let mut groups: BTreeMap<LayerKey, Vec<usize>> = BTreeMap::new();
     for (index, candidate) in candidates.iter().enumerate() {
-        groups.entry(layer_key(candidate)).or_default().push(index);
+        groups
+            .entry(layer_key(candidate, opts))
+            .or_default()
+            .push(index);
     }
     groups
 }
 
 #[allow(clippy::cast_precision_loss)] // i32 weight × 1000 is below 2^42, exactly representable.
-fn weighted_indices(candidates: &[ChannelCandidate]) -> Vec<usize> {
+fn weighted_indices(candidates: &[ChannelCandidate], opts: LayerOptions) -> Vec<usize> {
     let mut rng = rand::rng();
     // Independent exponential clocks give the same weighted sampling without
     // replacement distribution as repeated draws, in O(n log n), not O(n²).
@@ -209,8 +287,8 @@ fn weighted_indices(candidates: &[ChannelCandidate]) -> Vec<usize> {
         .map(|(i, candidate)| {
             let uniform = 1.0 - rng.random::<f64>(); // (0,1], so ln is always finite.
             (
-                layer_key(candidate),
-                -uniform.ln() / effective_weight(candidate) as f64,
+                layer_key(candidate, opts),
+                -uniform.ln() / effective_weight_with(candidate, opts.ignore_cost_in_weight) as f64,
                 i,
             )
         })
@@ -226,9 +304,10 @@ fn weighted_indices(candidates: &[ChannelCandidate]) -> Vec<usize> {
 fn latency_indices<S: std::hash::BuildHasher>(
     candidates: &[ChannelCandidate],
     latency: &HashMap<i64, u32, S>,
+    opts: LayerOptions,
 ) -> Vec<usize> {
     let mut ordered = Vec::with_capacity(candidates.len());
-    for (_, mut bucket) in layers(candidates) {
+    for (_, mut bucket) in layers(candidates, opts) {
         let mut samples: Vec<_> = bucket
             .iter()
             .filter_map(|&i| latency.get(&candidates[i].channel_key_id).copied())
@@ -251,6 +330,7 @@ fn latency_indices<S: std::hash::BuildHasher>(
 fn load_indices<S: std::hash::BuildHasher>(
     candidates: &[ChannelCandidate],
     load: &HashMap<i64, i64, S>,
+    opts: LayerOptions,
 ) -> Vec<usize> {
     let mut rng = rand::rng();
     let mut scores: Vec<_> = candidates
@@ -265,9 +345,9 @@ fn load_indices<S: std::hash::BuildHasher>(
             let share = i128::from(reading) * 1000 / i128::from(candidate.weight.max(1));
             let uniform = 1.0 - rng.random::<f64>(); // (0,1], so ln is always finite.
             (
-                layer_key(candidate),
+                layer_key(candidate, opts),
                 share,
-                -uniform.ln() / effective_weight(candidate) as f64,
+                -uniform.ln() / effective_weight_with(candidate, opts.ignore_cost_in_weight) as f64,
                 i,
             )
         })
@@ -290,7 +370,7 @@ fn move_ordered(candidates: Vec<ChannelCandidate>, indices: Vec<usize>) -> Vec<C
 }
 
 pub fn order_candidates(candidates: Vec<ChannelCandidate>) -> Vec<ChannelCandidate> {
-    let indices = weighted_indices(&candidates);
+    let indices = weighted_indices(&candidates, LayerOptions::default());
     move_ordered(candidates, indices)
 }
 
@@ -298,7 +378,7 @@ pub fn order_candidates_by_latency<S: std::hash::BuildHasher>(
     candidates: Vec<ChannelCandidate>,
     latency: &HashMap<i64, u32, S>,
 ) -> Vec<ChannelCandidate> {
-    let indices = latency_indices(&candidates, latency);
+    let indices = latency_indices(&candidates, latency, LayerOptions::default());
     move_ordered(candidates, indices)
 }
 
@@ -341,6 +421,9 @@ pub(crate) mod tests {
             capabilities: serde_json::json!({}),
             cost_milli,
             pool_rank: 0,
+            pool_role: "primary".to_owned(),
+            pool_tags: Vec::new(),
+            pool_model_filter: None,
             count_in_flight: false,
             warm_affinity: false,
         }

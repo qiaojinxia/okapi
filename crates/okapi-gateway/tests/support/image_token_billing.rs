@@ -245,12 +245,12 @@ async fn duplicate_and_unrepresentable_usage_never_silently_changes_the_bill() {
 
 #[tokio::test]
 async fn durable_async_images_preserve_usage_and_charge_only_once() {
-    durable_usage_case(false).await;
+    Box::pin(durable_usage_case(false)).await;
 }
 
 #[tokio::test]
 async fn durable_async_images_preserve_cache_intersections_and_charge_only_once() {
-    durable_usage_case(true).await;
+    Box::pin(durable_usage_case(true)).await;
 }
 
 async fn durable_usage_case(cached: bool) {

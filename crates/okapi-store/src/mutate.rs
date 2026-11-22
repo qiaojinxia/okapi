@@ -172,7 +172,8 @@ pub async fn duplicate_channel(
            FROM channel_keys WHERE channel_id = $1"
     ).bind(channel_id).bind(new_id).execute(&mut *tx).await?;
     sqlx::query(
-        "INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override) SELECT pool_code,$2,priority_override,weight_override FROM pool_channels WHERE channel_id=$1"
+        "INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override,role,enabled,tags,model_filter)
+         SELECT pool_code,$2,priority_override,weight_override,role,enabled,tags,model_filter FROM pool_channels WHERE channel_id=$1"
     ).bind(channel_id).bind(new_id).execute(&mut *tx).await?;
     crate::egress::reconcile(&mut tx).await?;
     tx.commit().await?;
@@ -199,8 +200,18 @@ pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool,
     )
     .fetch_one(&mut *tx)
     .await?;
-    // 被别的池当降级目标同样算引用：静默删掉等于那些池悄悄失去兜底
-    if refs.groups > 0 || refs.keys > 0 || refs.fallbacks > 0 {
+    // 被别的池当降级目标或策略引用（fallback_pools / override_pools）同样算引用：
+    // 静默删掉等于那些池悄悄失去兜底。
+    let other_policies: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT pool_code, policy FROM channel_pools WHERE pool_code <> $1")
+            .bind(pool_code)
+            .fetch_all(&mut *tx)
+            .await?;
+    let referenced_in_policy = other_policies.into_iter().any(|(_, raw)| {
+        serde_json::from_value::<okapi_domain::pool_policy::PoolPolicy>(raw)
+            .is_ok_and(|p| p.referenced_pools().contains(&pool_code))
+    });
+    if refs.groups > 0 || refs.keys > 0 || refs.fallbacks > 0 || referenced_in_policy {
         return Err(StoreError::Conflict("pool_in_use"));
     }
     // 软删令牌上的覆盖是死引用（key 已停用），但外键无 ON DELETE，留着池就永远删不掉

@@ -25,6 +25,7 @@ mod keys;
 mod models;
 mod ops;
 mod plans;
+mod pool_simulate;
 mod pricing;
 mod pricing_entities;
 mod pricing_ops;
@@ -68,6 +69,7 @@ pub use self::ops::{
     FlushReq, ReconQuery, RepairReq, cache_flush, reconciliation, repair_reconciliation,
 };
 pub use self::plans::{CreateRedemptionsReq, UpsertPlanReq, create_redemptions, upsert_plan};
+pub use self::pool_simulate::{SimulatePoolReq, simulate_pool_policy};
 pub(super) use self::pricing::publish_pricing_inner;
 pub use self::pricing::{
     ImportNewApiReq, PublishPricingQuery, UpsertRuleReq, delete_pricing_rule,

@@ -25,6 +25,7 @@ pub mod key_gate;
 pub mod key_health;
 pub mod oauth_cred;
 pub mod openai_dialect;
+pub mod policy_pipeline;
 pub mod request_policy;
 pub mod rule_inputs;
 pub mod scheduler;
@@ -217,6 +218,10 @@ pub async fn build_state_with_clients(
             request_policy: moka::future::Cache::builder()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(10))
+                .build(),
+            pool_policies: moka::future::Cache::builder()
+                .max_capacity(256)
+                .time_to_live(Duration::from_secs(5))
                 .build(),
         },
         health: state::HealthMarks {

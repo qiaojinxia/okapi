@@ -85,6 +85,12 @@ pub struct ChannelCandidate {
     /// 所属池在池链里的序号（0 = 主池，1 = 降级池）。调度先耗尽低序号的全部层，
     /// 再进入下一序号——降级池的高优先级渠道也排在主池最低优先级之后。
     pub pool_rank: i32,
+    /// 渠道在当前池中的成员角色（`primary` / `backup` / `canary`；来自 `pool_channels.role`）。
+    pub pool_role: String,
+    /// 渠道在当前池中的标签（来自 `pool_channels.tags`，供护栏 `required_tags / excluded_tags` 匹配）。
+    pub pool_tags: Vec<String>,
+    /// 渠道在当前池中的模型通配过滤（来自 `pool_channels.model_filter`；None = 不限）。
+    pub pool_model_filter: Option<Vec<String>>,
     /// 本次尝试是否在 Redis `conc:ck:*` 登记在途：没设并发上限也登记，只计数不拦截。
     /// 候选缓存里恒为 false，由 `least_concurrency` 池的调度队列逐个发出时打开。
     pub count_in_flight: bool,
@@ -210,6 +216,13 @@ impl ChannelCandidate {
     }
 }
 
+struct MemberMeta {
+    role: String,
+    enabled: bool,
+    tags: Vec<String>,
+    model_filter: Option<Vec<String>>,
+}
+
 /// 服务指定模型的可用渠道 key 候选：
 /// 渠道启用 + key active + 不在冷却期 + 在池链内 + key 模型子集允许。
 ///
@@ -234,7 +247,8 @@ pub async fn candidates_for_model(
     } else {
         pools.iter().map(|p| (*p).to_owned()).collect()
     };
-    let rows = sqlx::query!(
+    let (rows, member_metas) = tokio::try_join!(
+        sqlx::query!(
         r#"
         SELECT c.id AS channel_id,
                c.name AS channel_name,
@@ -301,15 +315,67 @@ pub async fn candidates_for_model(
         "#,
         model_json,
         &chain
-    )
-    .fetch_all(pool)
-    .await?;
+        )
+        .fetch_all(pool),
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                i64,
+                String,
+                bool,
+                serde_json::Value,
+                Option<serde_json::Value>,
+            ),
+        >(
+            r"SELECT pool_code, channel_id, role, enabled, tags, model_filter
+              FROM pool_channels
+              WHERE pool_code = ANY($1::varchar[])",
+        )
+        .bind(&chain)
+        .fetch_all(pool),
+    )?;
 
-    // 同一把 key 经两个池各出一行：保留池序靠前的那行（SQL 已按池序排好）
+    let mut meta_map: std::collections::HashMap<(String, i64), MemberMeta> =
+        std::collections::HashMap::with_capacity(member_metas.len());
+    for (pool_code, channel_id, role, enabled, tags, model_filter) in member_metas {
+        let tags: Vec<String> = serde_json::from_value(tags).unwrap_or_default();
+        let model_filter: Option<Vec<String>> =
+            model_filter.and_then(|v| serde_json::from_value(v).ok());
+        meta_map.insert(
+            (pool_code, channel_id),
+            MemberMeta {
+                role,
+                enabled,
+                tags,
+                model_filter,
+            },
+        );
+    }
+
+    // 同一把 key 经两个池各出一行：先跳过在当前池被摘流（enabled = false）的行，
+    // 再保留池序靠前的那行（SQL 已按池序排好），这样在主池摘流不影响其在降级池继续服务。
     let mut seen = std::collections::HashSet::new();
     rows.into_iter()
-        .filter(|r| seen.insert(r.channel_key_id))
-        .map(|r| {
+        .filter_map(|r| {
+            let pool_code = usize::try_from(r.pool_rank)
+                .ok()
+                .and_then(|idx| chain.get(idx))
+                .map_or(DEFAULT_POOL, String::as_str);
+            let meta = meta_map.get(&(pool_code.to_owned(), r.channel_id));
+            if meta.is_some_and(|m| !m.enabled) {
+                return None;
+            }
+            if !seen.insert(r.channel_key_id) {
+                return None;
+            }
+            let (pool_role, pool_tags, pool_model_filter) = meta.map_or_else(
+                || ("primary".to_owned(), Vec::new(), None),
+                |m| (m.role.clone(), m.tags.clone(), m.model_filter.clone()),
+            );
+            Some((r, pool_role, pool_tags, pool_model_filter))
+        })
+        .map(|(r, pool_role, pool_tags, pool_model_filter)| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             let responses_native = responses_native_for(&r.provider, r.responses_native);
             let (same_key_retries, first_output_timeout_secs) =
@@ -376,6 +442,9 @@ pub async fn candidates_for_model(
                 same_key_retries,
                 first_output_timeout_secs,
                 pool_rank: r.pool_rank,
+                pool_role,
+                pool_tags,
+                pool_model_filter,
                 count_in_flight: false,
                 warm_affinity: false,
             })

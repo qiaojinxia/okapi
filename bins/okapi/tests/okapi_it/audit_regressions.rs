@@ -558,8 +558,7 @@ async fn replacing_empty_membership_is_serialized_on_the_parent() -> Result {
                     parent,
                     &[PoolMember {
                         pool_code: code,
-                        priority_override: None,
-                        weight_override: None,
+                        ..Default::default()
                     }],
                 )
                 .await
@@ -579,8 +578,7 @@ async fn replacing_empty_membership_is_serialized_on_the_parent() -> Result {
                     parent,
                     &[PoolMember {
                         pool_code: code,
-                        priority_override: None,
-                        weight_override: None,
+                        ..Default::default()
                     }],
                 )
                 .await

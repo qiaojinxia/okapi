@@ -500,6 +500,9 @@ mod upstream_endpoint_tests {
             capabilities: serde_json::json!({}),
             cost_milli: 1000,
             pool_rank: 0,
+            pool_role: "primary".to_owned(),
+            pool_tags: Vec::new(),
+            pool_model_filter: None,
             count_in_flight: false,
             warm_affinity: false,
         }

@@ -239,6 +239,10 @@ pub struct PoolListRow {
     pub routing_strategy: String,
     /// 本池无候选时退到的池（单跳）。
     pub fallback_pool_code: Option<String>,
+    /// 声明式调度策略文档（`channel_pools.policy`）。
+    pub policy: serde_json::Value,
+    /// 策略版本号（每次修改 `policy` 递增）。
+    pub policy_version: i64,
     /// 池内渠道数。
     pub channel_count: i64,
     /// 引用该池的分组数 + 令牌数 + 把它当降级目标的池数（>0 时删除会被拒）。
@@ -257,6 +261,10 @@ pub struct PoolMemberRow {
     pub priority: i32,
     pub priority_override: Option<i32>,
     pub weight_override: Option<i32>,
+    pub role: String,
+    pub enabled: bool,
+    pub tags: Vec<String>,
+    pub model_filter: Option<Vec<String>>,
     pub models: Vec<String>,
     /// 该渠道当前可用 key 数（status=1 且不在冷却）。
     pub active_keys: i64,
@@ -270,36 +278,67 @@ pub struct PoolDetail {
     pub description: Option<String>,
     pub routing_strategy: String,
     pub fallback_pool_code: Option<String>,
+    pub policy: serde_json::Value,
+    pub policy_version: i64,
     pub members: Vec<PoolMemberRow>,
     pub models: Vec<String>,
     pub groups: Vec<String>,
 }
 
+#[derive(sqlx::FromRow)]
+struct PoolHeadDb {
+    pool_code: String,
+    description: Option<String>,
+    routing_strategy: String,
+    fallback_pool_code: Option<String>,
+    policy: serde_json::Value,
+    policy_version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct PoolMemberDb {
+    channel_id: i64,
+    name: String,
+    provider: String,
+    status: i16,
+    priority: i32,
+    models: serde_json::Value,
+    priority_override: Option<i32>,
+    weight_override: Option<i32>,
+    role: String,
+    enabled: bool,
+    tags: serde_json::Value,
+    model_filter: Option<serde_json::Value>,
+    active_keys: i64,
+}
+
 pub async fn pool_detail(pool: &PgPool, pool_code: &str) -> Result<Option<PoolDetail>, StoreError> {
-    let head = sqlx::query!(
-        r#"SELECT pool_code, description, routing_strategy, fallback_pool_code
-           FROM channel_pools WHERE pool_code = $1"#,
-        pool_code
+    let head = sqlx::query_as::<_, PoolHeadDb>(
+        r"SELECT pool_code, description, routing_strategy, fallback_pool_code,
+                 policy, policy_version
+          FROM channel_pools WHERE pool_code = $1",
     )
+    .bind(pool_code)
     .fetch_optional(pool)
     .await?;
     let Some(head) = head else {
         return Ok(None);
     };
-    let members = sqlx::query!(
-        r#"
+    let members = sqlx::query_as::<_, PoolMemberDb>(
+        r"
         SELECT c.id AS channel_id, c.name, c.provider, c.status, c.priority, c.models,
                pc.priority_override, pc.weight_override,
+               pc.role, pc.enabled, pc.tags, pc.model_filter,
                (SELECT COUNT(*) FROM channel_keys k
                  WHERE k.channel_id = c.id AND k.status = 1
-                   AND (k.cooldown_until IS NULL OR k.cooldown_until < now())) AS "active_keys!"
+                   AND (k.cooldown_until IS NULL OR k.cooldown_until < now())) AS active_keys
         FROM pool_channels pc
         JOIN channels c ON c.id = pc.channel_id
         WHERE pc.pool_code = $1 AND c.deleted_at IS NULL
         ORDER BY COALESCE(pc.priority_override, c.priority) DESC, c.id
-        "#,
-        pool_code
+        ",
     )
+    .bind(pool_code)
     .fetch_all(pool)
     .await?;
     let groups = sqlx::query_scalar!(
@@ -314,7 +353,10 @@ pub async fn pool_detail(pool: &PgPool, pool_code: &str) -> Result<Option<PoolDe
         .into_iter()
         .map(|r| {
             let served: Vec<String> = serde_json::from_value(r.models).unwrap_or_default();
-            if r.status == 1 {
+            let tags: Vec<String> = serde_json::from_value(r.tags).unwrap_or_default();
+            let model_filter: Option<Vec<String>> =
+                r.model_filter.and_then(|v| serde_json::from_value(v).ok());
+            if r.status == 1 && r.enabled {
                 for m in &served {
                     if !models.contains(m) {
                         models.push(m.clone());
@@ -329,6 +371,10 @@ pub async fn pool_detail(pool: &PgPool, pool_code: &str) -> Result<Option<PoolDe
                 priority: r.priority,
                 priority_override: r.priority_override,
                 weight_override: r.weight_override,
+                role: r.role,
+                enabled: r.enabled,
+                tags,
+                model_filter,
                 models: served,
                 active_keys: r.active_keys,
             }
@@ -340,34 +386,51 @@ pub async fn pool_detail(pool: &PgPool, pool_code: &str) -> Result<Option<PoolDe
         description: head.description,
         routing_strategy: head.routing_strategy,
         fallback_pool_code: head.fallback_pool_code,
+        policy: head.policy,
+        policy_version: head.policy_version,
         members,
         models,
         groups,
     }))
 }
 
+#[derive(sqlx::FromRow)]
+struct PoolListRowDb {
+    pool_code: String,
+    description: Option<String>,
+    routing_strategy: String,
+    fallback_pool_code: Option<String>,
+    policy: serde_json::Value,
+    policy_version: i64,
+    channel_count: i64,
+    group_count: i64,
+    key_count: i64,
+    fallback_ref_count: i64,
+}
+
 pub async fn list_pools(pool: &PgPool, slice: Slice) -> Result<Page<PoolListRow>, StoreError> {
     let (rows, total) = tokio::try_join!(
-        sqlx::query!(
-            r#"
+        sqlx::query_as::<_, PoolListRowDb>(
+            r"
         SELECT p.pool_code, p.description, p.routing_strategy, p.fallback_pool_code,
+               p.policy, p.policy_version,
                (SELECT COUNT(*) FROM pool_channels pc
                   JOIN channels c ON c.id = pc.channel_id
                  WHERE pc.pool_code = p.pool_code AND c.deleted_at IS NULL)
-                   AS "channel_count!",
+                   AS channel_count,
                (SELECT COUNT(*) FROM price_groups g WHERE g.pool_code = p.pool_code)
-                   AS "group_count!",
+                   AS group_count,
                (SELECT COUNT(*) FROM api_keys k
-                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS "key_count!",
+                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS key_count,
                (SELECT COUNT(*) FROM channel_pools f
-                 WHERE f.fallback_pool_code = p.pool_code) AS "fallback_ref_count!"
+                 WHERE f.fallback_pool_code = p.pool_code) AS fallback_ref_count
         FROM channel_pools p
         ORDER BY (p.pool_code <> 'default'), p.pool_code
         LIMIT $1 OFFSET $2
-        "#,
-            slice.limit,
-            slice.offset
+        ",
         )
+        .bind(slice.limit)
+        .bind(slice.offset)
         .fetch_all(pool),
         count_unless_all(
             slice,
@@ -383,6 +446,8 @@ pub async fn list_pools(pool: &PgPool, slice: Slice) -> Result<Page<PoolListRow>
             description: r.description,
             routing_strategy: r.routing_strategy,
             fallback_pool_code: r.fallback_pool_code,
+            policy: r.policy,
+            policy_version: r.policy_version,
             channel_count: r.channel_count,
             group_count: r.group_count,
             key_count: r.key_count,

@@ -96,6 +96,8 @@ pub struct RoutingCaches {
     pub margin_cache: Cache<u8, Arc<std::collections::HashSet<String>>>,
     /// 请求策略（`settings.request_policy`）的解析结果，10s；写设置时随路由缓存一起失效。
     pub request_policy: Cache<u8, Arc<okapi_kernel::policies::RequestPolicy>>,
+    /// 渠道池策略文档缓存（pool_code → StoredPoolPolicy，5s；改池策略走 `routing.invalidate`，不再全站 auth_flush）。
+    pub pool_policies: Cache<String, Arc<okapi_store::pool_policy::StoredPoolPolicy>>,
 }
 
 /// 渠道 key 与出口代理的健康标记：本地标记加 5s 集群脏集缓存，成功时才回 PG 清零。
@@ -515,6 +517,37 @@ impl AppState {
         })
     }
 
+    /// 读取渠道池生效策略快照（5s 进程缓存，由 `routing.invalidate` 跨副本即时失效；
+    /// 查不到行或瞬态 DB 异常时安全回退默认策略，不阻断热路径）。
+    pub async fn load_pool_policy(
+        &self,
+        pool_code: &str,
+    ) -> Arc<okapi_store::pool_policy::StoredPoolPolicy> {
+        if let Some(hit) = self.routing.pool_policies.get(pool_code).await {
+            return hit;
+        }
+        let loaded = match okapi_store::pool_policy::load_pool_policy(&self.pg, pool_code).await {
+            Ok(Some(policy)) => policy,
+            Ok(None) => okapi_store::pool_policy::StoredPoolPolicy::fallback_default(pool_code),
+            Err(error) => {
+                tracing::warn!(
+                    pool_code,
+                    %error,
+                    "load_pool_policy failed; falling back to default policy"
+                );
+                return Arc::new(
+                    okapi_store::pool_policy::StoredPoolPolicy::fallback_default(pool_code),
+                );
+            }
+        };
+        let arc = Arc::new(loaded);
+        self.routing
+            .pool_policies
+            .insert(pool_code.to_owned(), Arc::clone(&arc))
+            .await;
+        arc
+    }
+
     /// 只失效本进程（广播的接收端用；避免收到自己的广播再转发出去打环）。
     pub fn invalidate_routing_caches_local(&self) {
         okapi_kernel::metrics::global().record_routing_invalidation(false);
@@ -524,6 +557,7 @@ impl AppState {
         self.routing.channel_control_cache.invalidate_all();
         self.routing.margin_cache.invalidate_all();
         self.routing.request_policy.invalidate_all();
+        self.routing.pool_policies.invalidate_all();
         self.settings_cache.invalidate_all();
     }
 
@@ -636,6 +670,7 @@ mod tests {
                 channel_control_cache: Cache::builder().max_capacity(16).build(),
                 margin_cache: Cache::builder().max_capacity(1).build(),
                 request_policy: Cache::builder().max_capacity(1).build(),
+                pool_policies: Cache::builder().max_capacity(16).build(),
             },
             health: HealthMarks {
                 key_failures: Cache::builder().max_capacity(16).build(),

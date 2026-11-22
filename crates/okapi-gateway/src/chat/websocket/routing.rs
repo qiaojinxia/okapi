@@ -358,6 +358,9 @@ pub(super) async fn route(
 /// 与 HTTP 一样记下会话落在哪个 key：断线重连（新的 WS 连接）回到同一账号，
 /// 历史里的加密推理项才验得过。
 async fn remember_session(bill: &RequestBilling, cand: &ChannelCandidate) {
+    if bill.effective_policy.affinity_mode == "off" {
+        return;
+    }
     if let Some(session) = &bill.session {
         bill.state
             .sched

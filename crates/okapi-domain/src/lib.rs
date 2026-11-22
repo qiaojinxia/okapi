@@ -8,6 +8,7 @@ pub mod error;
 pub mod ids;
 pub mod money;
 pub mod net;
+pub mod pool_policy;
 pub mod provider_contract;
 pub mod server_tools;
 pub mod state;

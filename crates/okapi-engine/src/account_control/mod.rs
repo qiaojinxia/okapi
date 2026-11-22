@@ -403,23 +403,25 @@ fn order_by_quota(
     resets: &std::collections::HashMap<i64, i64>,
     order: QuotaOrder,
 ) {
+    use super::scheduler::role_rank;
     match order {
         QuotaOrder::Keep => {}
         QuotaOrder::HeadroomTiers => candidates.sort_by_key(|c| {
             (
                 c.pool_rank,
+                role_rank(&c.pool_role),
                 std::cmp::Reverse(c.priority),
                 std::cmp::Reverse(headroom_tier(headroom.get(&c.channel_key_id).copied())),
             )
         }),
         QuotaOrder::SoonestReset => {
             // 没有观测的 key 按本层已知重置时刻的中位数排：不抢在确实快重置的前面，也不被饿死
-            let mut layers: std::collections::HashMap<(i32, i32), Vec<i64>> =
+            let mut layers: std::collections::HashMap<(i32, u8, i32), Vec<i64>> =
                 std::collections::HashMap::new();
             for c in candidates.iter() {
                 if let Some(at) = resets.get(&c.channel_key_id) {
                     layers
-                        .entry((c.pool_rank, c.priority))
+                        .entry((c.pool_rank, role_rank(&c.pool_role), c.priority))
                         .or_default()
                         .push(*at);
                 }
@@ -432,12 +434,14 @@ fn order_by_quota(
                 })
                 .collect();
             candidates.sort_by_key(|c| {
+                let role = role_rank(&c.pool_role);
                 let at = resets
                     .get(&c.channel_key_id)
                     .copied()
-                    .or_else(|| medians.get(&(c.pool_rank, c.priority)).copied());
+                    .or_else(|| medians.get(&(c.pool_rank, role, c.priority)).copied());
                 (
                     c.pool_rank,
+                    role,
                     std::cmp::Reverse(c.priority),
                     at.unwrap_or(i64::MAX),
                 )

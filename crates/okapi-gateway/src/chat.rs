@@ -195,6 +195,8 @@ struct RequestBilling {
     /// 有序池链（主池 → 降级池）：候选查询与缓存键都吃它。
     pool_chain: Vec<String>,
     pool_strategy: Option<String>,
+    /// 本次请求解析后的渠道池生效策略（多跳降级链、护栏、灰度、容灾深度、粘性开关）。
+    effective_policy: Arc<okapi_domain::pool_policy::EffectivePoolPolicy>,
     /// 请求声明的 service_tier（预扣按此档估；结算只降不升，DESIGN §3-4.5）。
     service_tier: Option<String>,
     /// 模型是否配置了档位倍率（据此决定是否采集响应档位）。

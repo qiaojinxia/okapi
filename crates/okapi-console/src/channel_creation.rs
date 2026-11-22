@@ -69,8 +69,7 @@ pub async fn prepare(
         Some(members) => admin::normalize_members(state, members).await?,
         None => vec![okapi_store::admin::PoolMember {
             pool_code: okapi_store::channels::DEFAULT_POOL.into(),
-            priority_override: None,
-            weight_override: None,
+            ..Default::default()
         }],
     };
     let settings = options.settings.unwrap_or_else(|| json!({}));

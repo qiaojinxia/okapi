@@ -403,6 +403,8 @@ pub async fn list_pools(
             "description": r.description,
             "routing_strategy": r.routing_strategy,
             "fallback_pool_code": r.fallback_pool_code,
+            "policy": r.policy,
+            "policy_version": r.policy_version,
             "builtin": r.pool_code == okapi_store::channels::DEFAULT_POOL,
             "channel_count": r.channel_count,
             "group_count": r.group_count,

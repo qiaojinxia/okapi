@@ -240,13 +240,30 @@ pub async fn create_channel_configured(
         .bind(input.max_concurrency).fetch_one(&mut *tx).await?;
     let defaults = [crate::admin::PoolMember {
         pool_code: crate::channels::DEFAULT_POOL.into(),
-        priority_override: None,
-        weight_override: None,
+        ..crate::admin::PoolMember::default()
     }];
     for member in input.pools.unwrap_or(&defaults) {
-        sqlx::query("INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override) VALUES ($1,$2,$3,$4)")
-            .bind(&member.pool_code).bind(channel_id).bind(member.priority_override).bind(member.weight_override)
-            .execute(&mut *tx).await?;
+        let role = if member.role.is_empty() {
+            "primary"
+        } else {
+            member.role.as_str()
+        };
+        let tags = serde_json::to_value(&member.tags).unwrap_or_else(|_| serde_json::json!([]));
+        let filter = member
+            .model_filter
+            .as_ref()
+            .map(|f| serde_json::to_value(f).unwrap_or_else(|_| serde_json::json!([])));
+        sqlx::query("INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override,role,enabled,tags,model_filter) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(&member.pool_code)
+            .bind(channel_id)
+            .bind(member.priority_override)
+            .bind(member.weight_override)
+            .bind(role)
+            .bind(member.enabled)
+            .bind(tags)
+            .bind(filter)
+            .execute(&mut *tx)
+            .await?;
     }
     // 继承也要对账：全局默认若是固定分配组，新 key 当场分到代理
     crate::egress::bind_new_channel(

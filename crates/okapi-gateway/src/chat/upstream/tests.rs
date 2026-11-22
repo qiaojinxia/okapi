@@ -62,6 +62,7 @@ fn test_state() -> crate::state::AppState {
             channel_control_cache: moka::future::Cache::builder().max_capacity(4).build(),
             margin_cache: moka::future::Cache::builder().max_capacity(1).build(),
             request_policy: moka::future::Cache::builder().max_capacity(1).build(),
+            pool_policies: moka::future::Cache::builder().max_capacity(4).build(),
         },
         health: crate::state::HealthMarks {
             key_failures: moka::future::Cache::builder().max_capacity(4).build(),
@@ -132,6 +133,14 @@ fn test_billing(ingress: Ingress, model: &str) -> (RequestBilling, ProbeInfo) {
         client_headers: Arc::new(Vec::new()),
         pool_chain: vec!["default".to_owned()],
         pool_strategy: None,
+        effective_policy: Arc::new(
+            okapi_store::pool_policy::StoredPoolPolicy::fallback_default("default").resolve(
+                &okapi_domain::pool_policy::RequestFeatures {
+                    model,
+                    ..Default::default()
+                },
+            ),
+        ),
         service_tier: None,
         has_tier_pricing: false,
         fallback_models: Arc::new(Vec::new()),
@@ -197,6 +206,9 @@ fn candidate(provider: &str, upstream_model: Option<&str>) -> ChannelCandidate {
         same_key_retries: 1,
         first_output_timeout_secs: 30,
         pool_rank: 0,
+        pool_role: "primary".to_owned(),
+        pool_tags: Vec::new(),
+        pool_model_filter: None,
         count_in_flight: false,
         warm_affinity: false,
     }

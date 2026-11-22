@@ -38,6 +38,7 @@ pub mod gateway_pricing_rules;
 pub mod gateway_upstream_cost;
 pub mod list_pagination;
 pub mod ops_channel_pricing;
+pub mod pool_policy_center;
 pub mod portal_key_governance;
 pub mod portal_ownership;
 pub mod pricing_base;

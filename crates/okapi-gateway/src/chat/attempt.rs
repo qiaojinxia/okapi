@@ -36,10 +36,17 @@ pub(super) async fn try_model(
     // 次数用尽或请求不许改投：候选里可能还有好的，与「整个池都试过了」是两回事（见 `exhausted_reply`）
     let mut stopped_early = false;
 
+    let effective_max_attempts = bill
+        .effective_policy
+        .max_attempts
+        .map_or_else(max_attempts, usize::from);
     for mut cand in candidates {
-        if attempted >= max_attempts() {
+        if attempted >= effective_max_attempts {
             stopped_early = true;
             break;
+        }
+        if let Some(timeout_secs) = bill.effective_policy.first_output_timeout_secs {
+            cand.first_output_timeout_secs = timeout_secs;
         }
         // key 级 RPM / 当日消费闸：挡下的候选不算一次尝试
         if let Err(closed) = super::super::key_gate::check(&bill.state, &cand).await {
@@ -89,8 +96,11 @@ pub(super) async fn try_model(
             3
         };
 
-        // §3.6：连接/超时/5xx 允许同 key 先重试；次数按渠道配（缺省 1，空回复直接换渠道）
-        let same_key_retries = cand.same_key_retries;
+        // §3.6：连接/超时/5xx 允许同 key 先重试；次数按渠道配并与池策略上限取较小值
+        let same_key_retries = bill
+            .effective_policy
+            .max_same_channel_retries
+            .map_or(cand.same_key_retries, |cap| cand.same_key_retries.min(cap));
         let mut retry: i16 = 0;
         let oauth = super::super::oauth_cred::is_oauth_provider(&cand.provider);
         let mut refreshed_401 = false;
@@ -290,7 +300,11 @@ pub(super) async fn try_model(
             Ok(resp) => {
                 // 成功建立输出：刷新会话粘性映射；响应持有并发许可直到 EOF/drop。
                 // 账号测试是钉住的，不该改写管理员真实会话的粘性。
-                if let Some(session) = bill.session.as_ref().filter(|_| bill.pin.is_none()) {
+                if let Some(session) = bill
+                    .session
+                    .as_ref()
+                    .filter(|_| bill.pin.is_none() && bill.effective_policy.affinity_mode != "off")
+                {
                     bill.state
                         .sched
                         .sticky_set_for_model(

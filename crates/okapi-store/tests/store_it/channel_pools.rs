@@ -32,8 +32,7 @@ struct Env {
 fn member(pool: &str) -> PoolMember {
     PoolMember {
         pool_code: pool.to_owned(),
-        priority_override: None,
-        weight_override: None,
+        ..PoolMember::default()
     }
 }
 
@@ -330,6 +329,7 @@ async fn membership_override_reorders_per_pool() {
                 pool_code: p1.clone(),
                 priority_override: Some(50),
                 weight_override: Some(7),
+                ..PoolMember::default()
             },
             member(&p2),
         ],

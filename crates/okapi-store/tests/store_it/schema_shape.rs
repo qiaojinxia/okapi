@@ -11,7 +11,13 @@ use uuid::Uuid;
 const REQUIRED: &[(&str, &[&str])] = &[
     (
         "channel_pools",
-        &["pool_code", "routing_strategy", "fallback_pool_code"],
+        &[
+            "pool_code",
+            "routing_strategy",
+            "fallback_pool_code",
+            "policy",
+            "policy_version",
+        ],
     ),
     (
         "pool_channels",
@@ -20,6 +26,10 @@ const REQUIRED: &[(&str, &[&str])] = &[
             "channel_id",
             "priority_override",
             "weight_override",
+            "role",
+            "enabled",
+            "tags",
+            "model_filter",
         ],
     ),
     (
