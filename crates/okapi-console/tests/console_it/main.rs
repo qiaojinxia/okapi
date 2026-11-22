@@ -16,6 +16,7 @@ pub mod console_manage;
 pub mod console_mcp;
 pub mod console_mcp_write;
 pub mod console_model_catalog;
+pub mod console_monitor_metrics;
 pub mod console_oauth;
 pub mod console_oauth_presets;
 pub mod console_playground;

@@ -14,6 +14,7 @@ pub mod egress_traffic;
 )]
 pub mod host;
 pub mod logbuf;
+pub mod metrics_sync;
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 pub mod probes;
 pub mod sampler;

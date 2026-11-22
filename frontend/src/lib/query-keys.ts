@@ -131,6 +131,7 @@ export const qk = {
     ['admin', 'stats', 'channel-timeline', id, hours] as const,
   diagnose: ['admin', 'diagnose'] as const,
   monitorOverview: ['admin', 'monitor', 'overview'] as const,
+  monitorMetrics: ['admin', 'monitor', 'metrics'] as const,
   monitorHistory: (hours: number) => ['admin', 'monitor', 'history', hours] as const,
   monitorLogs: (level: string, term: string) => ['admin', 'monitor', 'logs', level, term] as const,
   dlq: (all: boolean) => ['admin', 'dlq', all] as const,

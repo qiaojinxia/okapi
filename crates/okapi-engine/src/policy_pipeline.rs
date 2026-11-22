@@ -331,6 +331,8 @@ pub async fn build_queue(
             .sched
             .channel_key_qualities(queue.iter().map(|c| c.channel_key_id))
             .await;
+        let pool_code = policy.pool_chain.first().map_or("default", String::as_str);
+        record_quality_events(pool_code, &queue, &qualities, &policy.quality);
         apply_quality_to_queue(
             &mut queue,
             &qualities,
@@ -340,6 +342,28 @@ pub async fn build_queue(
         );
     }
     (queue, canary_active)
+}
+
+fn record_quality_events<S: std::hash::BuildHasher>(
+    pool: &str,
+    queue: &CandidateQueue,
+    qualities: &HashMap<i64, KeyQualitySample, S>,
+    policy: &ResolvedQualityPolicy,
+) {
+    let has_survivor = queue.iter().any(|c| {
+        classify_quality(qualities.get(&c.channel_key_id).copied(), policy)
+            != QualityDecision::EjectedErrorRate
+    });
+    for c in queue.iter() {
+        let action = match classify_quality(qualities.get(&c.channel_key_id).copied(), policy) {
+            QualityDecision::Healthy => continue,
+            QualityDecision::DemotedLatency => "demote_latency",
+            QualityDecision::DemotedErrorRate => "demote_error_rate",
+            QualityDecision::EjectedErrorRate if has_survivor => "eject_error_rate",
+            QualityDecision::EjectedErrorRate => "failsafe_demote",
+        };
+        okapi_kernel::metrics::global().record_pool_quality_event(pool, action);
+    }
 }
 
 /// 策略 Dry-Run 模拟：复用与生产热路径完全一致的规则求值、灰度分桶、硬过滤、质量降级与分层选路，

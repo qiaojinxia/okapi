@@ -17,6 +17,13 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
+pub mod snapshot;
+
+pub use snapshot::{
+    ClusterMetricsResponse, HistogramData, HistogramSummary, NodeMetricsRates, NodeMetricsSnapshot,
+    aggregate_cluster_metrics,
+};
+
 pub const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 const HTTP_BUCKETS_US: &[u64] = &[
@@ -39,6 +46,7 @@ const MAX_HTTP_DUR_SERIES: usize = 256;
 const MAX_UPSTREAM_SERIES: usize = 256;
 const MAX_PROVIDER_SERIES: usize = 64;
 const MAX_MAINT_SERIES: usize = 128;
+const MAX_POOL_QUALITY_SERIES: usize = 128;
 
 /// 采集时刻从 `AppState` 实时读取的运行时水位快照（无后台轮询开销）。
 #[derive(Debug, Clone, Default)]
@@ -54,6 +62,7 @@ pub struct RuntimeSnapshot {
     pub cache_candidates: u64,
     pub cache_channel_cost: u64,
     pub cache_channel_control: u64,
+    pub cache_pool_policies: u64,
     pub cache_settings: u64,
 }
 
@@ -127,6 +136,20 @@ impl FixedHistogram {
         } else {
             let _ = writeln!(out, "{name}_sum{{{labels}}} {sum_text}");
             let _ = writeln!(out, "{name}_count{{{labels}}} {total}");
+        }
+    }
+
+    pub(crate) fn to_data(&self) -> HistogramData {
+        HistogramData {
+            bounds: self.bounds.to_vec(),
+            buckets: self
+                .buckets
+                .iter()
+                .map(|b| b.load(Ordering::Relaxed))
+                .collect(),
+            count: self.count.load(Ordering::Relaxed),
+            sum: self.sum.load(Ordering::Relaxed),
+            as_seconds: self.as_seconds,
         }
     }
 }
@@ -251,6 +274,9 @@ pub struct Metrics {
     settlement_batch_size: FixedHistogram,
     settlement_batch_duration: FixedHistogram,
     worker_maintenance_runs: BoundedCounterMap<(String, &'static str)>,
+    pool_quality_events: BoundedCounterMap<(String, &'static str)>,
+    cache_compactions: AtomicU64,
+    cache_compaction_saved_chars: AtomicU64,
 }
 
 impl Metrics {
@@ -291,6 +317,12 @@ impl Metrics {
                 MAX_MAINT_SERIES,
                 ("_other".into(), "other"),
             ),
+            pool_quality_events: BoundedCounterMap::new(
+                MAX_POOL_QUALITY_SERIES,
+                ("_other".into(), "other"),
+            ),
+            cache_compactions: AtomicU64::new(0),
+            cache_compaction_saved_chars: AtomicU64::new(0),
         }
     }
 
@@ -363,6 +395,19 @@ impl Metrics {
 
     pub fn record_worker_maintenance(&self, job: &str, outcome: &'static str) {
         self.worker_maintenance_runs.inc((job.to_owned(), outcome));
+    }
+
+    /// 调度池低质量自动降级 / 踢出事件计数（`action` 如 `demote_error_rate`、`demote_latency`、`eject_error_rate`、`failsafe_demote`）。
+    pub fn record_pool_quality_event(&self, pool: &str, action: &'static str) {
+        self.pool_quality_events.inc((pool.to_owned(), action));
+    }
+
+    /// 切渠 L0/L1 缓存压缩次数与节省字符数。
+    pub fn record_cache_compaction(&self, saved_chars: usize) {
+        self.cache_compactions.fetch_add(1, Ordering::Relaxed);
+        let chars = u64::try_from(saved_chars).unwrap_or(u64::MAX);
+        self.cache_compaction_saved_chars
+            .fetch_add(chars, Ordering::Relaxed);
     }
 
     /// 导出标准 Prometheus Text Exposition Format 0.0.4。
@@ -512,6 +557,37 @@ impl Metrics {
                 );
             }
         }
+
+        let quality_events = self.pool_quality_events.snapshot();
+        if !quality_events.is_empty() {
+            out.push_str("# HELP okapi_pool_quality_events_total Routing pool quality auto-demotion and ejection events.\n");
+            out.push_str("# TYPE okapi_pool_quality_events_total counter\n");
+            for ((pool, action), count) in quality_events {
+                let _ = writeln!(
+                    out,
+                    "okapi_pool_quality_events_total{{pool=\"{}\",action=\"{}\"}} {count}",
+                    esc(&pool),
+                    esc(action)
+                );
+            }
+        }
+
+        out.push_str(
+            "# HELP okapi_cache_compactions_total Failover L0/L1 cache compaction executions.\n",
+        );
+        out.push_str("# TYPE okapi_cache_compactions_total counter\n");
+        let _ = writeln!(
+            out,
+            "okapi_cache_compactions_total {}",
+            self.cache_compactions.load(Ordering::Relaxed)
+        );
+        out.push_str("# HELP okapi_cache_compaction_saved_chars_total Total prompt characters saved by L0/L1 cache compaction.\n");
+        out.push_str("# TYPE okapi_cache_compaction_saved_chars_total counter\n");
+        let _ = writeln!(
+            out,
+            "okapi_cache_compaction_saved_chars_total {}",
+            self.cache_compaction_saved_chars.load(Ordering::Relaxed)
+        );
     }
 
     fn render_runtime_snapshot(out: &mut String, snap: &RuntimeSnapshot) {
@@ -574,6 +650,7 @@ impl Metrics {
             ("candidates", snap.cache_candidates),
             ("channel_cost", snap.cache_channel_cost),
             ("channel_control", snap.cache_channel_control),
+            ("pool_policies", snap.cache_pool_policies),
             ("settings", snap.cache_settings),
         ] {
             let _ = writeln!(
@@ -776,6 +853,7 @@ mod tests {
             cache_candidates: 20,
             cache_channel_cost: 5,
             cache_channel_control: 4,
+            cache_pool_policies: 2,
             cache_settings: 15,
         });
         assert!(body.contains("okapi_http_requests_total{role=\"gateway\",method=\"POST\",route=\"/v1/chat/completions\",status_class=\"2xx\"} 1"));

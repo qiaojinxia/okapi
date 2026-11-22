@@ -81,6 +81,7 @@ fn maybe_compact_on_switch(
         &bill.effective_policy.compaction,
     );
     if report.applied {
+        okapi_kernel::metrics::global().record_cache_compaction(report.chars_saved);
         bill.trace.set(
             "cache_compaction",
             serde_json::json!({

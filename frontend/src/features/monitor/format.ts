@@ -59,3 +59,18 @@ export function usageTone(percent: number | null | undefined): StatTone {
 export function ratio(used: number | null | undefined, total: number | null | undefined): number | null {
   return used == null || !total ? null : (used / total) * 100
 }
+
+export function formatMs(ms: number | null | undefined, locale: string): string {
+  if (ms == null || !Number.isFinite(ms)) return '—'
+  if (ms >= 1000) {
+    return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(ms / 1000)} s`
+  }
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(ms)} ms`
+}
+
+export function errorRateTone(percent: number | null | undefined): StatTone {
+  if (percent == null) return 'default'
+  if (percent >= 5) return 'bad'
+  if (percent >= 1) return 'warn'
+  return 'good'
+}

@@ -234,6 +234,7 @@ async fn run_all(cfg: Config) -> anyhow::Result<()> {
         gateway::build_state_with_clients(gateway_pg, gw_max, redis.clone(), &cfg.node, ch, nats)
             .await?;
     gateway::spawn_state_sync(&gateway_state);
+    gateway_state.spawn_metrics_publisher("all");
 
     let console_state = gateway_state.with_isolated_pg(background_pg.clone(), bg_max);
     let worker_state = gateway_state.with_isolated_pg(background_pg, bg_max);

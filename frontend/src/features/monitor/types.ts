@@ -117,6 +117,128 @@ export interface Sample {
   redis_ops: number | null
   ch_mem: number | null
   ch_queries: number | null
+  gw_rps?: number | null
+  gw_5xx_rate?: number | null
+  gw_p95_ms?: number | null
+  ttft_p95_ms?: number | null
+  failovers_pm?: number | null
+  compactions_pm?: number | null
+  settle_backlog?: number | null
+}
+
+export interface HistogramSummary {
+  count: number
+  avg: number | null
+  p50: number | null
+  p95: number | null
+  p99: number | null
+}
+
+export interface CacheEntries {
+  models: number
+  candidates: number
+  channel_cost: number
+  channel_control: number
+  pool_policies: number
+  settings: number
+}
+
+export interface RuntimeMetrics {
+  pg_pool_size: number
+  pg_pool_idle: number
+  pg_pool_active: number
+  pricebook_epoch: number
+  settle_backlog: number
+  settle_in_flight: number
+  settle_shedding: boolean
+  caches: CacheEntries
+}
+
+export interface ClusterMetricsSummary {
+  gateway_rps: number
+  console_rps: number
+  gateway_in_flight: number
+  console_in_flight: number
+  gateway_requests_total: number
+  gateway_5xx_total: number
+  gateway_5xx_rate: number | null
+  auth_cache_hits: number
+  auth_cache_misses: number
+  auth_cache_hit_ratio: number | null
+  upstream_failovers: number
+  failovers_per_min: number
+  settle_backlog: number
+  settle_in_flight: number
+  settle_shedding: boolean
+  settle_batches_ok: number
+  settle_batches_fallback: number
+  settle_batch_size: HistogramSummary
+  settle_batch_duration_ms: HistogramSummary
+  cache_compactions: number
+  compactions_per_min: number
+  cache_compaction_saved_chars: number
+  pool_quality_events_total: number
+  routing_invalidations_local: number
+  routing_invalidations_broadcast: number
+  gateway_latency_ms: HistogramSummary
+  upstream_ttft_ms: HistogramSummary
+  recent_gw_p95_ms: number | null
+  recent_ttft_p95_ms: number | null
+}
+
+export interface ProviderMetricsRow {
+  provider: string
+  total: number
+  ok: number
+  errors: number
+  success_ratio: number | null
+  outcomes: Record<string, number>
+  ttft_ms: HistogramSummary
+}
+
+export interface HttpRouteMetricsRow {
+  role: string
+  route: string
+  total: number
+  s2xx: number
+  s4xx: number
+  s5xx: number
+  latency_ms: HistogramSummary
+}
+
+export interface PoolQualityEventRow {
+  pool: string
+  action: string
+  count: number
+}
+
+export interface WorkerJobRow {
+  job: string
+  total: number
+  outcomes: Record<string, number>
+}
+
+export interface NodeMetricsSummary {
+  node: string
+  role: string
+  ts: number
+  gateway_rps: number
+  console_rps: number
+  in_flight: number
+  runtime: RuntimeMetrics
+}
+
+export interface MetricsResp {
+  collected_at: string
+  source: 'shared' | 'local'
+  node_count: number
+  prometheus_path: string
+  summary: ClusterMetricsSummary
+  providers: ProviderMetricsRow[]
+  routes: HttpRouteMetricsRow[]
+  pool_quality_events: PoolQualityEventRow[]
+  worker_jobs: WorkerJobRow[]
+  nodes: NodeMetricsSummary[]
 }
 
 export interface LogEntry {

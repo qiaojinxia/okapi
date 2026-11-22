@@ -57,7 +57,14 @@ pub async fn run(probes: Probes, node: String, mut stop: tokio::sync::watch::Rec
 
 async fn collect(probes: &Probes, node: &str, rates: Rates) -> Value {
     let h = host::host();
-    let mid = Box::pin(probes.snapshot()).await;
+    let (mid, app_nodes) = tokio::join!(
+        Box::pin(probes.snapshot()),
+        super::metrics_sync::load_live_nodes(&probes.redis),
+    );
+    let app = app_nodes
+        .ok()
+        .filter(|nodes| !nodes.is_empty())
+        .map(|nodes| crate::metrics::aggregate_cluster_metrics(&nodes, "shared").summary);
     let pick = |section: &str, key: &str| mid[section].get(key).cloned().unwrap_or(Value::Null);
     json!({
         "t": chrono::Utc::now().timestamp(),
@@ -80,6 +87,13 @@ async fn collect(probes: &Probes, node: &str, rates: Rates) -> Value {
         "ch_bytes": pick("clickhouse", "database_bytes"),
         "ch_queries": pick("clickhouse", "queries"),
         "nats_bytes": mid["nats"]["jetstream"].get("storage_bytes").cloned().unwrap_or(Value::Null),
+        "gw_rps": app.as_ref().map(|s| s.gateway_rps),
+        "gw_5xx_rate": app.as_ref().and_then(|s| s.gateway_5xx_rate),
+        "gw_p95_ms": app.as_ref().and_then(|s| s.recent_gw_p95_ms.or(s.gateway_latency_ms.p95)),
+        "ttft_p95_ms": app.as_ref().and_then(|s| s.recent_ttft_p95_ms.or(s.upstream_ttft_ms.p95)),
+        "failovers_pm": app.as_ref().map(|s| s.failovers_per_min),
+        "compactions_pm": app.as_ref().map(|s| s.compactions_per_min),
+        "settle_backlog": app.as_ref().map(|s| s.settle_backlog),
     })
 }
 

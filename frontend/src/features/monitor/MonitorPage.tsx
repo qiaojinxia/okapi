@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { Cpu, Gauge, HardDrive, MemoryStick, Network, RotateCw, ScrollText, TrendingUp } from 'lucide-react'
+import { Activity, Cpu, Gauge, HardDrive, MemoryStick, Network, RotateCw, ScrollText, TrendingUp } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -18,10 +18,11 @@ import { chartColor } from '@/lib/chart'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
-import { byteScale, formatBytes, formatCount, formatPercent, formatRate, formatUptime, ratio, usageTone } from './format'
+import { byteScale, formatBytes, formatCount, formatMs, formatPercent, formatRate, formatUptime, ratio, usageTone } from './format'
+import { MetricsTab } from './MetricsTab'
 import type { LogsResp, Overview, Probe, Sample, TableSize } from './types'
 
-const TABS = ['overview', 'trends', 'logs'] as const
+const TABS = ['overview', 'metrics', 'trends', 'logs'] as const
 type MonitorTab = (typeof TABS)[number]
 const REFRESH = [0, 10, 30] as const
 
@@ -36,6 +37,7 @@ export function MonitorPage() {
 
   const items = [
     { id: 'overview', label: t('monitor:tabOverview'), icon: Gauge },
+    { id: 'metrics', label: t('monitor:tabMetrics'), icon: Activity },
     { id: 'trends', label: t('monitor:tabTrends'), icon: TrendingUp },
     { id: 'logs', label: t('monitor:tabLogs'), icon: ScrollText },
   ]
@@ -56,6 +58,7 @@ export function MonitorPage() {
       />
       <Tabs variant="underline" items={items} active={tab} onChange={(id) => setTab(id as MonitorTab)} />
       {tab === 'overview' && <OverviewTab interval={interval} />}
+      {tab === 'metrics' && <MetricsTab interval={interval} />}
       {tab === 'trends' && <TrendsTab interval={interval} />}
       {tab === 'logs' && <LogsTab interval={interval} />}
     </div>
@@ -310,19 +313,85 @@ function TrendsTab({ interval }: { interval: number | false }) {
       data: samples.map((s) => ({ ...point(s), redis: mem.scale(s.redis_mem), ch: mem.scale(s.ch_mem) })),
     },
   ]
+  const appCharts = [
+    {
+      title: t('monitor:chartGatewayTraffic'),
+      unit: 'req/s',
+      format: (v: number) => `${formatCount(v, locale)} req/s`,
+      secondaryAxis: { unit: '%', format: (v: number) => formatPercent(v, locale, 2) },
+      series: [
+        { key: 'rps', label: t('monitor:seriesGwRps'), color: chartColor(0) },
+        { key: 'err5xx', label: t('monitor:seriesGw5xx'), color: chartColor(3), axis: 'right' as const },
+      ],
+      data: samples.map((s) => ({ ...point(s), rps: s.gw_rps ?? null, err5xx: s.gw_5xx_rate ?? null })),
+    },
+    {
+      title: t('monitor:chartGatewayLatency'),
+      unit: 'ms',
+      format: (v: number) => formatMs(v, locale),
+      series: [
+        { key: 'gwP95', label: t('monitor:seriesGwP95'), color: chartColor(0) },
+        { key: 'ttftP95', label: t('monitor:seriesTtftP95'), color: chartColor(1) },
+      ],
+      data: samples.map((s) => ({ ...point(s), gwP95: s.gw_p95_ms ?? null, ttftP95: s.ttft_p95_ms ?? null })),
+    },
+    {
+      title: t('monitor:chartSchedulingEvents'),
+      unit: '/min',
+      format: (v: number) => `${formatCount(v, locale)} /min`,
+      series: [
+        { key: 'failovers', label: t('monitor:seriesFailoversPm'), color: chartColor(2) },
+        { key: 'compactions', label: t('monitor:seriesCompactionsPm'), color: chartColor(1) },
+      ],
+      data: samples.map((s) => ({ ...point(s), failovers: s.failovers_pm ?? null, compactions: s.compactions_pm ?? null })),
+    },
+    {
+      title: t('monitor:chartSettleBacklog'),
+      unit: t('monitor:unitItems'),
+      format: (v: number) => formatCount(v, locale),
+      series: [{ key: 'backlog', label: t('monitor:seriesSettleBacklog'), color: chartColor(0) }],
+      data: samples.map((s) => ({ ...point(s), backlog: s.settle_backlog ?? null })),
+    },
+  ]
+  const hasAppSamples = samples.some(
+    (s) =>
+      s.gw_rps != null ||
+      s.gw_p95_ms != null ||
+      s.ttft_p95_ms != null ||
+      s.failovers_pm != null ||
+      s.settle_backlog != null,
+  )
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       {header}
-      <div className="grid gap-3 xl:grid-cols-2">
-        {charts.map((c) => (
-          <Card key={c.title}>
-            <CardHeader><CardTitle className="text-base">{c.title}</CardTitle></CardHeader>
-            <CardContent>
-              <TimeChart compact line percent={c.percent} data={c.data} series={c.series} unit={c.unit} label={c.title} format={c.format} />
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      <section aria-labelledby="trend-infra" className="flex flex-col gap-3">
+        <h2 id="trend-infra" className="text-sm font-semibold">{t('monitor:trendSectionInfra')}</h2>
+        <div className="grid gap-3 xl:grid-cols-2">
+          {charts.map((c) => (
+            <Card key={c.title}>
+              <CardHeader><CardTitle className="text-base">{c.title}</CardTitle></CardHeader>
+              <CardContent>
+                <TimeChart compact line percent={c.percent} data={c.data} series={c.series} unit={c.unit} label={c.title} format={c.format} />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </section>
+      {hasAppSamples && (
+        <section aria-labelledby="trend-app" className="flex flex-col gap-3">
+          <h2 id="trend-app" className="text-sm font-semibold">{t('monitor:trendSectionApp')}</h2>
+          <div className="grid gap-3 xl:grid-cols-2">
+            {appCharts.map((c) => (
+              <Card key={c.title}>
+                <CardHeader><CardTitle className="text-base">{c.title}</CardTitle></CardHeader>
+                <CardContent>
+                  <TimeChart compact line secondaryAxis={c.secondaryAxis} data={c.data} series={c.series} unit={c.unit} label={c.title} format={c.format} />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   )
 }

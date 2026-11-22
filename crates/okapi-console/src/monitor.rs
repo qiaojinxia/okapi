@@ -5,10 +5,12 @@ use super::query::Query;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use axum::response::{IntoResponse as _, Response};
 use okapi_api::permissions;
 use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
-use okapi_kernel::ops::{host, logbuf, probes::Probes, sampler};
+use okapi_kernel::metrics::{self, ClusterMetricsResponse, NodeMetricsRates};
+use okapi_kernel::ops::{host, logbuf, metrics_sync, probes::Probes, sampler};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -43,6 +45,43 @@ pub async fn overview(
         dst.extend(src);
     }
     Ok(Json(body))
+}
+
+/// GET /admin/monitor/metrics：汇总各活跃节点上报的 Prometheus 指标（Redis 不可达或尚无心跳时降级读本进程）。
+pub async fn metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ClusterMetricsResponse>, AppError> {
+    super::admin::guard(&state, &headers, permissions::SETTINGS_READ).await?;
+    let (nodes, source) = match metrics_sync::load_live_nodes(state.sched.client()).await {
+        Ok(live) if !live.is_empty() => (live, "shared"),
+        _ => {
+            let local = metrics::global().snapshot(
+                &state.node,
+                &state.runtime_metrics_snapshot("console"),
+                NodeMetricsRates::default(),
+            );
+            (vec![local], "local")
+        }
+    };
+    Ok(Json(metrics::aggregate_cluster_metrics(&nodes, source)))
+}
+
+/// GET /admin/monitor/metrics/raw：以管理员会话鉴权返回当前进程的原始 Prometheus 文本（便于公网反代后查看与复制）。
+pub async fn metrics_raw(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    super::admin::guard(&state, &headers, permissions::SETTINGS_READ).await?;
+    let body = metrics::global().render_prometheus(&state.runtime_metrics_snapshot("console"));
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            metrics::PROMETHEUS_CONTENT_TYPE,
+        )],
+        body,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]

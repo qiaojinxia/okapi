@@ -160,6 +160,7 @@ where
     if spawn_sync {
         // Keep PriceBook, routing caches and SSRF/runtime settings fresh in standalone worker mode.
         okapi_engine::spawn_state_sync(&image_state);
+        image_state.spawn_metrics_publisher("worker");
     }
     let (image_stop, image_stopped) = tokio::sync::watch::channel(false);
     let native_batch_worker =

@@ -158,6 +158,7 @@ where
     }
     if spawn_sync {
         spawn_state_sync(&state);
+        state.spawn_metrics_publisher("gateway");
     }
 
     let settlements = state.settlements.clone();

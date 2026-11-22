@@ -39,7 +39,103 @@ const samples = Array.from({ length: 30 }, (_, i) => ({
   t: now - (29 - i) * 60, node: 'okapi-all-1', cpu: 20 + (i % 7) * 5, load1: 1, mem_used: 6 * GB, mem_total: 8 * GB,
   disk_used: 74 * GB, disk_total: 80 * GB, net_rx: 1_000_000 + i * 10_000, net_tx: 300_000, pg_conns: 40 + (i % 3),
   pg_active: 2, redis_mem: 380 * 1024 ** 2, redis_clients: 37, redis_ops: 800, ch_mem: 1.1 * GB, ch_queries: 1,
+  gw_rps: 14.2 + (i % 5), gw_5xx_rate: 0.4, gw_p95_ms: 185 + i * 2, ttft_p95_ms: 420 + i * 3,
+  failovers_pm: i % 3, compactions_pm: i % 2, settle_backlog: 4 + (i % 4),
 }))
+
+const metricsResp = {
+  collected_at: new Date().toISOString(),
+  source: 'shared',
+  node_count: 2,
+  prometheus_path: '/metrics',
+  summary: {
+    gateway_rps: 18.4,
+    console_rps: 1.2,
+    gateway_in_flight: 11,
+    console_in_flight: 2,
+    gateway_requests_total: 42_500,
+    gateway_5xx_total: 120,
+    gateway_5xx_rate: 0.28,
+    auth_cache_hits: 39_800,
+    auth_cache_misses: 2_700,
+    auth_cache_hit_ratio: 93.65,
+    upstream_failovers: 37,
+    failovers_per_min: 1.4,
+    settle_backlog: 6,
+    settle_in_flight: 2,
+    settle_shedding: false,
+    settle_batches_ok: 1_920,
+    settle_batches_fallback: 3,
+    settle_batch_size: { count: 1_923, avg: 12.4, p50: 10, p95: 32, p99: 48 },
+    settle_batch_duration_ms: { count: 1_923, avg: 9.2, p50: 7.5, p95: 22.4, p99: 45 },
+    cache_compactions: 19,
+    compactions_per_min: 0.6,
+    cache_compaction_saved_chars: 284_000,
+    pool_quality_events_total: 8,
+    routing_invalidations_local: 14,
+    routing_invalidations_broadcast: 22,
+    gateway_latency_ms: { count: 42_500, avg: 95.3, p50: 72.1, p95: 245.8, p99: 680.2 },
+    upstream_ttft_ms: { count: 38_000, avg: 312.5, p50: 260.0, p95: 620.4, p99: 1420.0 },
+    recent_gw_p95_ms: 210.5,
+    recent_ttft_p95_ms: 540.0,
+  },
+  providers: [
+    {
+      provider: 'anthropic',
+      total: 24_000,
+      ok: 23_760,
+      errors: 240,
+      success_ratio: 99.0,
+      outcomes: { ok: 23_760, http_429: 180, http_5xx: 60 },
+      ttft_ms: { count: 23_760, avg: 340, p50: 280, p95: 650, p99: 1480 },
+    },
+  ],
+  routes: [
+    {
+      role: 'gateway',
+      route: '/v1/chat/completions',
+      total: 35_000,
+      s2xx: 34_400,
+      s4xx: 500,
+      s5xx: 100,
+      latency_ms: { count: 35_000, avg: 102.4, p50: 78.2, p95: 256.0, p99: 710.5 },
+    },
+  ],
+  pool_quality_events: [
+    { pool: 'default', action: 'demote_error_rate', count: 6 },
+    { pool: 'default', action: 'eject_error_rate', count: 2 },
+  ],
+  worker_jobs: [
+    { job: 'reconcile', total: 120, outcomes: { ran: 118, skipped: 2 } },
+  ],
+  nodes: [
+    {
+      node: 'okapi-gw-1',
+      role: 'gateway',
+      ts: now,
+      gateway_rps: 18.4,
+      console_rps: 0,
+      in_flight: 11,
+      runtime: {
+        pg_pool_size: 16,
+        pg_pool_idle: 11,
+        pg_pool_active: 5,
+        pricebook_epoch: 19,
+        settle_backlog: 6,
+        settle_in_flight: 2,
+        settle_shedding: false,
+        caches: { models: 48, candidates: 92, channel_cost: 12, channel_control: 8, pool_policies: 5, settings: 24 },
+      },
+    },
+  ],
+}
+
+const rawPrometheusText = [
+  '# HELP okapi_http_in_flight Current in-flight HTTP requests.',
+  '# TYPE okapi_http_in_flight gauge',
+  'okapi_http_in_flight{role="gateway"} 11',
+  'okapi_cache_compactions_total 19',
+].join('\n')
 
 const logs = {
   source: 'shared', total: 2, errors: 1,
@@ -63,14 +159,18 @@ async function prepare(page: Page, seen: string[]) {
     if (!/^\/(api|admin|auth)\//.test(url.pathname)) return route.continue()
     expect(request.method(), `unmocked write: ${url.pathname}`).toBe('GET')
     seen.push(url.pathname + url.search)
+    if (url.pathname === '/admin/monitor/metrics/raw') {
+      return route.fulfill({ contentType: 'text/plain; version=0.0.4; charset=utf-8', body: rawPrometheusText })
+    }
     const json: Json = url.pathname === '/api/me'
       ? { user_id: 1, key_id: 1, group: 'default', balance_micro: 10_000_000, role: 100, permissions: ['*'] }
       : url.pathname === '/api/notice' ? { notice: null }
         : url.pathname === '/admin/monitor/overview' ? overview
-          : url.pathname === '/admin/monitor/history' ? { hours: 6, interval_secs: 60, data: samples }
-            : url.pathname === '/admin/monitor/logs' ? (url.searchParams.get('level') === 'error'
-              ? { ...logs, data: logs.data.filter((l) => l.level === 'ERROR') } : logs)
-              : { data: [] }
+          : url.pathname === '/admin/monitor/metrics' ? metricsResp
+            : url.pathname === '/admin/monitor/history' ? { hours: 6, interval_secs: 60, data: samples }
+              : url.pathname === '/admin/monitor/logs' ? (url.searchParams.get('level') === 'error'
+                ? { ...logs, data: logs.data.filter((l) => l.level === 'ERROR') } : logs)
+                : { data: [] }
     return route.fulfill({ json })
   })
   await page.goto('/admin/monitor')
@@ -105,12 +205,30 @@ test('运维监控：侧栏直达；概况显示服务器占用与状态文字�
   await shot(page, 'overview-dark')
 })
 
-test('运维监控：趋势四张图带表格视图；日志可切「仅错误」，带级别徽章与来源', async ({ page }) => {
+test('运维监控：运行时指标展示集群 Prometheus 汇总、调度降级与原文查看', async ({ page }) => {
+  const seen: string[] = []
+  await prepare(page, seen)
+  const main = page.locator('#main-content')
+  await page.getByRole('tab', { name: '运行时指标' }).click()
+  await expect(main.getByText('18.4 req/s')).toBeVisible()
+  await expect(main.getByText('93.7%')).toBeVisible()
+  await expect(main.getByText('anthropic')).toBeVisible()
+  await expect(main.getByText('/v1/chat/completions')).toBeVisible()
+  await expect(main.getByText('demote_error_rate')).toBeVisible()
+  await expect(main.getByText('okapi-gw-1')).toBeVisible()
+  await page.getByRole('button', { name: '查看 Prometheus 原文' }).click()
+  await expect(main.getByText('okapi_cache_compactions_total 19')).toBeVisible()
+  await shot(page, 'metrics')
+})
+
+test('运维监控：趋势含宿主机与网关指标图；日志可切「仅错误」，带级别徽章与来源', async ({ page }) => {
   const seen: string[] = []
   await prepare(page, seen)
   await page.getByRole('tab', { name: '趋势' }).click()
   await expect(page.getByRole('group', { name: '资源占用率' })).toBeVisible()
   await expect(page.getByRole('group', { name: '中间件内存' })).toBeVisible()
+  await expect(page.getByRole('group', { name: '网关吞吐与 5xx 率' })).toBeVisible()
+  await expect(page.getByRole('group', { name: '网关与上游延迟（P95）' })).toBeVisible()
   await shot(page, 'trends')
   await page.getByRole('button', { name: '24 小时' }).click()
   await expect.poll(() => seen.some((u) => u === '/admin/monitor/history?hours=24')).toBe(true)

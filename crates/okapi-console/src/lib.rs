@@ -113,6 +113,7 @@ where
     // 否则同一个后台在两个副本上会给出不一样的答案。定价与路由两条广播都要订。
     if spawn_sync {
         gateway::spawn_state_sync(&state);
+        state.spawn_metrics_publisher("console");
     }
     let settlements = state.settlements.clone();
     let app = router(state);
@@ -500,6 +501,8 @@ fn ops_routes() -> ConsoleRouter {
         .route("/admin/diagnose", get(stats::diagnose))
         // 运维监控（§11.43）：服务器压力、中间件占用、趋势、告警日志
         .route("/admin/monitor/overview", get(monitor::overview))
+        .route("/admin/monitor/metrics", get(monitor::metrics))
+        .route("/admin/monitor/metrics/raw", get(monitor::metrics_raw))
         .route("/admin/monitor/history", get(monitor::history))
         .route("/admin/monitor/logs", get(monitor::logs))
         .route("/admin/logs", get(logs::search))

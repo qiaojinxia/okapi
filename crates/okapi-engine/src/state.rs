@@ -580,8 +580,20 @@ impl AppState {
             cache_candidates: self.routing.cand_cache.entry_count(),
             cache_channel_cost: self.routing.channel_cost_cache.entry_count(),
             cache_channel_control: self.routing.channel_control_cache.entry_count(),
+            cache_pool_policies: self.routing.pool_policies.entry_count(),
             cache_settings: self.settings_cache.entry_count(),
         }
+    }
+
+    /// 启动本进程的运维指标 Redis 心跳（每 10 秒上报一次结构化快照，供多副本控制台聚合）。
+    pub fn spawn_metrics_publisher(&self, role: &'static str) {
+        let state = self.clone();
+        okapi_kernel::ops::metrics_sync::spawn_publisher(
+            self.sched.client().clone(),
+            (*self.node).to_owned(),
+            role,
+            move || state.runtime_metrics_snapshot(role),
+        );
     }
 
     /// 标准 Prometheus `/metrics` 处理器（gateway 与 console 共用）。
