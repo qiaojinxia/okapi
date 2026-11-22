@@ -6,6 +6,7 @@
 //! - `least_usage`：按 key 当日消费 ÷ 权重升序（`spend:ck:*`）。
 //! - `least_concurrency`：按 key 在途请求数 ÷ 权重升序（`conc:ck:*` 租约）。
 //! - `soonest_reset`：订阅账号先用额度窗口最快重置的（读额度观测，在 `account_control` 准入时排）。
+//! - `expiry_urgency`：多窗口（5h/7d）过期紧迫度综合清仓优先 + 长短任务匹配（在 `account_control` 准入时排）。
 //!
 //! 后两种读数相同（包括都为 0）时按 `priority_weighted` 的同一抽样随机排，空闲时与默认策略
 //! 一样按权重分流；没有读数的 key 按 0 处理——当日没花过钱、眼下没有在途，本来就该先用它。
@@ -28,6 +29,7 @@ pub enum Strategy {
     LeastUsage,
     LeastConcurrency,
     SoonestReset,
+    ExpiryUrgency,
 }
 
 impl Strategy {
@@ -38,6 +40,7 @@ impl Strategy {
             Some("least_usage") => Self::LeastUsage,
             Some("least_concurrency") => Self::LeastConcurrency,
             Some("soonest_reset") => Self::SoonestReset,
+            Some("expiry_urgency") => Self::ExpiryUrgency,
             _ => Self::PriorityWeighted,
         }
     }

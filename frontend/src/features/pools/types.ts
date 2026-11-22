@@ -4,10 +4,18 @@ export type MemberRole = (typeof MEMBER_ROLES)[number]
 export const AFFINITY_MODES = ['prefer_warm', 'strict', 'off'] as const
 export type AffinityMode = (typeof AFFINITY_MODES)[number]
 
+export interface UrgencyPolicy {
+  short_window_weight?: number | null
+  long_window_weight?: number | null
+  heavy_prompt_tokens?: number | null
+  heavy_min_headroom_pct?: number | null
+}
+
 export interface SelectionPolicy {
   mode?: string | null
   respect_priority_layers?: boolean | null
   ignore_cost_in_weight?: boolean | null
+  urgency?: UrgencyPolicy | null
 }
 
 export interface AffinityPolicy {
@@ -89,6 +97,8 @@ export interface SelectedCandidateSummary {
   weight: number
   cost_milli: number
   tags: string[]
+  urgency_score?: number
+  dominant_window?: string
 }
 
 export interface RejectedCandidate {
@@ -183,6 +193,7 @@ export const ROUTING_STRATEGIES = [
   'least_usage',
   'least_concurrency',
   'soonest_reset',
+  'expiry_urgency',
 ] as const
 
 export type RoutingStrategy = (typeof ROUTING_STRATEGIES)[number]
@@ -208,6 +219,7 @@ export const STRATEGY_LABEL = {
   least_usage: 'admin:strategyLeastUsage',
   least_concurrency: 'admin:strategyLeastConcurrency',
   soonest_reset: 'admin:strategySoonestReset',
+  expiry_urgency: 'admin:strategyExpiryUrgency',
 } as const
 
 export const STRATEGY_HINT = {
@@ -216,6 +228,7 @@ export const STRATEGY_HINT = {
   least_usage: 'admin:strategyLeastUsageHint',
   least_concurrency: 'admin:strategyLeastConcurrencyHint',
   soonest_reset: 'admin:strategySoonestResetHint',
+  expiry_urgency: 'admin:strategyExpiryUrgencyHint',
 } as const
 
 export const AFFINITY_LABEL = {
@@ -245,6 +258,23 @@ export function normalizePolicyForSubmit(raw: PoolPolicy): PoolPolicy {
   if (raw.selection?.mode) selection.mode = raw.selection.mode
   if (raw.selection?.respect_priority_layers === false) selection.respect_priority_layers = false
   if (raw.selection?.ignore_cost_in_weight === true) selection.ignore_cost_in_weight = true
+  const rawUrg = raw.selection?.urgency
+  if (rawUrg) {
+    const urg: UrgencyPolicy = {}
+    if (rawUrg.short_window_weight !== null && rawUrg.short_window_weight !== undefined) {
+      urg.short_window_weight = rawUrg.short_window_weight
+    }
+    if (rawUrg.long_window_weight !== null && rawUrg.long_window_weight !== undefined) {
+      urg.long_window_weight = rawUrg.long_window_weight
+    }
+    if (rawUrg.heavy_prompt_tokens !== null && rawUrg.heavy_prompt_tokens !== undefined) {
+      urg.heavy_prompt_tokens = rawUrg.heavy_prompt_tokens
+    }
+    if (rawUrg.heavy_min_headroom_pct !== null && rawUrg.heavy_min_headroom_pct !== undefined) {
+      urg.heavy_min_headroom_pct = rawUrg.heavy_min_headroom_pct
+    }
+    if (Object.keys(urg).length > 0) selection.urgency = urg
+  }
 
   const affinity: AffinityPolicy = {}
   if (raw.affinity?.mode && raw.affinity.mode !== 'prefer_warm') affinity.mode = raw.affinity.mode

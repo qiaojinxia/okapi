@@ -62,6 +62,12 @@ pub struct SelectedCandidateSummary {
     pub weight: i32,
     pub cost_milli: i64,
     pub tags: Vec<String>,
+    /// `expiry_urgency` 策略下，该候选当前实时多窗口紧迫度得分（无订阅观测时省略）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub urgency_score: Option<u64>,
+    /// 贡献最大紧迫度的主导窗口名（如 `seven_day`、`five_hour`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dominant_window: Option<String>,
 }
 
 /// 策略模拟（Dry-Run）与决策解释结果。
@@ -229,20 +235,46 @@ pub async fn simulate(
         ignore_cost_in_weight: effective_policy.ignore_cost_in_weight,
         canary_active,
     };
-    let queue = queue_with_options(state, filtered, strategy, opts).await;
+    let mut queue = queue_with_options(state, filtered, strategy, opts).await;
+    let mut urgency_scores = std::collections::HashMap::new();
+    if strategy == Strategy::ExpiryUrgency {
+        let now = chrono::Utc::now().timestamp();
+        let heavy = crate::account_control::urgency::is_heavy_request(
+            features.prompt_tokens,
+            &effective_policy.urgency,
+        );
+        let observations =
+            crate::account_control::quota::read_batch_with_burn(state, queue.iter()).await;
+        for (key_id, (snap, _)) in &observations {
+            if let Some(score) = crate::account_control::urgency::score_snapshot(
+                snap,
+                now,
+                &effective_policy.urgency,
+                heavy,
+            ) {
+                urgency_scores.insert(*key_id, score);
+            }
+        }
+        crate::account_control::order_by_urgency(&mut queue, &urgency_scores);
+    }
     let ordered_candidates = queue
         .iter()
-        .map(|c| SelectedCandidateSummary {
-            channel_id: c.channel_id,
-            channel_key_id: c.channel_key_id,
-            channel_name: c.channel_name.clone(),
-            provider: c.provider.clone(),
-            pool_rank: c.pool_rank,
-            pool_role: c.pool_role.clone(),
-            priority: c.priority,
-            weight: c.weight,
-            cost_milli: c.cost_milli,
-            tags: c.pool_tags.clone(),
+        .map(|c| {
+            let urg = urgency_scores.get(&c.channel_key_id);
+            SelectedCandidateSummary {
+                channel_id: c.channel_id,
+                channel_key_id: c.channel_key_id,
+                channel_name: c.channel_name.clone(),
+                provider: c.provider.clone(),
+                pool_rank: c.pool_rank,
+                pool_role: c.pool_role.clone(),
+                priority: c.priority,
+                weight: c.weight,
+                cost_milli: c.cost_milli,
+                tags: c.pool_tags.clone(),
+                urgency_score: urg.map(|u| u.score),
+                dominant_window: urg.map(|u| u.dominant_window.clone()),
+            }
         })
         .collect();
     Ok(DecisionTrace {

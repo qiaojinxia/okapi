@@ -151,7 +151,11 @@ pub(super) async fn eligible_candidates(
         }
     }
     // 负毛利熔断（§11.34）：该分组打这条渠道在亏钱，摘掉让同池其它渠道承接
-    let quota_order = super::super::account_control::QuotaOrder::of(strategy);
+    let quota_order = super::super::account_control::QuotaOrder::for_policy(
+        strategy,
+        &bill.effective_policy,
+        bill.est_prompt,
+    );
     // L2 会话粘性映射：额度准入要先知道缓存还热不热（热会话可以用到保留线，冷请求按整段 prompt
     // 估增量），所以读取放在准入之前；把它提到候选首位仍在准入之后——被额度挡下的账号，
     // 亲和不越过准入。

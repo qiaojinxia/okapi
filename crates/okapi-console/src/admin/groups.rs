@@ -150,13 +150,7 @@ pub(super) async fn ensure_pool_exists(state: &AppState, pool_code: &str) -> Res
 }
 
 /// 渠道池取值：与库 CHECK 一致，前端下拉也用这份清单。
-pub(super) const ROUTING_STRATEGIES: &[&str] = &[
-    "priority_weighted",
-    "least_latency",
-    "least_usage",
-    "least_concurrency",
-    "soonest_reset",
-];
+pub(super) const ROUTING_STRATEGIES: &[&str] = okapi_domain::pool_policy::VALID_STRATEGIES;
 
 #[derive(Deserialize)]
 pub struct UpsertPoolReq {

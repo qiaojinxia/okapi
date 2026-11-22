@@ -726,3 +726,190 @@ async fn pool_policy_live_gateway_routing_context_split_and_max_attempts() {
         "max_attempts=1 不应改投到第二个候选"
     );
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn pool_expiry_urgency_strategy_crud_validation_and_dry_run_scoring() {
+    use fred::interfaces::KeysInterface as _;
+    use sha2::{Digest, Sha256};
+
+    let bed = setup().await;
+    let pool_code = format!("pu-{}", &bed.suffix[..6]);
+    let model = format!("claude-urg-{}", bed.suffix);
+
+    // 1. 参数越界校验（long_window_weight > 20000 应 400）
+    let (st, err) = admin_call(
+        &bed,
+        "POST",
+        "/admin/pools",
+        Some(json!({
+            "pool_code": pool_code,
+            "routing_strategy": "expiry_urgency",
+            "policy": {
+                "selection": {
+                    "urgency": { "long_window_weight": 99999 }
+                }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, 400, "invalid urgency weight must fail: {err}");
+
+    // 2. 合法创建 expiry_urgency 策略池
+    let (st, created) = admin_call(
+        &bed,
+        "POST",
+        "/admin/pools",
+        Some(json!({
+            "pool_code": pool_code,
+            "description": "subscription multi-window urgency pool",
+            "routing_strategy": "expiry_urgency",
+            "policy": {
+                "selection": {
+                    "urgency": {
+                        "short_window_weight": 1000,
+                        "long_window_weight": 3500,
+                        "heavy_prompt_tokens": 32000,
+                        "heavy_min_headroom_pct": 20
+                    }
+                }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st, 200, "create expiry_urgency pool: {created}");
+
+    let now = chrono::Utc::now().timestamp();
+    // 创建两条同优先级 anthropic_max 订阅渠道并种入 Redis 额度观测
+    let cred_a = json!({
+        "kind": "oauth",
+        "access_token": "tok-a",
+        "refresh_token": "ref-a",
+        "expires_at": now + 7200,
+        "account_id": "acct-a"
+    })
+    .to_string();
+    let cred_b = json!({
+        "kind": "oauth",
+        "access_token": "tok-b",
+        "refresh_token": "ref-b",
+        "expires_at": now + 7200,
+        "account_id": "acct-b"
+    })
+    .to_string();
+
+    let (st, ch_a) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("urg-a-{}", bed.suffix),
+            "provider": "anthropic_max",
+            "api_base": "https://api.anthropic.com",
+            "credential": cred_a,
+            "models": [model],
+            "pools": [{ "pool_code": pool_code, "priority_override": 10 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200, "ch_a: {ch_a}");
+    let five_hour_ch_id = ch_a["channel_id"].as_i64().unwrap();
+    let five_hour_key_id = ch_a["channel_key_id"].as_i64().unwrap();
+
+    let (st, ch_b) = admin_call(
+        &bed,
+        "POST",
+        "/admin/channels",
+        Some(json!({
+            "name": format!("urg-b-{}", bed.suffix),
+            "provider": "anthropic_max",
+            "api_base": "https://api.anthropic.com",
+            "credential": cred_b,
+            "models": [model],
+            "pools": [{ "pool_code": pool_code, "priority_override": 10 }]
+        })),
+    )
+    .await;
+    assert_eq!(st, 200, "ch_b: {ch_b}");
+    let weekly_ch_id = ch_b["channel_id"].as_i64().unwrap();
+    let weekly_key_id = ch_b["channel_key_id"].as_i64().unwrap();
+
+    let identity_of =
+        |acct: &str| hex::encode(Sha256::digest(format!("anthropic_max:{acct}").as_bytes()));
+
+    // A：5h 剩 25m 但只剩 10% 余量（低余量，低于大任务 20% 门槛）；7d 刚刷新还剩 6 天
+    let obs_five_hour = json!({
+        "identity": identity_of("acct-a"),
+        "snapshot": {
+            "observed_at": now,
+            "allowed": true,
+            "windows": [
+                { "name": "five_hour", "used_percent": 90, "resets_at": now + 1500, "window_secs": 18000 },
+                { "name": "seven_day", "used_percent": 5, "resets_at": now + 6 * 86400, "window_secs": 7 * 86400 }
+            ]
+        }
+    });
+    // B：5h 剩 2h（余量 80%）；7d 还剩 8h 且剩 60% 没用完 -> 临期大块周额度，应优先清仓！
+    let obs_weekly = json!({
+        "identity": identity_of("acct-b"),
+        "snapshot": {
+            "observed_at": now,
+            "allowed": true,
+            "windows": [
+                { "name": "five_hour", "used_percent": 20, "resets_at": now + 7200, "window_secs": 18000 },
+                { "name": "seven_day", "used_percent": 40, "resets_at": now + 8 * 3600, "window_secs": 7 * 86400 }
+            ]
+        }
+    });
+    let _: () = bed
+        .state
+        .sched
+        .client()
+        .set(
+            format!("quota:ck:{five_hour_key_id}"),
+            obs_five_hour.to_string(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let _: () = bed
+        .state
+        .sched
+        .client()
+        .set(
+            format!("quota:ck:{weekly_key_id}"),
+            obs_weekly.to_string(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    // 3. Dry-Run 模拟：B（临期大块周额度）必须排在 A 前面，并带出 urgency_score 与 dominant_window = seven_day
+    let (st, sim) = admin_call(
+        &bed,
+        "POST",
+        &format!("/admin/pools/{pool_code}/simulate"),
+        Some(json!({
+            "model": model,
+            "prompt_tokens": 2000
+        })),
+    )
+    .await;
+    assert_eq!(st, 200, "simulate urgency: {sim}");
+    let ordered = sim["saved"]["ordered_candidates"].as_array().unwrap();
+    assert_eq!(ordered.len(), 2);
+    assert_eq!(
+        ordered[0]["channel_id"], weekly_ch_id,
+        "临期大块周额度 B 应排首位: {sim}"
+    );
+    assert_eq!(ordered[0]["dominant_window"], "seven_day");
+    assert!(
+        ordered[0]["urgency_score"].as_u64().unwrap()
+            > ordered[1]["urgency_score"].as_u64().unwrap()
+    );
+    assert_eq!(ordered[1]["channel_id"], five_hour_ch_id);
+}

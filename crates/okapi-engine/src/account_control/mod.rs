@@ -2,6 +2,7 @@
 pub mod forecast;
 pub mod policy;
 pub mod quota;
+pub mod urgency;
 
 use super::{
     diagnostics,
@@ -135,17 +136,43 @@ pub enum QuotaOrder {
     Keep,
     /// `soonest_reset` 池：层内按最近一次窗口重置升序，先用快要重置的额度。
     SoonestReset,
+    /// `expiry_urgency` 池：多窗口（5h + 7d）过期紧迫度清仓优先 + 长短任务匹配。
+    ExpiryUrgency {
+        urgency: okapi_domain::pool_policy::ResolvedUrgencyPolicy,
+        heavy_request: bool,
+    },
 }
 
 impl QuotaOrder {
     /// 池策略对应的额度排序。
-    pub const fn of(strategy: Strategy) -> Self {
+    #[must_use]
+    pub fn of(strategy: Strategy) -> Self {
         match strategy {
             Strategy::PriorityWeighted => Self::HeadroomTiers,
             Strategy::SoonestReset => Self::SoonestReset,
+            Strategy::ExpiryUrgency => Self::ExpiryUrgency {
+                urgency: okapi_domain::pool_policy::ResolvedUrgencyPolicy::default(),
+                heavy_request: false,
+            },
             Strategy::LeastLatency | Strategy::LeastUsage | Strategy::LeastConcurrency => {
                 Self::Keep
             }
+        }
+    }
+
+    /// 结合渠道池生效策略与当前请求输入 Token 数构造额度排序模式。
+    #[must_use]
+    pub fn for_policy(
+        strategy: Strategy,
+        policy: &okapi_domain::pool_policy::EffectivePoolPolicy,
+        prompt_tokens: u32,
+    ) -> Self {
+        match strategy {
+            Strategy::ExpiryUrgency => Self::ExpiryUrgency {
+                urgency: policy.urgency,
+                heavy_request: urgency::is_heavy_request(prompt_tokens, &policy.urgency),
+            },
+            other => Self::of(other),
         }
     }
 }
@@ -300,6 +327,7 @@ pub async fn retain_available(
     let mut available = std::collections::HashSet::with_capacity(candidates.len());
     let mut headroom = std::collections::HashMap::new();
     let mut resets = std::collections::HashMap::new();
+    let mut urgencies = std::collections::HashMap::new();
     for candidate in candidates.iter() {
         let Some(policy) = policies.get(&candidate.channel_id) else {
             continue;
@@ -352,6 +380,14 @@ pub async fn retain_available(
             if let Some(at) = quota.next_reset(now) {
                 resets.insert(candidate.channel_key_id, at);
             }
+            if let QuotaOrder::ExpiryUrgency {
+                urgency: cfg,
+                heavy_request,
+            } = order
+                && let Some(score) = urgency::score_snapshot(quota, now, &cfg, heavy_request)
+            {
+                urgencies.insert(candidate.channel_key_id, score);
+            }
         }
         if let Some(shape) = shape.filter(|_| policy.quota_forecast != ForecastMode::Off)
             && let Some(assessment) = forecast::assess(
@@ -391,21 +427,71 @@ pub async fn retain_available(
     {
         trace.set("excluded", serde_json::Value::Array(excluded));
     }
-    order_by_quota(candidates, &headroom, &resets, order);
+    order_by_quota(candidates, &headroom, &resets, &urgencies, order);
     earliest_reset
 }
 
+/// 按多窗口紧迫度分数对候选做层内排序（`retain_available` 与 Dry-Run 模拟共用，保证排序口径一致）。
+pub fn order_by_urgency<S: std::hash::BuildHasher>(
+    candidates: &mut impl CandidateSet,
+    urgencies: &std::collections::HashMap<i64, urgency::UrgencyScore, S>,
+) {
+    use super::scheduler::role_rank;
+    let mut layers: std::collections::HashMap<(i32, u8, i32), Vec<u64>> =
+        std::collections::HashMap::new();
+    for c in candidates.iter() {
+        if let Some(u) = urgencies.get(&c.channel_key_id) {
+            layers
+                .entry((c.pool_rank, role_rank(&c.pool_role), c.priority))
+                .or_default()
+                .push(u.score);
+        }
+    }
+    let medians: std::collections::HashMap<_, _> = layers
+        .into_iter()
+        .map(|(layer, mut values)| {
+            values.sort_unstable();
+            let lo = values[(values.len() - 1) / 2];
+            let hi = values[values.len() / 2];
+            (layer, lo.saturating_add(hi) / 2)
+        })
+        .collect();
+    candidates.sort_by_key(|c| {
+        let role = role_rank(&c.pool_role);
+        let (heavy_safe, score, observed) = urgencies.get(&c.channel_key_id).map_or_else(
+            || {
+                let med = medians
+                    .get(&(c.pool_rank, role, c.priority))
+                    .copied()
+                    .unwrap_or(0);
+                (true, med, false)
+            },
+            |u| (u.heavy_safe, u.score, true),
+        );
+        (
+            c.pool_rank,
+            role,
+            std::cmp::Reverse(c.priority),
+            std::cmp::Reverse(heavy_safe),
+            std::cmp::Reverse(score),
+            std::cmp::Reverse(observed),
+        )
+    });
+}
+
 /// 层内按额度观测调整先后。稳定排序：键相同的候选保持池策略排好的先后
-/// （加权随机 / 时延 / 用量 / 并发）；层（池序、priority）本身从不被推翻。
+/// （加权随机 / 时延 / 用量 / 并发）；层（池序、角色层级、priority）本身从不被推翻。
 fn order_by_quota(
     candidates: &mut impl CandidateSet,
     headroom: &std::collections::HashMap<i64, u8>,
     resets: &std::collections::HashMap<i64, i64>,
+    urgencies: &std::collections::HashMap<i64, urgency::UrgencyScore>,
     order: QuotaOrder,
 ) {
     use super::scheduler::role_rank;
     match order {
         QuotaOrder::Keep => {}
+        QuotaOrder::ExpiryUrgency { .. } => order_by_urgency(candidates, urgencies),
         QuotaOrder::HeadroomTiers => candidates.sort_by_key(|c| {
             (
                 c.pool_rank,
@@ -606,11 +692,18 @@ mod tests {
         ];
         let headroom = std::collections::HashMap::from([(9, 5_u8), (1, 55), (2, 90), (3, 10)]);
         let resets = std::collections::HashMap::new();
+        let empty_urg = std::collections::HashMap::new();
         let mut tiered = original.clone();
-        order_by_quota(&mut tiered, &headroom, &resets, QuotaOrder::HeadroomTiers);
+        order_by_quota(
+            &mut tiered,
+            &headroom,
+            &resets,
+            &empty_urg,
+            QuotaOrder::HeadroomTiers,
+        );
         assert_eq!(keys(&tiered), vec![9, 1, 2, 4, 3]);
         let mut kept = original.clone();
-        order_by_quota(&mut kept, &headroom, &resets, QuotaOrder::Keep);
+        order_by_quota(&mut kept, &headroom, &resets, &empty_urg, QuotaOrder::Keep);
         assert_eq!(keys(&kept), keys(&original));
     }
 
@@ -631,8 +724,67 @@ mod tests {
             &mut candidates,
             &std::collections::HashMap::new(),
             &resets,
+            &std::collections::HashMap::new(),
             QuotaOrder::SoonestReset,
         );
         assert_eq!(keys(&candidates), vec![9, 2, 1, 3, 4]);
+    }
+
+    /// expiry_urgency：层内按 (heavy_safe DESC, urgency_score DESC) 排，未知账号按中位数，
+    /// 优先级与角色层（primary < backup）绝不被推翻。
+    #[test]
+    fn expiry_urgency_respects_heavy_safety_median_and_role_layers() {
+        use crate::scheduler::tests::cand_with_key;
+        let mut backup = cand_with_key(10, 100);
+        backup.pool_role = "backup".to_owned();
+        let mut candidates = vec![
+            backup,
+            cand_with_key(1, 0), // 低分
+            cand_with_key(2, 0), // 高分但 heavy_safe = false
+            cand_with_key(3, 0), // 未观测 -> 吃中位数 (500)
+            cand_with_key(4, 0), // 高分且 heavy_safe = true
+        ];
+        let urgencies = std::collections::HashMap::from([
+            (
+                10,
+                urgency::UrgencyScore {
+                    heavy_safe: true,
+                    score: 99_999,
+                    dominant_window: "seven_day".into(),
+                    min_headroom_pct: 90,
+                },
+            ),
+            (
+                1,
+                urgency::UrgencyScore {
+                    heavy_safe: true,
+                    score: 100,
+                    dominant_window: "five_hour".into(),
+                    min_headroom_pct: 80,
+                },
+            ),
+            (
+                2,
+                urgency::UrgencyScore {
+                    heavy_safe: false,
+                    score: 5_000,
+                    dominant_window: "five_hour".into(),
+                    min_headroom_pct: 8,
+                },
+            ),
+            (
+                4,
+                urgency::UrgencyScore {
+                    heavy_safe: true,
+                    score: 2_000,
+                    dominant_window: "seven_day".into(),
+                    min_headroom_pct: 60,
+                },
+            ),
+        ]);
+        order_by_urgency(&mut candidates, &urgencies);
+        // primary 层内：4 (safe, 2000) -> 3 (unobserved -> safe, median 2000) -> 1 (safe, 100) -> 2 (unsafe, 5000)
+        // 最后是 backup(10)
+        assert_eq!(keys(&candidates), vec![4, 3, 1, 2, 10]);
     }
 }

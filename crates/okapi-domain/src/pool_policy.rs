@@ -16,6 +16,7 @@ pub const VALID_STRATEGIES: &[&str] = &[
     "least_usage",
     "least_concurrency",
     "soonest_reset",
+    "expiry_urgency",
 ];
 
 pub const VALID_AFFINITY_MODES: &[&str] = &["prefer_warm", "strict", "off"];
@@ -54,6 +55,76 @@ pub struct PoolPolicy {
     pub rules: Vec<RoutingRule>,
 }
 
+/// 多窗口过期紧迫度调度参数（供 `expiry_urgency` 策略综合 5h 短窗口与 7d 周窗口清仓优先）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UrgencyPolicy {
+    /// 短窗口（<=24h，如 5h 窗口）紧迫度权重（千分比，0..=10000；缺省 1000）。
+    #[serde(default)]
+    pub short_window_weight: Option<u16>,
+    /// 长窗口（>24h，如 7d 周窗口）紧迫度权重（千分比，0..=20000；缺省 3500）。
+    /// 周窗口额度总量通常是短窗口的数倍，临期清仓价值更高，缺省权重更高。
+    #[serde(default)]
+    pub long_window_weight: Option<u16>,
+    /// 判定“大上下文冷请求”的输入 Token 阈值（缺省 32000；0 = 禁用长短任务分档）。
+    #[serde(default)]
+    pub heavy_prompt_tokens: Option<u32>,
+    /// 大上下文冷请求的最低瓶颈余量门槛（%，0..=90；缺省 20）。
+    /// 任意活跃窗口余量低于此门槛的临期账号会留给短请求刮净尾量，避免大请求写完缓存就撞上限。
+    #[serde(default)]
+    pub heavy_min_headroom_pct: Option<u8>,
+}
+
+/// 已解析的多窗口紧迫度参数快照（全整数、零浮点）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ResolvedUrgencyPolicy {
+    pub short_window_weight: u16,
+    pub long_window_weight: u16,
+    pub heavy_prompt_tokens: u32,
+    pub heavy_min_headroom_pct: u8,
+}
+
+impl Default for ResolvedUrgencyPolicy {
+    fn default() -> Self {
+        Self {
+            short_window_weight: 1_000,
+            long_window_weight: 3_500,
+            heavy_prompt_tokens: 32_000,
+            heavy_min_headroom_pct: 20,
+        }
+    }
+}
+
+impl UrgencyPolicy {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.short_window_weight.is_some_and(|w| w > 10_000) {
+            return Err("policy.selection.urgency.short_window_weight");
+        }
+        if self.long_window_weight.is_some_and(|w| w > 20_000) {
+            return Err("policy.selection.urgency.long_window_weight");
+        }
+        if self.heavy_min_headroom_pct.is_some_and(|p| p > 90) {
+            return Err("policy.selection.urgency.heavy_min_headroom_pct");
+        }
+        Ok(())
+    }
+
+    pub fn apply_to(&self, dst: &mut ResolvedUrgencyPolicy) {
+        if let Some(w) = self.short_window_weight {
+            dst.short_window_weight = w;
+        }
+        if let Some(w) = self.long_window_weight {
+            dst.long_window_weight = w;
+        }
+        if let Some(t) = self.heavy_prompt_tokens {
+            dst.heavy_prompt_tokens = t;
+        }
+        if let Some(p) = self.heavy_min_headroom_pct {
+            dst.heavy_min_headroom_pct = p;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectionPolicy {
@@ -66,6 +137,9 @@ pub struct SelectionPolicy {
     /// 加权抽样时是否忽略 `cost_milli` 除数（VIP 质量池可设 true）。
     #[serde(default)]
     pub ignore_cost_in_weight: Option<bool>,
+    /// 多窗口过期紧迫度参数（`expiry_urgency` 策略生效）。
+    #[serde(default)]
+    pub urgency: Option<UrgencyPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +240,7 @@ pub struct EffectivePoolPolicy {
     pub strategy: String,
     pub respect_priority_layers: bool,
     pub ignore_cost_in_weight: bool,
+    pub urgency: ResolvedUrgencyPolicy,
     pub affinity_mode: String,
     pub affinity_ttl_secs: Option<i64>,
     pub max_attempts: Option<u8>,
@@ -215,6 +290,9 @@ impl SelectionPolicy {
             && !VALID_STRATEGIES.contains(&mode.as_str())
         {
             return Err("policy.selection.mode");
+        }
+        if let Some(urgency) = &self.urgency {
+            urgency.validate()?;
         }
         Ok(())
     }
@@ -431,6 +509,11 @@ impl PoolPolicy {
             pool_chain.push(fb.to_owned());
         }
 
+        let mut urgency = ResolvedUrgencyPolicy::default();
+        if let Some(u) = &self.selection.urgency {
+            u.apply_to(&mut urgency);
+        }
+
         let mut eff = EffectivePoolPolicy {
             primary_pool: primary_pool.to_owned(),
             pool_chain,
@@ -441,6 +524,7 @@ impl PoolPolicy {
                 .unwrap_or_else(|| column_strategy.to_owned()),
             respect_priority_layers: self.selection.respect_priority_layers.unwrap_or(true),
             ignore_cost_in_weight: self.selection.ignore_cost_in_weight.unwrap_or(false),
+            urgency,
             affinity_mode: self
                 .affinity
                 .mode
@@ -469,6 +553,9 @@ impl PoolPolicy {
                 }
                 if let Some(v) = sel.ignore_cost_in_weight {
                     eff.ignore_cost_in_weight = v;
+                }
+                if let Some(u) = &sel.urgency {
+                    u.apply_to(&mut eff.urgency);
                 }
             }
             if let Some(aff) = &rule.apply.affinity {

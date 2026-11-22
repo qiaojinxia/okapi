@@ -102,6 +102,14 @@ function TraceView({ title, trace }: { title: string; trace: DecisionTrace }) {
                     rank {c.pool_rank}
                   </Badge>
                 )}
+                {c.urgency_score !== undefined && (
+                  <Badge variant="default" className="font-mono text-[10px]">
+                    {t('admin:poolSimUrgencyBadge', {
+                      score: c.urgency_score,
+                      window: c.dominant_window ?? '—',
+                    })}
+                  </Badge>
+                )}
                 <span className="ml-auto font-mono text-[11px] text-muted-foreground">
                   P{c.priority} · W{c.weight} · {c.cost_milli}‰
                 </span>

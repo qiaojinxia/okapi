@@ -104,6 +104,102 @@ export function PoolPolicyEditor({
         />
       </FieldGroup>
 
+      <FieldGroup title={t('admin:poolUrgencyGroup')} hint={t('admin:poolUrgencyHint')}>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="policy-urg-short">{t('admin:poolUrgencyShortWeight')}</Label>
+            <Input
+              id="policy-urg-short"
+              type="number"
+              min={0}
+              max={10000}
+              placeholder="1000"
+              value={policy.selection?.urgency?.short_window_weight ?? ''}
+              onChange={(e) =>
+                onChange({
+                  ...policy,
+                  selection: {
+                    ...policy.selection,
+                    urgency: {
+                      ...policy.selection?.urgency,
+                      short_window_weight: parseOptInt(e.target.value),
+                    },
+                  },
+                })
+              }
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="policy-urg-long">{t('admin:poolUrgencyLongWeight')}</Label>
+            <Input
+              id="policy-urg-long"
+              type="number"
+              min={0}
+              max={20000}
+              placeholder="3500"
+              value={policy.selection?.urgency?.long_window_weight ?? ''}
+              onChange={(e) =>
+                onChange({
+                  ...policy,
+                  selection: {
+                    ...policy.selection,
+                    urgency: {
+                      ...policy.selection?.urgency,
+                      long_window_weight: parseOptInt(e.target.value),
+                    },
+                  },
+                })
+              }
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="policy-urg-heavy-tokens">{t('admin:poolUrgencyHeavyTokens')}</Label>
+            <Input
+              id="policy-urg-heavy-tokens"
+              type="number"
+              min={0}
+              placeholder="32000"
+              value={policy.selection?.urgency?.heavy_prompt_tokens ?? ''}
+              onChange={(e) =>
+                onChange({
+                  ...policy,
+                  selection: {
+                    ...policy.selection,
+                    urgency: {
+                      ...policy.selection?.urgency,
+                      heavy_prompt_tokens: parseOptInt(e.target.value),
+                    },
+                  },
+                })
+              }
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="policy-urg-heavy-min">{t('admin:poolUrgencyHeavyMinHeadroom')}</Label>
+            <Input
+              id="policy-urg-heavy-min"
+              type="number"
+              min={0}
+              max={90}
+              placeholder="20"
+              value={policy.selection?.urgency?.heavy_min_headroom_pct ?? ''}
+              onChange={(e) =>
+                onChange({
+                  ...policy,
+                  selection: {
+                    ...policy.selection,
+                    urgency: {
+                      ...policy.selection?.urgency,
+                      heavy_min_headroom_pct: parseOptInt(e.target.value),
+                    },
+                  },
+                })
+              }
+            />
+          </div>
+        </div>
+      </FieldGroup>
+
       <FieldGroup title={t('admin:poolAffinityFailoverGroup')} hint={t('admin:poolAffinityFailoverHint')}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">

@@ -81,7 +81,7 @@ pub async fn queue_with_options(
 ) -> CandidateQueue {
     let keys = || raw.iter().map(|c| c.channel_key_id);
     match strategy {
-        Strategy::PriorityWeighted | Strategy::SoonestReset => {
+        Strategy::PriorityWeighted | Strategy::SoonestReset | Strategy::ExpiryUrgency => {
             CandidateQueue::weighted_with(raw, opts)
         }
         Strategy::LeastLatency => {
@@ -137,7 +137,7 @@ async fn media_inner(
         .retain_margin_ok_ordered(
             &key.group_code,
             &mut candidates,
-            QuotaOrder::of(strategy),
+            QuotaOrder::for_policy(strategy, &effective, 0),
             None,
         )
         .await
