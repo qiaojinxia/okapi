@@ -227,6 +227,7 @@ pub(super) async fn settle_commit(
     super::super::auth::record_settlement_counters(
         &bill.state,
         bill.user_id,
+        bill.key_id,
         bill.member_user_id,
         quote.amount.as_micros(),
         usage.total_raw(),

@@ -37,6 +37,7 @@ pub mod gateway_key_admission;
 pub mod gateway_pricing_rules;
 pub mod gateway_upstream_cost;
 pub mod list_pagination;
+pub mod portal_key_governance;
 pub mod portal_ownership;
 pub mod pricing_base;
 pub mod pricing_publication;

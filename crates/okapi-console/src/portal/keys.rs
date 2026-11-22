@@ -4,7 +4,8 @@ use super::{ch_i64, ensure_selectable, key_trends};
 use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use okapi_api::codes;
 use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
@@ -12,6 +13,7 @@ use okapi_kernel::extract::Json as ExtractJson;
 use okapi_kernel::extract::Path;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// GET /api/me/keys：本用户的 key 及累计分账（合作商查员工用量）；`limit/offset` 可选切片，
 /// 默认每页 20 条并返回总数。
@@ -90,6 +92,8 @@ pub async fn keys(
                 "used_micro": r.used_micro,
                 "quota_mode": quotas.get(&r.id).map_or(0, |q| q.0),
                 "quota_micro": quotas.get(&r.id).and_then(|q| q.1),
+                "daily_quota_micro": quotas.get(&r.id).and_then(|q| q.2),
+                "monthly_quota_micro": quotas.get(&r.id).and_then(|q| q.3),
                 "rpm_limit": r.rpm_limit,
                 "tpm_limit": r.tpm_limit,
                 "rpd_limit": r.rpd_limit,
@@ -112,13 +116,25 @@ pub async fn keys(
     ))
 }
 
+#[derive(sqlx::FromRow)]
+struct KeyQuotaRow {
+    id: i64,
+    quota_mode: i16,
+    quota_micro: Option<i64>,
+    daily_quota_micro: Option<i64>,
+    monthly_quota_micro: Option<i64>,
+}
+
+type KeyQuotaTuple = (i16, Option<i64>, Option<i64>, Option<i64>);
+
 pub(super) async fn key_quotas(
     pg: &sqlx::PgPool,
     user_id: i64,
     ids: &[i64],
-) -> Result<std::collections::BTreeMap<i64, (i16, Option<i64>)>, AppError> {
-    let rows: Vec<(i64, i16, Option<i64>)> = sqlx::query_as(
-        "SELECT id, quota_mode, quota_micro FROM api_keys WHERE user_id=$1 AND id=ANY($2)",
+) -> Result<std::collections::BTreeMap<i64, KeyQuotaTuple>, AppError> {
+    let rows: Vec<KeyQuotaRow> = sqlx::query_as(
+        "SELECT id, quota_mode, quota_micro, daily_quota_micro, monthly_quota_micro \
+         FROM api_keys WHERE user_id=$1 AND id=ANY($2)",
     )
     .bind(user_id)
     .bind(ids)
@@ -127,7 +143,17 @@ pub(super) async fn key_quotas(
     .map_err(okapi_store::StoreError::from)?;
     Ok(rows
         .into_iter()
-        .map(|(id, mode, quota)| (id, (mode, quota)))
+        .map(|r| {
+            (
+                r.id,
+                (
+                    r.quota_mode,
+                    r.quota_micro,
+                    r.daily_quota_micro,
+                    r.monthly_quota_micro,
+                ),
+            )
+        })
         .collect())
 }
 
@@ -157,6 +183,12 @@ pub(super) async fn key_aggregate_usage(
 pub struct PatchKeyReq {
     #[serde(default, deserialize_with = "super::super::double_option")]
     pub quota_micro: Option<Option<i64>>,
+    /// 每日消费上限（micro-USD，UTC 自然日；null = 解除）。
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub daily_quota_micro: Option<Option<i64>>,
+    /// 每月消费上限（micro-USD，UTC 自然月；null = 解除）。
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub monthly_quota_micro: Option<Option<i64>>,
     #[serde(default)]
     pub name: Option<String>,
     /// 1=启用 2=停用。
@@ -174,6 +206,17 @@ pub struct PatchKeyReq {
     /// 一条拼错的白名单会把 key 锁死而毫无提示。
     #[serde(default, deserialize_with = "super::super::double_option")]
     pub ip_allowlist: Option<Option<Vec<String>>>,
+    /// 自助收紧速率 / 并发 / 日 Token 上限：目标 key 若已有上限则只允许收紧（<= 当前值），不得放宽或清空。
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub rpm_limit: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub tpm_limit: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub rpd_limit: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub daily_token_limit: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub max_concurrency: Option<Option<i32>>,
 }
 
 /// IP 白名单归一化：去空白、去重、逐条校验；空数组等价于"不限"（存 null）。
@@ -246,20 +289,141 @@ pub(crate) async fn resolve_allowlist(
     Ok((!out.is_empty()).then(|| json!(out)))
 }
 
+pub(crate) fn validate_budget_cap(field: &str, value: Option<i64>) -> Result<(), AppError> {
+    if value.is_some_and(|v| !(1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&v)) {
+        return Err(AppError::bad_request().with_param(field.to_owned()));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_rate_caps(
+    rpm: Option<i32>,
+    tpm: Option<i32>,
+    rpd: Option<i32>,
+    daily_token: Option<i64>,
+    max_concurrency: Option<i32>,
+) -> Result<(), AppError> {
+    for (field, val) in [
+        ("rpm_limit", rpm.map(i64::from)),
+        ("tpm_limit", tpm.map(i64::from)),
+        ("rpd_limit", rpd.map(i64::from)),
+        ("daily_token_limit", daily_token),
+        ("max_concurrency", max_concurrency.map(i64::from)),
+    ] {
+        if val.is_some_and(|v| v <= 0) {
+            return Err(AppError::bad_request().with_param(field));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_key_limits(
     quota: Option<i64>,
     expires: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), AppError> {
-    if quota.is_some_and(|v| !(1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&v)) {
-        return Err(AppError::bad_request().with_param("quota_micro"));
-    }
+    validate_budget_cap("quota_micro", quota)?;
     if expires.is_some_and(|v| v <= chrono::Utc::now()) {
         return Err(AppError::bad_request().with_param("expires_at"));
     }
     Ok(())
 }
 
-/// PATCH /api/me/keys/{id}：改自己 key 的名称/启停/过期/模型白名单。
+#[derive(sqlx::FromRow)]
+struct RateCapsRow {
+    rpm_limit: Option<i32>,
+    tpm_limit: Option<i32>,
+    rpd_limit: Option<i32>,
+    daily_token_limit: Option<i64>,
+    max_concurrency: Option<i32>,
+}
+
+impl PatchKeyReq {
+    fn changes_access(&self) -> bool {
+        self.quota_micro.is_some()
+            || self.daily_quota_micro.is_some()
+            || self.monthly_quota_micro.is_some()
+            || self.expires_at.is_some()
+            || self.model_allowlist.is_some()
+            || self.group_code.is_some()
+            || self.ip_allowlist.is_some()
+            || self.rpm_limit.is_some()
+            || self.tpm_limit.is_some()
+            || self.rpd_limit.is_some()
+            || self.daily_token_limit.is_some()
+            || self.max_concurrency.is_some()
+    }
+}
+
+/// 自助收紧速率/并发/日 Token 上限：目标 key 若已有非空上限，自助面只允许收紧（`<= current`），
+/// 禁止提高或清空，防止绕过管理员配置的流控上限。
+async fn ensure_rate_tighten_only(
+    pg: &sqlx::PgPool,
+    user_id: i64,
+    key_id: i64,
+    req: &PatchKeyReq,
+) -> Result<(), AppError> {
+    let touches_rate = req.rpm_limit.is_some()
+        || req.tpm_limit.is_some()
+        || req.rpd_limit.is_some()
+        || req.daily_token_limit.is_some()
+        || req.max_concurrency.is_some();
+    if !touches_rate {
+        return Ok(());
+    }
+    let Some(cur) = sqlx::query_as::<_, RateCapsRow>(
+        "SELECT rpm_limit, tpm_limit, rpd_limit, daily_token_limit, max_concurrency \
+         FROM api_keys WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(key_id)
+    .bind(user_id)
+    .fetch_optional(pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?
+    else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    let check =
+        |field: &str, current: Option<i64>, next: Option<Option<i64>>| -> Result<(), AppError> {
+            let Some(next) = next else { return Ok(()) };
+            if let Some(limit) = current
+                && next.is_none_or(|v| v > limit)
+            {
+                return Err(
+                    AppError::new(StatusCode::FORBIDDEN, "key_limit_tighten_only")
+                        .with_param(field.to_owned()),
+                );
+            }
+            Ok(())
+        };
+    check(
+        "rpm_limit",
+        cur.rpm_limit.map(i64::from),
+        req.rpm_limit.map(|v| v.map(i64::from)),
+    )?;
+    check(
+        "tpm_limit",
+        cur.tpm_limit.map(i64::from),
+        req.tpm_limit.map(|v| v.map(i64::from)),
+    )?;
+    check(
+        "rpd_limit",
+        cur.rpd_limit.map(i64::from),
+        req.rpd_limit.map(|v| v.map(i64::from)),
+    )?;
+    check(
+        "daily_token_limit",
+        cur.daily_token_limit,
+        req.daily_token_limit,
+    )?;
+    check(
+        "max_concurrency",
+        cur.max_concurrency.map(i64::from),
+        req.max_concurrency.map(|v| v.map(i64::from)),
+    )?;
+    Ok(())
+}
+
+/// PATCH /api/me/keys/{id}：改自己 key 的名称/启停/过期/白名单/周期预算与收紧型限速。
 pub async fn patch_key(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -276,13 +440,17 @@ pub async fn patch_key(
         ));
     }
     validate_key_limits(req.quota_micro.flatten(), req.expires_at.flatten())?;
+    validate_budget_cap("daily_quota_micro", req.daily_quota_micro.flatten())?;
+    validate_budget_cap("monthly_quota_micro", req.monthly_quota_micro.flatten())?;
+    validate_rate_caps(
+        req.rpm_limit.flatten(),
+        req.tpm_limit.flatten(),
+        req.rpd_limit.flatten(),
+        req.daily_token_limit.flatten(),
+        req.max_concurrency.flatten(),
+    )?;
     // A delegated/restricted credential must not lift restrictions or mutate other owner keys.
-    let changes_access = req.quota_micro.is_some()
-        || req.expires_at.is_some()
-        || req.model_allowlist.is_some()
-        || req.group_code.is_some()
-        || req.ip_allowlist.is_some();
-    if (changes_access || id != key.key_id)
+    if (req.changes_access() || id != key.key_id)
         && key.is_restricted()
         && super::super::auth_web::require_session(&state, &headers)
             .await
@@ -306,6 +474,7 @@ pub async fn patch_key(
             codes::CURRENT_KEY_IN_USE,
         ));
     }
+    ensure_rate_tighten_only(&state.pg, key.user_id, id, &req).await?;
     let group_override = match req.group_code {
         Some(Some(code)) => {
             let code = code.trim().to_owned();
@@ -325,6 +494,8 @@ pub async fn patch_key(
     };
     let patch = okapi_store::admin::ApiKeyPatch {
         quota_micro: req.quota_micro,
+        daily_quota_micro: req.daily_quota_micro,
+        monthly_quota_micro: req.monthly_quota_micro,
         name: req
             .name
             .as_deref()
@@ -338,6 +509,11 @@ pub async fn patch_key(
         model_allowlist,
         group_override,
         ip_allowlist,
+        rpm_limit: req.rpm_limit,
+        tpm_limit: req.tpm_limit,
+        rpd_limit: req.rpd_limit,
+        daily_token_limit: req.daily_token_limit,
+        max_concurrency: req.max_concurrency,
         ..Default::default()
     };
     let touched =
@@ -348,6 +524,82 @@ pub async fn patch_key(
     // 先落库后失效：并发回源读到的必是新值
     state.sched.auth_del(&touched.key_hash).await;
     Ok(Json(json!({ "ok": true, "key_id": id })))
+}
+
+/// POST /api/me/keys/{id}/rotate：一键原子轮换密钥（保留全部原配置/限额/白名单，旧明文立废）。
+/// 需要主账户 Web Session（签发新明文密钥，安全等级与 POST /auth/keys 一致）。
+pub async fn rotate_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    if key.member_user_id.is_some() {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            codes::PERMISSION_DENIED,
+        ));
+    }
+    let session_uid = super::super::auth_web::require_session(&state, &headers).await?;
+    if session_uid != key.user_id {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "key_limits_session_required",
+        ));
+    }
+    let token = format!("sk-okapi-{}", super::super::auth_web::rand_token(43));
+    let new_hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let new_prefix: String = token.chars().take(16).collect();
+    let ciphertext = state
+        .master_key
+        .as_deref()
+        .map(|master| okapi_store::api_key_secret::seal(master, key.user_id, &new_hash, &token))
+        .transpose()?;
+    let old_hash: Option<String> = sqlx::query_scalar(
+        r"WITH prev AS (
+              SELECT id, key_hash FROM api_keys
+              WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND session_hash IS NULL
+          )
+          UPDATE api_keys k
+          SET key_hash = $3, key_prefix = $4, key_ciphertext = $5
+          FROM prev
+          WHERE k.id = prev.id
+          RETURNING prev.key_hash",
+    )
+    .bind(id)
+    .bind(key.user_id)
+    .bind(&new_hash)
+    .bind(&new_prefix)
+    .bind(&ciphertext)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let Some(old_hash) = old_hash else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    state.sched.auth_del(&old_hash).await;
+    if let Err(error) = okapi_store::admin::record_audit(
+        &state.pg,
+        &format!("user:{}", key.user_id),
+        "apikey.rotate",
+        &id.to_string(),
+        json!({ "key_prefix": new_prefix }),
+    )
+    .await
+    {
+        tracing::error!(%error, "apikey rotate audit write failed");
+    }
+    let mut response = Json(json!({
+        "key_id": id,
+        "api_key": token,
+        "key_prefix": new_prefix,
+        "copy_available": ciphertext.is_some(),
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store, private".parse().unwrap());
+    Ok(response)
 }
 
 /// DELETE /api/me/keys/{id}：吊销自己的 key（软删除，明文 key 立即失效）。

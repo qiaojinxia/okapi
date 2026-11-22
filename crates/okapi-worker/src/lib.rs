@@ -27,6 +27,7 @@ pub mod oauth_refresh;
 mod reconcile;
 mod reservations;
 mod supervision;
+pub mod user_alerts;
 
 pub use self::housekeeping::{
     ExpiredBalance, drop_expired_partitions, ensure_next_month_partitions, expire_balances,

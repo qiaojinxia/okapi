@@ -226,6 +226,7 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
                 super::auth::record_settlement_counters(
                     state,
                     input.user_id,
+                    input.api_key_id,
                     member,
                     input.amount.as_micros(),
                     input.usage.total_raw(),

@@ -233,6 +233,12 @@ pub struct CreateKeyReq {
     /// Lifetime USD budget in micro-USD; absent/null = unlimited.
     #[serde(default)]
     pub quota_micro: Option<i64>,
+    /// Daily USD budget in micro-USD (UTC day); absent/null = unlimited.
+    #[serde(default)]
+    pub daily_quota_micro: Option<i64>,
+    /// Monthly USD budget in micro-USD (UTC month); absent/null = unlimited.
+    #[serde(default)]
+    pub monthly_quota_micro: Option<i64>,
     #[serde(default)]
     pub name: Option<String>,
     /// 过期时间（RFC 3339）；缺省 = 永不过期。
@@ -247,6 +253,17 @@ pub struct CreateKeyReq {
     /// IP 白名单（地址 / CIDR；只约束数据面调用）；缺省 = 不限。
     #[serde(default)]
     pub ip_allowlist: Option<Vec<String>>,
+    /// 自助收紧速率 / 并发 / 日 Token 上限（新建子 key 仅收窄权限，无提权面）。
+    #[serde(default)]
+    pub rpm_limit: Option<i32>,
+    #[serde(default)]
+    pub tpm_limit: Option<i32>,
+    #[serde(default)]
+    pub rpd_limit: Option<i32>,
+    #[serde(default)]
+    pub daily_token_limit: Option<i64>,
+    #[serde(default)]
+    pub max_concurrency: Option<i32>,
 }
 
 pub async fn create_key(
@@ -256,6 +273,15 @@ pub async fn create_key(
 ) -> Result<Response, AppError> {
     let user_id = require_session(&state, &headers).await?;
     super::super::portal::validate_key_limits(req.quota_micro, req.expires_at)?;
+    super::super::portal::validate_budget_cap("daily_quota_micro", req.daily_quota_micro)?;
+    super::super::portal::validate_budget_cap("monthly_quota_micro", req.monthly_quota_micro)?;
+    super::super::portal::validate_rate_caps(
+        req.rpm_limit,
+        req.tpm_limit,
+        req.rpd_limit,
+        req.daily_token_limit,
+        req.max_concurrency,
+    )?;
     let token = format!("sk-okapi-{}", rand_token(43));
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
     let name = match req.name.as_deref() {
@@ -279,8 +305,16 @@ pub async fn create_key(
         .map(|master| okapi_store::api_key_secret::seal(master, user_id, &key_hash, &token))
         .transpose()?;
     let key_id = sqlx::query_scalar::<_, i64>(
-        r"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override, ip_allowlist, key_ciphertext, quota_mode, quota_micro)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10::bigint IS NULL THEN 0 ELSE 1 END, $10) RETURNING id",
+        r"INSERT INTO api_keys (
+              user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override,
+              ip_allowlist, key_ciphertext, quota_mode, quota_micro, daily_quota_micro,
+              monthly_quota_micro, rpm_limit, tpm_limit, rpd_limit, daily_token_limit, max_concurrency
+          )
+          VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9,
+              CASE WHEN $10::bigint IS NULL THEN 0 ELSE 1 END,
+              $10, $11, $12, $13, $14, $15, $16, $17
+          ) RETURNING id",
     )
     .bind(user_id)
     .bind(key_hash)
@@ -292,6 +326,13 @@ pub async fn create_key(
     .bind(ip_allowlist)
     .bind(&ciphertext)
     .bind(req.quota_micro)
+    .bind(req.daily_quota_micro)
+    .bind(req.monthly_quota_micro)
+    .bind(req.rpm_limit)
+    .bind(req.tpm_limit)
+    .bind(req.rpd_limit)
+    .bind(req.daily_token_limit)
+    .bind(req.max_concurrency)
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;

@@ -360,6 +360,7 @@ async fn settle(
         super::auth::record_settlement_counters(
             state,
             key.user_id,
+            key.key_id,
             key.member_user_id,
             amount.as_micros(),
             0,

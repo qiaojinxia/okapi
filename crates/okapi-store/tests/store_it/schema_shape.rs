@@ -34,7 +34,13 @@ const REQUIRED: &[(&str, &[&str])] = &[
     ),
     (
         "api_keys",
-        &["pool_override", "member_user_id", "group_override"],
+        &[
+            "pool_override",
+            "member_user_id",
+            "group_override",
+            "daily_quota_micro",
+            "monthly_quota_micro",
+        ],
     ),
     (
         "users",
@@ -93,6 +99,17 @@ const REQUIRED: &[(&str, &[&str])] = &[
     (
         "channel_usage_buckets",
         &["requests", "tokens", "cost_micro", "unknown_cost_requests"],
+    ),
+    // 用户级告警偏好（0010）：低余额阈值、密钥即将到期提醒与个人通知通道
+    (
+        "user_alert_prefs",
+        &[
+            "user_id",
+            "low_balance_threshold_micro",
+            "key_expiry_warn_days",
+            "email_enabled",
+            "webhook_url",
+        ],
     ),
 ];
 

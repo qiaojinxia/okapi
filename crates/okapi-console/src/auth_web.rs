@@ -95,7 +95,7 @@ pub async fn critical_rate_guard(
     Ok(())
 }
 
-fn rand_token(len: usize) -> String {
+pub(crate) fn rand_token(len: usize) -> String {
     rand::rng()
         .sample_iter(&Alphanumeric)
         .take(len)

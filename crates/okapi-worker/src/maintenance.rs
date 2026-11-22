@@ -419,6 +419,9 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
             if let Err(err) = notify::balance_low_and_notify(pg, notifier).await {
                 tracing::error!(error = %err, "余额低扫描失败");
             }
+            if let Err(err) = crate::user_alerts::evaluate_and_notify(pg, &ctx.redis).await {
+                tracing::error!(error = %err, "用户级告警评估失败");
+            }
         }
         MaintenanceJob::manual_queues => {
             match notify::manual_queues_and_notify(pg, &ctx.redis, notifier).await {

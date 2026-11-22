@@ -204,6 +204,10 @@ pub async fn assign_user_role(
 pub struct ApiKeyPatch {
     /// Lifetime spending cap. None = unchanged; Some(None) = unlimited.
     pub quota_micro: Option<Option<i64>>,
+    /// Key daily spending cap (micro-USD, UTC day). None = unchanged; Some(None) = unlimited.
+    pub daily_quota_micro: Option<Option<i64>>,
+    /// Key monthly spending cap (micro-USD, UTC month). None = unchanged; Some(None) = unlimited.
+    pub monthly_quota_micro: Option<Option<i64>>,
     pub name: Option<String>,
     /// 1=启用 2=停用（3=expired 由过期时间派生，不接受直接写）。
     pub status: Option<i16>,
@@ -237,12 +241,14 @@ pub async fn patch_api_key(
     owner: Option<i64>,
     patch: &ApiKeyPatch,
 ) -> Result<Option<TouchedApiKey>, StoreError> {
-    if patch
-        .quota_micro
-        .flatten()
-        .is_some_and(|v| !(1..=9_007_199_254_740_991).contains(&v))
-    {
-        return Err(StoreError::InvalidData("quota_micro"));
+    for (field, value) in [
+        ("quota_micro", patch.quota_micro.flatten()),
+        ("daily_quota_micro", patch.daily_quota_micro.flatten()),
+        ("monthly_quota_micro", patch.monthly_quota_micro.flatten()),
+    ] {
+        if value.is_some_and(|v| !(1..=9_007_199_254_740_991).contains(&v)) {
+            return Err(StoreError::InvalidData(field));
+        }
     }
     let row = sqlx::query_as::<_, TouchedApiKey>(
         r"
@@ -260,7 +266,9 @@ pub async fn patch_api_key(
             ip_allowlist      = CASE WHEN $21::bool THEN $22::jsonb ELSE ip_allowlist END,
             quota_mode        = CASE WHEN $23::bool THEN CASE WHEN $24::bigint IS NULL THEN 0 ELSE 1 END ELSE quota_mode END,
             quota_micro       = CASE WHEN $23::bool THEN $24::bigint ELSE quota_micro END,
-            pool_override     = CASE WHEN $25::bool THEN $26::varchar ELSE pool_override END
+            pool_override     = CASE WHEN $25::bool THEN $26::varchar ELSE pool_override END,
+            daily_quota_micro = CASE WHEN $27::bool THEN $28::bigint ELSE daily_quota_micro END,
+            monthly_quota_micro = CASE WHEN $29::bool THEN $30::bigint ELSE monthly_quota_micro END
         WHERE id = $1 AND deleted_at IS NULL
           AND ($2::bigint IS NULL OR user_id = $2)
         RETURNING key_hash, user_id
@@ -292,6 +300,10 @@ pub async fn patch_api_key(
     .bind(patch.quota_micro.flatten())
     .bind(patch.pool_override.is_some())
     .bind(patch.pool_override.as_ref().and_then(Option::as_deref))
+    .bind(patch.daily_quota_micro.is_some())
+    .bind(patch.daily_quota_micro.flatten())
+    .bind(patch.monthly_quota_micro.is_some())
+    .bind(patch.monthly_quota_micro.flatten())
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| TouchedApiKey {

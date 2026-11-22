@@ -291,6 +291,7 @@ async fn handle(
                         super::auth::record_settlement_counters(
                             state,
                             key.user_id,
+                            key.key_id,
                             key.member_user_id,
                             quote.amount.as_micros(),
                             usage.total_raw(),

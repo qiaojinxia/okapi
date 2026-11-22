@@ -502,6 +502,10 @@ fn portal_routes() -> ConsoleRouter {
     Router::new()
         .route("/api/me", get(portal::me))
         .route("/api/me/profile", get(profile::get).patch(profile::update))
+        .route(
+            "/api/me/alerts",
+            get(portal::get_alerts).put(portal::put_alerts),
+        )
         .route("/api/me/usage", get(portal::usage))
         .route("/api/me/stats/daily", get(stats::my_daily))
         .route("/api/me/stats/tools", get(server_tools::mine))
@@ -522,6 +526,7 @@ fn portal_routes() -> ConsoleRouter {
             "/api/me/keys/{id}",
             axum::routing::patch(portal::patch_key).delete(portal::delete_key),
         )
+        .route("/api/me/keys/{id}/rotate", post(portal::rotate_key))
         .route("/api/me/logs", get(portal::logs))
         .route("/api/me/logs/stat", get(portal::logs_stat))
         .route("/api/me/logs/series", get(portal::logs_series))

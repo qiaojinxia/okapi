@@ -17,6 +17,12 @@ use serde_json::{Value, json};
 pub struct AdminPatchKeyReq {
     #[serde(default, deserialize_with = "super::super::double_option")]
     pub quota_micro: Option<Option<i64>>,
+    /// key 级每日消费上限（micro-USD，UTC 自然日；null = 不限）。
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub daily_quota_micro: Option<Option<i64>>,
+    /// key 级每月消费上限（micro-USD，UTC 自然月；null = 不限）。
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub monthly_quota_micro: Option<Option<i64>>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -74,6 +80,14 @@ pub async fn patch_api_key(
     ensure_positive("rpd_limit", req.rpd_limit.map(|v| v.map(i64::from)))?;
     ensure_positive("daily_token_limit", req.daily_token_limit)?;
     super::super::portal::validate_key_limits(req.quota_micro.flatten(), None)?;
+    super::super::portal::validate_budget_cap(
+        "daily_quota_micro",
+        req.daily_quota_micro.flatten(),
+    )?;
+    super::super::portal::validate_budget_cap(
+        "monthly_quota_micro",
+        req.monthly_quota_micro.flatten(),
+    )?;
     ensure_positive(
         "max_concurrency",
         req.max_concurrency.map(|v| v.map(i64::from)),
@@ -100,6 +114,8 @@ pub async fn patch_api_key(
 
     let patch = okapi_store::admin::ApiKeyPatch {
         quota_micro: req.quota_micro,
+        daily_quota_micro: req.daily_quota_micro,
+        monthly_quota_micro: req.monthly_quota_micro,
         name: req
             .name
             .as_deref()
@@ -138,6 +154,8 @@ pub async fn patch_api_key(
             "group_override": req.group_override, "pool_override": pool_override,
             "rpm_limit": req.rpm_limit, "tpm_limit": req.tpm_limit, "rpd_limit": req.rpd_limit,
             "daily_token_limit": req.daily_token_limit,
+            "daily_quota_micro": req.daily_quota_micro,
+            "monthly_quota_micro": req.monthly_quota_micro,
             "max_concurrency": req.max_concurrency, "expires_at": req.expires_at,
         }),
     )

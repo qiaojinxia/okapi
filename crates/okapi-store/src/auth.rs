@@ -51,6 +51,12 @@ pub struct AuthedKey {
     /// key 级每日 Token 上限（与 `api_keys.daily_token_limit` 对齐；None = 不限）。
     #[serde(default)]
     pub daily_token_limit: Option<i64>,
+    /// key 级每日消费上限（micro-USD，UTC 自然日；None = 不限）。
+    #[serde(default)]
+    pub daily_quota_micro: Option<i64>,
+    /// key 级每月消费上限（micro-USD，UTC 自然月；None = 不限）。
+    #[serde(default)]
+    pub monthly_quota_micro: Option<i64>,
     pub max_concurrency: Option<i32>,
     pub model_allowlist: Option<serde_json::Value>,
     /// key 级 IP 白名单（地址或 CIDR 字符串；None/空 = 不限）。此前列在库里、网关从不读。
@@ -145,6 +151,8 @@ impl AuthedKey {
     #[must_use]
     pub fn is_restricted(&self) -> bool {
         self.quota_limited
+            || self.daily_quota_micro.is_some()
+            || self.monthly_quota_micro.is_some()
             || self.model_allowlist.is_some()
             || self.expires_at.is_some()
             || self.ip_allowlist.is_some()
@@ -266,16 +274,18 @@ pub async fn find_key_by_hash(
     .fetch_optional(pool)
     .await?;
 
-    let (quota_limited, session_hash, daily_token_limit) = if let Some(row) = &row {
-        sqlx::query_as::<_, (bool, Option<String>, Option<i64>)>(
-            "SELECT quota_mode = 1, session_hash, daily_token_limit FROM api_keys WHERE id = $1",
-        )
-        .bind(row.key_id)
-        .fetch_one(pool)
-        .await?
-    } else {
-        (false, None, None)
-    };
+    let (quota_limited, session_hash, daily_token_limit, daily_quota_micro, monthly_quota_micro) =
+        if let Some(row) = &row {
+            sqlx::query_as::<_, (bool, Option<String>, Option<i64>, Option<i64>, Option<i64>)>(
+                "SELECT quota_mode = 1, session_hash, daily_token_limit, daily_quota_micro, monthly_quota_micro \
+                 FROM api_keys WHERE id = $1",
+            )
+            .bind(row.key_id)
+            .fetch_one(pool)
+            .await?
+        } else {
+            (false, None, None, None, None)
+        };
     // Team keys authenticate the member as well as the wallet. Removing a
     // membership or banning its user must disable their delegated credentials.
     let member = if let Some(r) = &row
@@ -314,6 +324,8 @@ pub async fn find_key_by_hash(
             tpm_limit: r.tpm_limit,
             rpd_limit: r.rpd_limit,
             daily_token_limit,
+            daily_quota_micro,
+            monthly_quota_micro,
             max_concurrency: r.max_concurrency,
             model_allowlist: r.model_allowlist,
             ip_allowlist: parse_policy(r.ip_allowlist)?,
@@ -404,6 +416,8 @@ pub async fn find_user_session_actor(
             tpm_limit: None,
             rpd_limit: None,
             daily_token_limit: None,
+            daily_quota_micro: None,
+            monthly_quota_micro: None,
             max_concurrency: None,
             model_allowlist: None,
             ip_allowlist: None,

@@ -13,16 +13,21 @@ mod pricing;
 mod usage_logs;
 pub use pricing::{public_groups, public_models, public_pricing, public_statistics};
 pub use usage_logs::{list as logs, series as logs_series, stat as logs_stat};
+mod alerts;
 mod billing;
 mod groups;
 mod keys;
 mod redeem;
 
+pub use self::alerts::{PutAlertsReq, get_alerts, put_alerts};
 pub use self::billing::{LedgerQuery, UsageQuery, ledger, orders, usage};
 pub(super) use self::groups::ensure_selectable;
 pub use self::groups::{aff, groups};
-pub use self::keys::{PatchKeyReq, delete_key, keys, patch_key};
-pub(super) use self::keys::{normalize_ip_allowlist, resolve_allowlist, validate_key_limits};
+pub use self::keys::{PatchKeyReq, delete_key, keys, patch_key, rotate_key};
+pub(super) use self::keys::{
+    normalize_ip_allowlist, resolve_allowlist, validate_budget_cap, validate_key_limits,
+    validate_rate_caps,
+};
 pub use self::redeem::{RedeemReq, redeem};
 
 use crate::console_auth::authenticate;
@@ -124,6 +129,8 @@ pub async fn me(
         "key_limits": (key.key_id > 0).then(|| json!({
             "restricted": key.is_restricted(),
             "quota_micro": key_info.as_ref().and_then(|info| info.3),
+            "daily_quota_micro": key.daily_quota_micro,
+            "monthly_quota_micro": key.monthly_quota_micro,
             "used_micro": key_info.as_ref().map_or(0, |info| info.4),
             "rpm_limit": key.rpm_limit,
             "tpm_limit": key.tpm_limit,

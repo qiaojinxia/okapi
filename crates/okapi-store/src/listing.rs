@@ -450,6 +450,8 @@ pub struct ApiKeyListRow {
     pub status: i16,
     pub quota_mode: i16,
     pub quota_micro: Option<i64>,
+    pub daily_quota_micro: Option<i64>,
+    pub monthly_quota_micro: Option<i64>,
     pub used_micro: i64,
     pub model_allowlist: Option<serde_json::Value>,
     pub group_override: Option<String>,
@@ -480,7 +482,8 @@ pub async fn list_api_keys(
         sqlx::query_as::<_, ApiKeyListRow>(
             r"
         SELECT k.id, k.user_id, u.username, k.team_id, k.name, k.key_prefix, k.status,
-               k.quota_mode, k.quota_micro, k.used_micro, k.model_allowlist,
+               k.quota_mode, k.quota_micro, k.daily_quota_micro, k.monthly_quota_micro,
+               k.used_micro, k.model_allowlist,
                k.group_override, k.pool_override, k.ip_allowlist, k.rpm_limit, k.tpm_limit,
                k.rpd_limit, k.daily_token_limit, k.max_concurrency,
                k.expires_at, k.last_used_at, k.created_at

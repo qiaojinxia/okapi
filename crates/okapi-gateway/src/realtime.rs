@@ -665,6 +665,7 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
     super::auth::record_settlement_counters(
         state,
         prep.key.user_id,
+        prep.key.key_id,
         prep.key.member_user_id,
         quote.amount.as_micros(),
         usage.total_raw(),

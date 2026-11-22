@@ -62,6 +62,51 @@ impl SchedulerRedis {
         format!("spend:tm:{team}:{member}:{month}")
     }
 
+    /// 令牌当日累计消费 micro（UTC 自然日，软实时周期预算语义）。
+    pub async fn key_spend_day_get(&self, user_id: i64, key_id: i64) -> i64 {
+        let key = Self::key_spend_day_key(user_id, key_id);
+        let value: Option<String> = self.client.get(&key).await.ok().flatten();
+        value.and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// 令牌当月累计消费 micro（UTC 自然月，软实时周期预算语义）。
+    pub async fn key_spend_month_get(&self, user_id: i64, key_id: i64) -> i64 {
+        let key = Self::key_spend_month_key(user_id, key_id);
+        let value: Option<String> = self.client.get(&key).await.ok().flatten();
+        value.and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// 结算后累加令牌日/月消费（日桶 48h TTL、月桶 40d TTL；读失败/写失败宁少计不误挡）。
+    pub async fn key_spend_add(&self, user_id: i64, key_id: i64, amount_micro: i64) {
+        if key_id <= 0 || amount_micro <= 0 {
+            return;
+        }
+        let day_key = Self::key_spend_day_key(user_id, key_id);
+        if let Err(err) = self
+            .incr_by_with_ttl(&day_key, amount_micro, 48 * 3600)
+            .await
+        {
+            tracing::warn!(user_id, key_id, error = %err, "令牌日消费累加失败");
+        }
+        let month_key = Self::key_spend_month_key(user_id, key_id);
+        if let Err(err) = self
+            .incr_by_with_ttl(&month_key, amount_micro, 40 * 24 * 3600)
+            .await
+        {
+            tracing::warn!(user_id, key_id, error = %err, "令牌月消费累加失败");
+        }
+    }
+
+    fn key_spend_day_key(user_id: i64, key_id: i64) -> String {
+        let day = chrono::Utc::now().format("%Y%m%d");
+        format!("spend:{{{user_id}}}:k:{key_id}:d:{day}")
+    }
+
+    fn key_spend_month_key(user_id: i64, key_id: i64) -> String {
+        let month = chrono::Utc::now().format("%Y%m");
+        format!("spend:{{{user_id}}}:k:{key_id}:m:{month}")
+    }
+
     /// 用户本月累计 token（volume 规则唯一输入，docs/database.md §2.1）。
     /// 读失败按 0 返回——量级折扣宁可不打，也不能因 Redis 抖动错算。
     pub async fn monthly_tokens_get(&self, user_id: i64) -> u64 {

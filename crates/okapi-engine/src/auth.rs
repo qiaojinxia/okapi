@@ -38,18 +38,39 @@ pub async fn authenticate_data_plane(
     Ok(authed)
 }
 
-/// 团成员月度限额检查（软实时：结算后计数、预扣前比较，§6.1）。
-/// 各计费端点在 reserve 前调用；非团 key / 未配限额直接放行。
+/// 团成员月度限额 + 令牌日/月周期消费上限检查（软实时：结算后计数、预扣前比较）。
+/// 各计费端点在 reserve 前调用；未配对应限额时零 Redis 往返。
 pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(), AppError> {
-    let (Some(member), Some(limit)) = (key.member_user_id, key.member_monthly_limit_micro) else {
-        return Ok(());
-    };
-    let spent = state.sched.member_spend_get(key.user_id, member).await;
-    if spent >= limit {
+    if let (Some(member), Some(limit)) = (key.member_user_id, key.member_monthly_limit_micro) {
+        let spent = state.sched.member_spend_get(key.user_id, member).await;
+        if spent >= limit {
+            return Err(AppError::new(
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                codes::MEMBER_LIMIT_EXCEEDED,
+            ));
+        }
+    }
+    if let Some(daily_cap) = key.daily_quota_micro
+        && state.sched.key_spend_day_get(key.user_id, key.key_id).await >= daily_cap
+    {
         return Err(AppError::new(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
-            codes::MEMBER_LIMIT_EXCEEDED,
-        ));
+            codes::KEY_QUOTA_EXCEEDED,
+        )
+        .with_param("daily_quota"));
+    }
+    if let Some(monthly_cap) = key.monthly_quota_micro
+        && state
+            .sched
+            .key_spend_month_get(key.user_id, key.key_id)
+            .await
+            >= monthly_cap
+    {
+        return Err(AppError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            codes::KEY_QUOTA_EXCEEDED,
+        )
+        .with_param("monthly_quota"));
     }
     Ok(())
 }
@@ -76,11 +97,12 @@ pub async fn check_group_rate(state: &AppState, key: &AuthedKey) -> Result<(), A
     Ok(())
 }
 
-/// 结算后累计软实时计数：团成员消费（团 key 才计）与用户本月 token/消费
-/// （volume 规则的两个阈值轴输入，各自仅在价簿含对应规则时才写）。
+/// 结算后累计软实时计数：团成员消费（团 key 才计）、令牌日/月消费（周期预算）
+/// 与用户本月 token/消费（volume 规则的两个阈值轴输入，各自仅在价簿含对应规则时才写）。
 pub async fn record_settlement_counters(
     state: &AppState,
     key_user_id: i64,
+    api_key_id: i64,
     member: Option<i64>,
     amount_micro: i64,
     tokens: u64,
@@ -89,6 +111,12 @@ pub async fn record_settlement_counters(
         state
             .sched
             .member_spend_add(key_user_id, member, amount_micro)
+            .await;
+    }
+    if api_key_id > 0 && amount_micro > 0 {
+        state
+            .sched
+            .key_spend_add(key_user_id, api_key_id, amount_micro)
             .await;
     }
     super::rule_inputs::record_tokens(state, key_user_id, tokens, amount_micro).await;
