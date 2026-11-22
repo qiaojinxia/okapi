@@ -16,10 +16,7 @@ struct StreamTool {
 }
 
 pub(super) fn reasoning_text(value: &Value) -> Option<&str> {
-    value
-        .get("reasoning_content")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("reasoning").and_then(Value::as_str))
+    super::super::chat_reasoning_text(value)
 }
 
 pub struct ChatStreamToResponses {

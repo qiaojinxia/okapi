@@ -53,71 +53,36 @@ pub fn request_openai_to_anthropic_value(
         .unwrap_or(u64::from(default_max_tokens));
     out.insert("max_tokens".into(), json!(max_tokens));
 
+    // 顶层 cache_control（Anthropic 自动缓存控制）：原样透传
+    let mut has_explicit_cache_control = false;
+    if let Some(cc) = src.get("cache_control").filter(|v| v.is_object()) {
+        out.insert("cache_control".into(), cc.clone());
+        has_explicit_cache_control = true;
+    }
+
     // messages：system/developer 抽为顶层 system；tool 消息并入 user turn；
     // 连续同角色合并（Anthropic 要求 user/assistant 交替）
-    let mut system_parts: Vec<String> = Vec::new();
-    let mut messages: Vec<Value> = Vec::new();
-    for msg in src
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
-        match role {
-            "system" | "developer" => {
-                let text = content_to_text(msg.get("content").unwrap_or(&Value::Null));
-                if !text.is_empty() {
-                    system_parts.push(text);
-                }
-            }
-            "tool" => {
-                // 分段内容按块搬（tool_result 能装 text / image / document）：只取 text 会把工具返回的
-                // 截图静默丢掉，模型在看不到图的情况下作答；装不下的 part 照常报 400
-                let content = match msg.get("content").unwrap_or(&Value::Null) {
-                    Value::Array(_) => Value::Array(content_to_blocks(
-                        msg.get("content").unwrap_or(&Value::Null),
-                    )?),
-                    other => json!(content_to_text(other)),
-                };
-                let block = json!({
-                    "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
-                    "content": content,
-                });
-                push_merged(&mut messages, "user", vec![block]);
-            }
-            "assistant" => {
-                let mut blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null))?;
-                for call in msg
-                    .get("tool_calls")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let f = call.get("function").cloned().unwrap_or(Value::Null);
-                    let input = super::tool_arguments(f.get("arguments").and_then(Value::as_str));
-                    blocks.push(json!({
-                        "type": "tool_use",
-                        "id": call.get("id").and_then(Value::as_str).unwrap_or(""),
-                        "name": f.get("name").and_then(Value::as_str).unwrap_or(""),
-                        "input": input,
-                    }));
-                }
-                if !blocks.is_empty() {
-                    push_merged(&mut messages, "assistant", blocks);
-                }
-            }
-            _ => {
-                let blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null))?;
-                if !blocks.is_empty() {
-                    push_merged(&mut messages, "user", blocks);
-                }
-            }
+    let (system_blocks, messages) = convert_messages(src, &mut has_explicit_cache_control)?;
+    if !system_blocks.is_empty() {
+        if system_blocks.iter().any(|b| b.cache_control.is_some()) {
+            has_explicit_cache_control = true;
+            let blocks: Vec<Value> = system_blocks
+                .into_iter()
+                .map(|b| {
+                    let mut obj = json!({"type": "text", "text": b.text});
+                    attach_cache_control(&mut obj, b.cache_control);
+                    obj
+                })
+                .collect();
+            out.insert("system".into(), Value::Array(blocks));
+        } else {
+            let joined = system_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            out.insert("system".into(), json!(joined));
         }
-    }
-    if !system_parts.is_empty() {
-        out.insert("system".into(), json!(system_parts.join("\n\n")));
     }
     out.insert("messages".into(), Value::Array(messages));
 
@@ -132,9 +97,220 @@ pub fn request_openai_to_anthropic_value(
         _ => {}
     }
 
-    convert_tools(src, &mut out);
+    if convert_tools(src, &mut out) {
+        has_explicit_cache_control = true;
+    }
+
+    // OpenAI / Responses 客户端用 prompt_cache_key 显式声明会话前缀缓存（如 Codex CLI 两跳打 Anthropic）；
+    // 若请求未自带显式 cache_control，则折算为标准 5m ephemeral 断点（tools / system / 末条消息，至多 3 处）。
+    if !has_explicit_cache_control
+        && src
+            .get("prompt_cache_key")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    {
+        apply_prompt_cache_breakpoints(&mut out);
+    }
 
     Ok(Value::Object(out))
+}
+
+fn convert_messages(
+    src: &serde_json::Map<String, Value>,
+    has_explicit_cache_control: &mut bool,
+) -> Result<(Vec<SystemBlock>, Vec<Value>), UpstreamError> {
+    let mut system_blocks: Vec<SystemBlock> = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
+    for msg in src
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
+        let msg_cc = cache_control_of(msg);
+        match role {
+            "system" | "developer" => {
+                collect_system_blocks(msg.get("content"), msg_cc, &mut system_blocks);
+            }
+            "tool" => {
+                // 分段内容按块搬（tool_result 能装 text / image / document）：只取 text 会把工具返回的
+                // 截图静默丢掉，模型在看不到图的情况下作答；装不下的 part 照常报 400
+                let content = match msg.get("content").unwrap_or(&Value::Null) {
+                    Value::Array(_) => Value::Array(content_to_blocks(
+                        msg.get("content").unwrap_or(&Value::Null),
+                        has_explicit_cache_control,
+                    )?),
+                    other => json!(content_to_text(other)),
+                };
+                let mut block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
+                    "content": content,
+                });
+                if attach_cache_control(&mut block, msg_cc) {
+                    *has_explicit_cache_control = true;
+                }
+                push_merged(&mut messages, "user", vec![block]);
+            }
+            "assistant" => {
+                let mut blocks = content_to_blocks(
+                    msg.get("content").unwrap_or(&Value::Null),
+                    has_explicit_cache_control,
+                )?;
+                for call in msg
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let f = call.get("function").cloned().unwrap_or(Value::Null);
+                    let input = super::tool_arguments(f.get("arguments").and_then(Value::as_str));
+                    let mut tool_use = json!({
+                        "type": "tool_use",
+                        "id": call.get("id").and_then(Value::as_str).unwrap_or(""),
+                        "name": f.get("name").and_then(Value::as_str).unwrap_or(""),
+                        "input": input,
+                    });
+                    let call_cc = cache_control_of(call).or_else(|| cache_control_of(&f));
+                    if attach_cache_control(&mut tool_use, call_cc) {
+                        *has_explicit_cache_control = true;
+                    }
+                    blocks.push(tool_use);
+                }
+                if let Some(last) = blocks.last_mut()
+                    && attach_cache_control(last, msg_cc)
+                {
+                    *has_explicit_cache_control = true;
+                }
+                if !blocks.is_empty() {
+                    push_merged(&mut messages, "assistant", blocks);
+                }
+            }
+            _ => {
+                let mut blocks = content_to_blocks(
+                    msg.get("content").unwrap_or(&Value::Null),
+                    has_explicit_cache_control,
+                )?;
+                if let Some(last) = blocks.last_mut()
+                    && attach_cache_control(last, msg_cc)
+                {
+                    *has_explicit_cache_control = true;
+                }
+                if !blocks.is_empty() {
+                    push_merged(&mut messages, "user", blocks);
+                }
+            }
+        }
+    }
+    Ok((system_blocks, messages))
+}
+
+struct SystemBlock {
+    text: String,
+    cache_control: Option<Value>,
+}
+
+fn cache_control_of(value: &Value) -> Option<Value> {
+    value
+        .get("cache_control")
+        .filter(|v| v.is_object())
+        .cloned()
+}
+
+fn attach_cache_control(block: &mut Value, cc: Option<Value>) -> bool {
+    let Some(cc) = cc else {
+        return false;
+    };
+    if let Some(map) = block.as_object_mut()
+        && !map.contains_key("cache_control")
+    {
+        map.insert("cache_control".into(), cc);
+        return true;
+    }
+    false
+}
+
+fn collect_system_blocks(
+    content: Option<&Value>,
+    msg_cc: Option<Value>,
+    out: &mut Vec<SystemBlock>,
+) {
+    match content {
+        Some(Value::String(s)) if !s.is_empty() => {
+            out.push(SystemBlock {
+                text: s.clone(),
+                cache_control: msg_cc,
+            });
+        }
+        Some(Value::Array(parts)) => {
+            let start = out.len();
+            for p in parts {
+                if let Some(text) = p
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.is_empty())
+                {
+                    out.push(SystemBlock {
+                        text: text.to_owned(),
+                        cache_control: cache_control_of(p),
+                    });
+                }
+            }
+            if let Some(cc) = msg_cc
+                && out.len() > start
+                && let Some(last) = out.last_mut()
+                && last.cache_control.is_none()
+            {
+                last.cache_control = Some(cc);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_prompt_cache_breakpoints(out: &mut serde_json::Map<String, Value>) {
+    let ephemeral = json!({"type": "ephemeral"});
+    if let Some(last_tool) = out
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+    {
+        attach_cache_control(last_tool, Some(ephemeral.clone()));
+    }
+    match out.get_mut("system") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            let text = std::mem::take(text);
+            out.insert(
+                "system".into(),
+                json!([{"type": "text", "text": text, "cache_control": ephemeral.clone()}]),
+            );
+        }
+        Some(Value::Array(blocks)) => {
+            if let Some(last) = blocks.last_mut() {
+                attach_cache_control(last, Some(ephemeral.clone()));
+            }
+        }
+        _ => {}
+    }
+    if let Some(last_block) = out
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|msgs| msgs.last_mut())
+        .and_then(|msg| msg.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| {
+            blocks.iter_mut().rev().find(|b| {
+                b.is_object()
+                    && !matches!(
+                        b.get("type").and_then(Value::as_str),
+                        Some("thinking" | "redacted_thinking")
+                    )
+            })
+        })
+    {
+        attach_cache_control(last_block, Some(ephemeral));
+    }
 }
 
 /// 采样参数透传，唯 temperature 按方言契约收敛：OpenAI 合法到 2.0，Anthropic
@@ -162,11 +338,16 @@ fn convert_sampling(
 }
 
 /// tools / tool_choice 映射；tool_choice="none" 时整体不带 tools。
-fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map<String, Value>) {
+/// 返回工具定义里是否携带了显式 `cache_control`。
+fn convert_tools(
+    src: &serde_json::Map<String, Value>,
+    out: &mut serde_json::Map<String, Value>,
+) -> bool {
     let choice = src.get("tool_choice");
     if choice.and_then(Value::as_str) == Some("none") {
-        return;
+        return false;
     }
+    let mut saw_cache_control = false;
     let tools: Vec<Value> = src
         .get("tools")
         .and_then(Value::as_array)
@@ -174,15 +355,20 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
         .flatten()
         .filter_map(|t| {
             let f = t.get("function")?;
-            Some(json!({
+            let mut tool = json!({
                 "name": f.get("name").and_then(Value::as_str)?,
                 "description": f.get("description").and_then(Value::as_str).unwrap_or(""),
                 "input_schema": f.get("parameters").cloned().unwrap_or_else(|| json!({"type":"object"})),
-            }))
+            });
+            let cc = cache_control_of(t).or_else(|| cache_control_of(f));
+            if attach_cache_control(&mut tool, cc) {
+                saw_cache_control = true;
+            }
+            Some(tool)
         })
         .collect();
     if tools.is_empty() {
-        return;
+        return false;
     }
     out.insert("tools".into(), Value::Array(tools));
     let mut tool_choice = match choice {
@@ -204,6 +390,7 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
     if let Some(tool_choice) = tool_choice {
         out.insert("tool_choice".into(), tool_choice);
     }
+    saw_cache_control
 }
 
 /// 连续同角色 turn 合并（内容块级追加）。
@@ -220,19 +407,26 @@ fn push_merged(messages: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
 
 /// OpenAI content（string | parts 数组）→ Anthropic 内容块；表达不了的 part 报错（见
 /// [`super::unsupported_part`]）。空文本 part 跳过：Anthropic 拒收空 text 块。
-fn content_to_blocks(content: &Value) -> Result<Vec<Value>, UpstreamError> {
+fn content_to_blocks(
+    content: &Value,
+    has_cache_control: &mut bool,
+) -> Result<Vec<Value>, UpstreamError> {
     match content {
         Value::String(s) if !s.is_empty() => Ok(vec![json!({"type": "text", "text": s})]),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|part| part_to_block(part).transpose())
+            .filter_map(|part| part_to_block(part, has_cache_control).transpose())
             .collect(),
         _ => Ok(Vec::new()),
     }
 }
 
-fn part_to_block(part: &Value) -> Result<Option<Value>, UpstreamError> {
+fn part_to_block(
+    part: &Value,
+    has_cache_control: &mut bool,
+) -> Result<Option<Value>, UpstreamError> {
     let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+    let cc = cache_control_of(part);
     let block = match kind {
         // assistant 历史里的 refusal part 是纯文本
         "text" | "refusal" => {
@@ -240,7 +434,13 @@ fn part_to_block(part: &Value) -> Result<Option<Value>, UpstreamError> {
                 .get(kind)
                 .and_then(Value::as_str)
                 .filter(|text| !text.is_empty())
-                .map(|text| json!({"type": "text", "text": text})));
+                .map(|text| {
+                    let mut obj = json!({"type": "text", "text": text});
+                    if attach_cache_control(&mut obj, cc) {
+                        *has_cache_control = true;
+                    }
+                    obj
+                }));
         }
         "image_url" => part
             .pointer("/image_url/url")
@@ -263,7 +463,14 @@ fn part_to_block(part: &Value) -> Result<Option<Value>, UpstreamError> {
             }),
         _ => None,
     };
-    block.map(Some).ok_or_else(|| super::unsupported_part(kind))
+    block
+        .map(|mut b| {
+            if attach_cache_control(&mut b, cc) {
+                *has_cache_control = true;
+            }
+            Some(b)
+        })
+        .ok_or_else(|| super::unsupported_part(kind))
 }
 
 fn content_to_text(content: &Value) -> String {

@@ -22,6 +22,19 @@ pub enum Operation {
     ResponsesCompact,
 }
 
+impl Operation {
+    #[must_use]
+    pub const fn api_format(self) -> ApiFormat {
+        match self {
+            Self::ChatCompletions => ApiFormat::ChatCompletions,
+            Self::Messages => ApiFormat::Messages,
+            Self::GenerateContent => ApiFormat::Gemini,
+            Self::Responses => ApiFormat::Responses,
+            Self::ResponsesCompact => ApiFormat::ResponsesCompact,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ExecutionPlan {
     pub adapter: &'static ProviderDescriptor,

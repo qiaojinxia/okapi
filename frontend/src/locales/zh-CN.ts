@@ -1205,6 +1205,8 @@ export default {
     modelChain: '模型名称链（请求 → 计费 → 上游 → 返回）',
     responseModel: '上游返回模型',
     reasoningEffort: '推理强度',
+    droppedTools: '转换丢弃的工具',
+    droppedFields: '转换丢弃的字段',
     userAgent: '客户端 User-Agent',
     clientSession: '客户端会话标识',
     requestType: '请求类型',

@@ -69,6 +69,7 @@ pub fn request_chat_to_responses_value(
         "service_tier",
         "truncation",
         "prompt_cache_key",
+        "prompt_cache_retention",
     ] {
         if let Some(v) = src.get(key).filter(|v| !v.is_null()) {
             out.insert(key.into(), v.clone());

@@ -93,6 +93,18 @@ impl Trace {
             .fields[name] = value;
     }
 
+    pub fn remove(&self, name: &str) {
+        if let Some(map) = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fields
+            .as_object_mut()
+        {
+            map.remove(name);
+        }
+    }
+
     pub fn response_model(&self, model: Option<&str>) {
         if let Some(model) = model.filter(|s| !s.is_empty()) {
             self.set("response_model", json!(bounded(model, 256)));

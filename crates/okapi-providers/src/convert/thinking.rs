@@ -78,11 +78,16 @@ impl ThinkingToContent {
             })];
         };
 
-        let reasoning = delta
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
+        let (reasoning_key, reasoning) = ["reasoning_content", "reasoning"]
+            .into_iter()
+            .find_map(|key| {
+                delta
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (Some(key), s.to_owned()))
+            })
+            .unwrap_or((None, String::new()));
         // 正文既可能是字符串，也可能是分段数组；两者都算"有正文"
         let has_content = match delta.get("content") {
             Some(Value::String(text)) => !text.is_empty(),
@@ -118,12 +123,16 @@ impl ThinkingToContent {
             })];
         }
         if !prepend_text(delta, &lead) {
-            delta.remove("reasoning_content");
+            if let Some(key) = reasoning_key {
+                delta.remove(key);
+            }
             (self.opened, self.closed) = (opened, closed);
             return split_thinking(&chunk, &lead, event, usage);
         }
         (self.opened, self.closed) = (opened, closed);
-        delta.remove("reasoning_content");
+        if let Some(key) = reasoning_key {
+            delta.remove(key);
+        }
         // 改写后的 chunk 按统一口径重数（数组正文、拒答、工具参数一并算入）
         let (_, chars) = okapi_api::chunk_output_lenient(&chunk);
         vec![Ok(ChatEvent::Data {
@@ -187,17 +196,22 @@ pub fn rewrite_json(body: &Bytes) -> Bytes {
     else {
         return body.clone();
     };
-    let Some(reasoning) = message
-        .get("reasoning_content")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+    let Some((reasoning_key, reasoning)) =
+        ["reasoning_content", "reasoning"]
+            .into_iter()
+            .find_map(|key| {
+                message
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| (key, s.to_owned()))
+            })
     else {
         return body.clone();
     };
     if !prepend_text(message, &format!("{OPEN_TAG}{reasoning}{CLOSE_TAG}")) {
         return body.clone();
     }
-    message.remove("reasoning_content");
+    message.remove(reasoning_key);
     serde_json::to_vec(&value).map_or_else(|_| body.clone(), Bytes::from)
 }

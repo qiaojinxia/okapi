@@ -313,9 +313,7 @@ pub fn response_openai_to_anthropic(
         .unwrap_or(Value::Null);
 
     let mut content: Vec<Value> = Vec::new();
-    if let Some(thinking) = message.get("reasoning_content").and_then(Value::as_str)
-        && !thinking.is_empty()
-    {
+    if let Some(thinking) = super::chat_reasoning_text(&message) {
         content.push(json!({"type": "thinking", "thinking": thinking, "signature": ""}));
     }
     // 上游拒答在 message.refusal（content 为 null）；Anthropic 没有单独的拒答块，按正文给出，
@@ -521,9 +519,7 @@ impl OaiStreamToAnthropic {
             .cloned()
             .unwrap_or_default();
 
-        if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str)
-            && !text.is_empty()
-        {
+        if let Some(text) = super::chat_reasoning_text(&delta) {
             self.ensure_block(Block::Thinking, &mut out);
             let ev = json!({"type": "content_block_delta", "index": self.block_index,
                 "delta": {"type": "thinking_delta", "thinking": text}});

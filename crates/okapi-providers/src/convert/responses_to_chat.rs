@@ -69,6 +69,17 @@ pub fn request_responses_to_chat_value(
             out.insert(key.into(), v.clone());
         }
     }
+    for key in [
+        "user",
+        "metadata",
+        "service_tier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+    ] {
+        if let Some(v) = src.get(key).filter(|v| !v.is_null()) {
+            out.insert(key.into(), v.clone());
+        }
+    }
     // 结构化输出：text.format 对应 chat 的 response_format。不映射的话客户端要的 JSON 在降级后
     // 悄悄变成自由文本；表达不了的类型照本文件的口径报错。
     if let Some(format) = src

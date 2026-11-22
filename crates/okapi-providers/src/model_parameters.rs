@@ -403,6 +403,19 @@ pub fn plan_effort(
         && source
             .pointer("/output_config/effort")
             .is_some_and(Value::is_string);
+    // Gemini 同方言原生 `thinkingConfig` 同样原样保留，不用这张表替上游拒或覆盖
+    if dialect == "gemini"
+        && unified.is_none()
+        && source
+            .get("generationConfig")
+            .or_else(|| source.get("generation_config"))
+            .and_then(|c| c.get("thinkingConfig").or_else(|| c.get("thinking_config")))
+            .is_some_and(Value::is_object)
+        && current.get("reasoning_effort").is_none()
+        && current.get("reasoning").is_none()
+    {
+        return Ok(EffortPlan::Unchanged);
+    }
     let level = unified.or_else(|| directive.map(|d| d.effective_effort().as_str().to_owned()));
     let Some(level) = level else {
         return Ok(EffortPlan::Unchanged);
@@ -921,6 +934,26 @@ mod tests {
         let plan = plan_effort(
             &profile("anthropic", "claude-sonnet-5-5", None),
             "anthropic",
+            &source,
+            &source,
+            directive,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(plan, EffortPlan::Unchanged));
+    }
+
+    #[test]
+    fn native_gemini_thinking_config_is_zero_copy_passthrough_even_if_budget_maps_off_table() {
+        // gemini-3.1-flash-image-preview 的表里只有 minimal/high；原生 thinkingBudget=8192 折算为 medium，
+        // 同方言透传不得被表拒，且保持零拷贝 Unchanged。
+        let raw = br#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}"#;
+        let source: Value = serde_json::from_slice(raw).unwrap();
+        let directive = crate::reasoning::parse_request_value(&source).merge(None);
+        assert!(directive.is_some());
+        let plan = plan_effort(
+            &profile("gemini", "gemini-3.1-flash-image-preview", None),
+            "gemini",
             &source,
             &source,
             directive,

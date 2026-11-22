@@ -26,6 +26,8 @@ export function LogRequestDetails({ row }: { row: {
   const fields = [
     [t('logs:responseModel'), d?.response_model],
     [t('logs:reasoningEffort'), d?.reasoning_effort],
+    [t('logs:droppedTools'), d?.dropped_tools?.length ? d.dropped_tools.join(', ') : undefined],
+    [t('logs:droppedFields'), d?.dropped_fields?.length ? d.dropped_fields.join(', ') : undefined],
     [t('logs:userAgent'), d?.user_agent],
     [t('logs:clientSession'), d?.session_id],
     [t('logs:imageSize'), d?.media?.image_size],

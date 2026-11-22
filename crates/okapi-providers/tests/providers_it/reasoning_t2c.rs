@@ -313,3 +313,22 @@ fn t2c_stream_unknown_content_shape_splits_the_thinking_off_and_keeps_the_rest()
             .all(|(delta, _)| delta.get("reasoning_content").is_none())
     );
 }
+
+#[test]
+fn t2c_supports_reasoning_field_fallback_in_json_and_stream() {
+    let body_in = json!({"choices": [{"index": 0, "message": {
+        "role": "assistant", "content": "ok", "reasoning": "plan"}}]});
+    let out = rewrite_json(&body(&body_in));
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    let msg = &v["choices"][0]["message"];
+    assert!(msg.get("reasoning").is_none());
+    assert_eq!(msg["content"], "<think>\nplan\n</think>\nok");
+
+    let stream_out = run_stream(vec![
+        delta_chunk(&json!({"reasoning": "step 1"})),
+        content_chunk("answer"),
+    ]);
+    assert_eq!(stream_out[0].0["content"], "<think>\nstep 1");
+    assert!(stream_out[0].0.get("reasoning").is_none());
+    assert_eq!(stream_out[1].0["content"], "\n</think>\nanswer");
+}

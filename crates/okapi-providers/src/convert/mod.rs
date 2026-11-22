@@ -4,6 +4,7 @@
 
 pub mod anthropic_to_openai;
 pub mod chat_to_responses;
+pub mod field_loss;
 pub mod gemini_to_openai;
 pub mod openai_to_anthropic;
 pub mod openai_to_gemini;
@@ -93,6 +94,15 @@ pub(crate) fn stream_tool_slot(call: &Value, ids: &mut Vec<String>) -> Option<us
         id.clone_into(&mut ids[slot]);
     }
     Some(slot)
+}
+
+/// 从 OpenAI chat message / delta 提取推理文本：优先 `reasoning_content`（DeepSeek / OpenAI 兼容主流），
+/// 缺失或为空时回退 `reasoning`（OpenRouter / 部分 vLLM 兼容上游）。
+pub(crate) fn chat_reasoning_text(value: &Value) -> Option<&str> {
+    ["reasoning_content", "reasoning"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_str))
+        .find(|text| !text.is_empty())
 }
 
 /// [`unsupported_part`] 的原因前缀，网关据此把构造失败映射成带 param 的 400。

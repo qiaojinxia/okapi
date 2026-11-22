@@ -9,7 +9,7 @@
 //! candidatesTokenCount = completion − reasoning、thoughtsTokenCount = reasoning。
 
 use crate::error::UpstreamError;
-use crate::reasoning::ReasoningDirective;
+use crate::reasoning::{RequestReasoning, parse_gemini_thinking_config};
 use bytes::Bytes;
 use okapi_api::UsageProbe;
 use serde_json::{Value, json};
@@ -340,19 +340,13 @@ fn apply_generation_config(
     } else if mime.as_ref().and_then(Value::as_str) == Some("application/json") {
         out.insert("response_format".into(), json!({"type": "json_object"}));
     }
-    // thinkingConfig.thinkingBudget → reasoning_effort 档位（OpenAI 没有预算参数）。
-    // 预算 0 = 关闭思考：OpenAI 侧不注入；includeThoughts 无对应（推理摘要由上游决定）。
-    if let Some(budget) = pick("thinkingConfig", "thinking_config")
+    // thinkingConfig（thinkingBudget / Gemini 3 thinkingLevel）→ reasoning_effort 档位。
+    // 预算 0 或 thinkingLevel=none/off 为关闭思考：OpenAI 侧不注入。
+    if let Some(tc) = pick("thinkingConfig", "thinking_config")
         .as_ref()
-        .and_then(|t| t.get("thinkingBudget").or_else(|| t.get("thinking_budget")))
-        .and_then(Value::as_u64)
-        .and_then(|b| u32::try_from(b).ok())
-        .filter(|b| *b > 0)
+        .and_then(Value::as_object)
+        && let RequestReasoning::Enabled(directive) = parse_gemini_thinking_config(tc)
     {
-        let directive = ReasoningDirective {
-            effort: None,
-            budget_tokens: Some(budget),
-        };
         out.insert(
             "reasoning_effort".into(),
             json!(directive.effective_effort().as_str()),
@@ -433,9 +427,7 @@ pub fn response_openai_to_gemini(
         .unwrap_or(Value::Null);
 
     let mut parts: Vec<Value> = Vec::new();
-    if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str)
-        && !reasoning.is_empty()
-    {
+    if let Some(reasoning) = super::chat_reasoning_text(&message) {
         parts.push(json!({"text": reasoning, "thought": true}));
     }
     // 上游拒答在 message.refusal（content 为 null）；Gemini 没有拒答字段，按正文给出

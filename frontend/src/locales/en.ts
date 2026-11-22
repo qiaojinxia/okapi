@@ -1211,6 +1211,8 @@ export default {
     modelChain: 'Model names (requested → billed → upstream → returned)',
     responseModel: 'Returned model',
     reasoningEffort: 'Reasoning effort',
+    droppedTools: 'Dropped tools',
+    droppedFields: 'Dropped fields',
     userAgent: 'Client User-Agent',
     clientSession: 'Client session ID',
     requestType: 'Request type',

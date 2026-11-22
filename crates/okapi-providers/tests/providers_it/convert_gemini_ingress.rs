@@ -15,8 +15,9 @@
 
 use bytes::Bytes;
 use okapi_api::UsageProbe;
+use okapi_providers::ChatEvent;
 use okapi_providers::convert::gemini_to_openai::{
-    gemini_usage_json, request_gemini_to_openai, response_openai_to_gemini,
+    OaiStreamToGemini, gemini_usage_json, request_gemini_to_openai, response_openai_to_gemini,
 };
 use serde_json::{Value, json};
 
@@ -506,4 +507,70 @@ fn several_candidates_are_refused() {
     }
     let one = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"candidateCount": 1}});
     req(&one, "m", false);
+}
+
+#[test]
+fn request_maps_gemini3_thinking_level_and_responses_accept_reasoning_fallback() {
+    let high = req(
+        &json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH"}}
+        }),
+        "m",
+        false,
+    );
+    assert_eq!(high["reasoning_effort"], "high");
+
+    let off = req(
+        &json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generation_config": {"thinking_config": {"thinking_level": "none"}}
+        }),
+        "m",
+        false,
+    );
+    assert!(off.get("reasoning_effort").is_none());
+
+    // 非流式与流式回向兼容 `reasoning`（OpenRouter 等）
+    let (out, _) = resp(&json!({"id":"c","model":"gpt-x","choices":[{"index":0,
+        "finish_reason":"stop","message":{"role":"assistant","content":"ok","reasoning":"step"}}]}));
+    assert_eq!(
+        out["candidates"][0]["content"]["parts"],
+        json!([{"text": "step", "thought": true}, {"text": "ok"}])
+    );
+
+    let mut st = OaiStreamToGemini::new("gpt-x");
+    let chunks: Vec<Value> = [
+        ChatEvent::Data {
+            raw: json!({"id":"c","choices":[{"delta":{"reasoning":"plan"}}]}).to_string(),
+            event: None,
+            has_output: true,
+            content_chars: 0,
+            usage: None,
+        },
+        ChatEvent::Data {
+            raw: json!({"id":"c","choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]})
+                .to_string(),
+            event: None,
+            has_output: true,
+            content_chars: 0,
+            usage: None,
+        },
+        ChatEvent::Done,
+    ]
+    .into_iter()
+    .flat_map(|ev| st.step(Ok(ev)))
+    .filter_map(|item| match item.unwrap() {
+        ChatEvent::Data { raw, .. } => Some(serde_json::from_str(&raw).unwrap()),
+        ChatEvent::Done => None,
+    })
+    .collect();
+    assert_eq!(
+        chunks[0]["candidates"][0]["content"]["parts"],
+        json!([{"text": "plan", "thought": true}])
+    );
+    assert_eq!(
+        chunks[1]["candidates"][0]["content"]["parts"],
+        json!([{"text": "done"}])
+    );
 }

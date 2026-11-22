@@ -79,9 +79,7 @@ impl OaiStreamToGemini {
         let empty = Value::Null;
         let delta = chunk.pointer("/choices/0/delta").unwrap_or(&empty);
 
-        if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str)
-            && !text.is_empty()
-        {
+        if let Some(text) = super::super::chat_reasoning_text(delta) {
             out.push(Ok(self.chunk(
                 &[json!({"text": text, "thought": true})],
                 None,

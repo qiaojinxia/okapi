@@ -624,3 +624,100 @@ fn tool_message_parts_keep_their_images() {
     );
     assert_eq!(results[1]["content"], "plain");
 }
+
+#[test]
+fn request_preserves_explicit_cache_control_across_system_messages_and_tools() {
+    let ep = json!({"type": "ephemeral", "ttl": "1h"});
+    let out = convert_req(&json!({
+        "model": "gpt-alias",
+        "cache_control": {"type": "ephemeral"},
+        "prompt_cache_key": "sess-ignored-when-explicit",
+        "tools": [
+            {"type": "function", "cache_control": ep, "function": {
+                "name": "read", "description": "d", "parameters": {"type": "object"}
+            }},
+            {"type": "function", "function": {
+                "name": "write", "description": "d", "parameters": {"type": "object"},
+                "cache_control": {"type": "ephemeral"}
+            }}
+        ],
+        "messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "base"},
+                {"type": "text", "text": "rules", "cache_control": ep}
+            ]},
+            {"role": "developer", "content": "extra", "cache_control": {"type": "ephemeral"}},
+            {"role": "user", "content": [
+                {"type": "text", "text": "look", "cache_control": {"type": "ephemeral"}},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}, "cache_control": {"type": "ephemeral"}}
+            ]},
+            {"role": "assistant", "content": "ok", "tool_calls": [{
+                "id": "call_1", "type": "function", "cache_control": {"type": "ephemeral"},
+                "function": {"name": "read", "arguments": "{}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "done", "cache_control": {"type": "ephemeral"}},
+            {"role": "user", "content": "next", "cache_control": {"type": "ephemeral"}}
+        ]
+    }));
+    assert_eq!(out["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(out["tools"][0]["cache_control"], ep);
+    assert_eq!(out["tools"][1]["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(
+        out["system"],
+        json!([
+            {"type": "text", "text": "base"},
+            {"type": "text", "text": "rules", "cache_control": ep},
+            {"type": "text", "text": "extra", "cache_control": {"type": "ephemeral"}},
+        ])
+    );
+    assert_eq!(
+        out["messages"][0]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        out["messages"][0]["content"][1]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        out["messages"][1]["content"][1]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    // tool_result 和随后同为 user 角色的文本块各自保留自己的 cache_control
+    assert_eq!(
+        out["messages"][2]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        out["messages"][2]["content"][1]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+}
+
+#[test]
+fn request_synthesizes_ephemeral_breakpoints_from_prompt_cache_key() {
+    let out = convert_req(&json!({
+        "model": "gpt-alias",
+        "prompt_cache_key": "codex-session-42",
+        "tools": [
+            {"type": "function", "function": {"name": "a", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "b", "parameters": {"type": "object"}}}
+        ],
+        "messages": [
+            {"role": "system", "content": "sys prompt"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"}
+        ]
+    }));
+    let ep = json!({"type": "ephemeral"});
+    assert!(out["tools"][0].get("cache_control").is_none());
+    assert_eq!(out["tools"][1]["cache_control"], ep);
+    assert_eq!(
+        out["system"],
+        json!([{"type": "text", "text": "sys prompt", "cache_control": ep}])
+    );
+    assert!(out["messages"][0]["content"][0].get("cache_control").is_none());
+    assert_eq!(out["messages"][2]["content"][0]["cache_control"], ep);
+    // 不得泄漏 OpenAI 字段到 Anthropic 请求体
+    assert!(out.get("prompt_cache_key").is_none());
+}

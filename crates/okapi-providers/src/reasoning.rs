@@ -155,6 +155,8 @@ impl RequestReasoning {
 fn mentions_reasoning(body: &[u8]) -> bool {
     memchr::memmem::find(body, b"\"reasoning").is_some()
         || memchr::memmem::find(body, b"\"thinking\"").is_some()
+        || memchr::memmem::find(body, b"\"thinkingConfig\"").is_some()
+        || memchr::memmem::find(body, b"\"thinking_config\"").is_some()
 }
 
 /// 从请求原文解析 reasoning 意图，与入口方言无关（三个入口共用一份）。
@@ -227,9 +229,86 @@ pub fn parse_request_value(value: &Value) -> RequestReasoning {
         if t.get("type").and_then(Value::as_str) == Some("disabled") {
             return RequestReasoning::Disabled;
         }
+        // Claude Code 4.6+ 用 `thinking: {type: "adaptive"}` + `output_config: {effort: "high"|...}`；
+        // 读取 effort 让跨方言（OpenAI / Responses）不再一律退化成默认 medium。
+        // 同方言 Anthropic 仍由 `model_parameters::plan_effort` 的 `keep_native` 原样零拷贝透传。
+        let effort = obj
+            .get("output_config")
+            .and_then(|c| c.get("effort"))
+            .and_then(Value::as_str)
+            .and_then(parse_native_effort);
         return RequestReasoning::Enabled(ReasoningDirective {
-            effort: None,
+            effort,
             budget_tokens: positive_u32(t.get("budget_tokens")),
+        });
+    }
+
+    if let Some(tc) = obj
+        .get("generationConfig")
+        .or_else(|| obj.get("generation_config"))
+        .and_then(Value::as_object)
+        .and_then(|cfg| {
+            cfg.get("thinkingConfig")
+                .or_else(|| cfg.get("thinking_config"))
+        })
+        .and_then(Value::as_object)
+    {
+        let parsed = parse_gemini_thinking_config(tc);
+        if parsed != RequestReasoning::Unspecified {
+            return parsed;
+        }
+    }
+
+    RequestReasoning::Unspecified
+}
+
+/// 解析客户端原生档位（Anthropic `output_config.effort` / Gemini `thinkingLevel`）：
+/// 大小写不敏感，`xhigh` / `max` 向上折叠到 `High`，避免跨方言时退回默认 `medium`。
+fn parse_native_effort(s: &str) -> Option<Effort> {
+    if s.eq_ignore_ascii_case("minimal") {
+        Some(Effort::Minimal)
+    } else if s.eq_ignore_ascii_case("low") {
+        Some(Effort::Low)
+    } else if s.eq_ignore_ascii_case("medium") {
+        Some(Effort::Medium)
+    } else if s.eq_ignore_ascii_case("high")
+        || s.eq_ignore_ascii_case("xhigh")
+        || s.eq_ignore_ascii_case("max")
+    {
+        Some(Effort::High)
+    } else {
+        None
+    }
+}
+
+/// 解析 Gemini `generationConfig.thinkingConfig`（兼容 camelCase 与 snake_case）：
+/// - `thinkingBudget: 0` 或 `thinkingLevel: "none"/"off"` → `Disabled`
+/// - `thinkingBudget > 0` → 携带预算；`-1`（动态思考）→ 开启缺省档
+/// - `thinkingLevel`（Gemini 3 `minimal|low|medium|high`）→ 携带档位
+#[must_use]
+pub fn parse_gemini_thinking_config(tc: &serde_json::Map<String, Value>) -> RequestReasoning {
+    let raw_budget = tc
+        .get("thinkingBudget")
+        .or_else(|| tc.get("thinking_budget"))
+        .and_then(Value::as_i64);
+    let raw_level = tc
+        .get("thinkingLevel")
+        .or_else(|| tc.get("thinking_level"))
+        .and_then(Value::as_str);
+
+    if raw_budget == Some(0)
+        || raw_level
+            .is_some_and(|l| l.eq_ignore_ascii_case("none") || l.eq_ignore_ascii_case("off"))
+    {
+        return RequestReasoning::Disabled;
+    }
+
+    let effort = raw_level.and_then(parse_native_effort);
+    let budget_tokens = raw_budget.and_then(|b| (b > 0).then(|| u32::try_from(b).ok()).flatten());
+    if effort.is_some() || budget_tokens.is_some() || raw_budget == Some(-1) {
+        return RequestReasoning::Enabled(ReasoningDirective {
+            effort,
+            budget_tokens,
         });
     }
 
@@ -535,14 +614,23 @@ pub fn apply_gemini(body: &Bytes, directive: ReasoningDirective) -> Result<Bytes
         .map_err(|e| UpstreamError::Build(e.to_string()))
 }
 
+fn has_gemini_thinking_config(obj: &serde_json::Map<String, Value>) -> bool {
+    ["generationConfig", "generation_config"]
+        .into_iter()
+        .filter_map(|k| obj.get(k))
+        .any(|cfg| {
+            !cfg.is_object()
+                || cfg.get("thinkingConfig").is_some()
+                || cfg.get("thinking_config").is_some()
+        })
+}
+
 /// 判断是否需要执行 Gemini thinkingConfig 注入（零拷贝预检查）。
 pub fn needs_apply_gemini(value: &Value) -> Result<bool, UpstreamError> {
     let Some(obj) = value.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
-    Ok(!obj
-        .get("generationConfig")
-        .is_some_and(|cfg| !cfg.is_object() || cfg.get("thinkingConfig").is_some()))
+    Ok(!has_gemini_thinking_config(obj))
 }
 
 /// 在已解析请求体上原地执行 Gemini thinkingConfig 注入；无改动时返回 `Ok(false)`。
@@ -553,10 +641,7 @@ pub fn apply_gemini_value(
     let Some(obj) = value.as_object_mut() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
-    if obj
-        .get("generationConfig")
-        .is_some_and(|cfg| !cfg.is_object() || cfg.get("thinkingConfig").is_some())
-    {
+    if has_gemini_thinking_config(obj) {
         return Ok(false);
     }
     let Some(cfg) = obj
@@ -615,6 +700,44 @@ mod tests {
             }),
             "Anthropic"
         );
+        // Claude Code 4.6+: thinking: adaptive + output_config.effort
+        assert_eq!(
+            parse(r#"{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}"#),
+            high,
+            "Anthropic adaptive + output_config.effort"
+        );
+        assert_eq!(
+            parse(r#"{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}"#),
+            high,
+            "Anthropic max 向上折叠到 High，不退化成 medium"
+        );
+        // 仅带 output_config.effort 但未开 thinking 时不主动开启思考
+        assert_eq!(
+            parse(r#"{"output_config":{"effort":"high"}}"#),
+            RequestReasoning::Unspecified,
+        );
+        // Gemini thinkingConfig: thinkingBudget & Gemini 3 thinkingLevel（camelCase / snake_case）
+        assert_eq!(
+            parse(r#"{"generationConfig":{"thinkingConfig":{"thinkingBudget":4096}}}"#),
+            RequestReasoning::Enabled(ReasoningDirective {
+                effort: None,
+                budget_tokens: Some(4096),
+            }),
+            "Gemini thinkingBudget"
+        );
+        assert_eq!(
+            parse(r#"{"generation_config":{"thinking_config":{"thinking_level":"HIGH"}}}"#),
+            high,
+            "Gemini 3 snake_case thinking_level"
+        );
+        assert_eq!(
+            parse(r#"{"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}"#),
+            RequestReasoning::Enabled(ReasoningDirective {
+                effort: None,
+                budget_tokens: None,
+            }),
+            "Gemini dynamic thinking (-1)"
+        );
         assert_eq!(
             parse(r#"{"reasoning":{"max_tokens":2048}}"#),
             RequestReasoning::Enabled(ReasoningDirective {
@@ -640,6 +763,8 @@ mod tests {
             r#"{"reasoning":{"effort":"none"}}"#,
             r#"{"reasoning_effort":"none"}"#,
             r#"{"thinking":{"type":"disabled"}}"#,
+            r#"{"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}"#,
+            r#"{"generation_config":{"thinking_config":{"thinking_level":"none"}}}"#,
         ] {
             assert_eq!(parse(body), RequestReasoning::Disabled, "{body}");
         }
@@ -796,7 +921,7 @@ mod tests {
     }
 
     /// 请求体里能出现的各种写法（含只在内容里提到、顶层没有的）。
-    const BODIES: [&str; 17] = [
+    const BODIES: [&str; 21] = [
         r#"{"model":"m"}"#,
         r#"{"model":"m","messages":[{"role":"user","content":"explain \"reasoning\" and \"thinking\" to me"}]}"#,
         r#"{"model":"m","reasoning":{"effort":"high"}}"#,
@@ -810,9 +935,13 @@ mod tests {
         r#"{"model":"m","reasoning_effort":"none"}"#,
         r#"{"model":"m","reasoning_effort":"bogus"}"#,
         r#"{"model":"m","thinking":{"type":"enabled","budget_tokens":4096}}"#,
+        r#"{"model":"m","thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}"#,
         r#"{"model":"m","thinking":{"type":"disabled"}}"#,
         r#"{"model":"m","thinking":{"type":"enabled"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hm\nhm","signature":"x"}]}]}"#,
         r#"{"model":"m","reasoning":{"effort":"low"},"reasoning_effort":"high","thinking":{"type":"disabled"}}"#,
+        r#"{"model":"m","generationConfig":{"thinkingConfig":{"thinkingBudget":4096}}}"#,
+        r#"{"model":"m","generation_config":{"thinking_config":{"thinking_level":"high"}}}"#,
+        r#"{"model":"m","generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}"#,
         r"[1,2,3]",
     ];
 

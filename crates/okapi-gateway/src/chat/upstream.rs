@@ -132,12 +132,6 @@ pub(super) fn build_upstream_body_for_attempt(
             server_tools: bill.server_tools.has_tools(),
         },
     )?;
-    // 渠道允许丢的工具：这次转换确实丢了，记进诊断，日志里看得到少了什么
-    let lost = lost_tools(info, bill);
-    if plan.converts(bill.ingress) && !lost.is_empty() {
-        bill.trace
-            .set("dropped_tools", serde_json::json!(lost.all()));
-    }
     let native_responses = plan.native_responses();
     let dialect = plan.dialect.as_str();
     let parsed_source = match source_value {
@@ -147,6 +141,7 @@ pub(super) fn build_upstream_body_for_attempt(
                 .map_err(|e| UpstreamError::Build(e.to_string()))?,
         ),
     };
+    record_conversion_loss(bill, info, plan, parsed_source.as_ref());
     let mut working = WorkingBody::new(source.clone(), parsed_source);
     maybe_compact_on_switch(bill, &mut working, switched_channel);
 
@@ -221,6 +216,37 @@ pub(super) fn build_upstream_body_for_attempt(
         apply_fallback_reasoning(&mut working, plan.operation, directive)?;
     }
     working.into_bytes()
+}
+
+fn record_conversion_loss(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    plan: ExecutionPlan,
+    source: &serde_json::Value,
+) {
+    if !plan.converts(bill.ingress) {
+        bill.trace.remove("dropped_tools");
+        bill.trace.remove("dropped_fields");
+        return;
+    }
+    let lost = lost_tools(info, bill);
+    if lost.is_empty() {
+        bill.trace.remove("dropped_tools");
+    } else {
+        bill.trace
+            .set("dropped_tools", serde_json::json!(lost.all()));
+    }
+    let dropped = okapi_providers::convert::field_loss::dropped_fields(
+        super::super::execution_plan::format(bill.ingress),
+        plan.operation.api_format(),
+        source,
+    );
+    if dropped.is_empty() {
+        bill.trace.remove("dropped_fields");
+    } else {
+        bill.trace
+            .set("dropped_fields", serde_json::json!(dropped));
+    }
 }
 
 fn apply_fallback_reasoning(

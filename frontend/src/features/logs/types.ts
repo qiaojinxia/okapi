@@ -54,6 +54,8 @@ export interface LogDiagnostics {
   error_message?: string
   response_model?: string
   reasoning_effort?: string
+  dropped_tools?: string[]
+  dropped_fields?: string[]
   user_agent?: string
   session_id?: string
   request_failed?: boolean

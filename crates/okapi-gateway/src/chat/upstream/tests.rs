@@ -383,3 +383,92 @@ async fn chat_stream_errors_survive_conversion_to_other_dialects() {
         );
     }
 }
+
+#[tokio::test]
+async fn cross_dialect_fixes_preserve_effort_cache_and_record_field_loss() {
+    // 1. Responses (带 prompt_cache_key) 两跳 → Anthropic：折算 ephemeral 缓存断点，且不误报 prompt_cache_key 丢失
+    let (bill, info) = test_billing(Ingress::Responses, "claude-sonnet-5-5");
+    let raw = Bytes::from_static(
+        br#"{"model":"claude-sonnet-5-5","instructions":"Be terse","input":"hello","prompt_cache_key":"codex-s1","service_tier":"priority"}"#,
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("valid json");
+    let anthropic = candidate("anthropic", None);
+    let built = build_upstream_body(
+        &bill,
+        &info,
+        &anthropic,
+        &raw,
+        "claude-sonnet-5-5",
+        Some(&parsed),
+    )
+    .expect("two-hop responses -> anthropic");
+    let v: serde_json::Value = serde_json::from_slice(&built).expect("valid json");
+    assert_eq!(
+        v["system"],
+        serde_json::json!([{"type": "text", "text": "Be terse", "cache_control": {"type": "ephemeral"}}])
+    );
+    assert_eq!(
+        v["messages"][0]["content"][0]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        bill.trace.snapshot()["dropped_fields"],
+        serde_json::json!(["service_tier"])
+    );
+
+    // 2. Gemini (thinkingLevel: high) 两跳 → Anthropic：推理档位不再丢失
+    let (mut gem_bill, gem_info) = test_billing(Ingress::Gemini, "claude-sonnet-5-5");
+    let gem_raw = Bytes::from_static(
+        br#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}"#,
+    );
+    let gem_parsed: serde_json::Value = serde_json::from_slice(&gem_raw).expect("valid json");
+    gem_bill.directive = okapi_providers::reasoning::parse_request_value(&gem_parsed).merge(None);
+    let built = build_upstream_body(
+        &gem_bill,
+        &gem_info,
+        &anthropic,
+        &gem_raw,
+        "claude-sonnet-5-5",
+        Some(&gem_parsed),
+    )
+    .expect("two-hop gemini -> anthropic");
+    let gv: serde_json::Value = serde_json::from_slice(&built).expect("valid json");
+    assert_eq!(gv["output_config"]["effort"], "high");
+    assert_eq!(gv["thinking"]["type"], "adaptive");
+
+    // 3. Claude Code (adaptive + output_config.effort=high + cache_control + thinking 历史) → OpenAI：
+    //    effort 保持 high（不退化成 medium），并记 dropped_fields；切回同方言 Anthropic 时清掉残留
+    let (mut cc_bill, cc_info) = test_billing(Ingress::Anthropic, "gpt-5");
+    let cc_raw = Bytes::from_static(
+        br#"{"model":"gpt-5","max_tokens":1024,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"old","signature":"s"},{"type":"text","text":"ok"}]},{"role":"user","content":"next"}]}"#,
+    );
+    let cc_parsed: serde_json::Value = serde_json::from_slice(&cc_raw).expect("valid json");
+    cc_bill.directive = okapi_providers::reasoning::parse_request_value(&cc_parsed).merge(None);
+    let openai = candidate("openai", None);
+    let built = build_upstream_body(
+        &cc_bill,
+        &cc_info,
+        &openai,
+        &cc_raw,
+        "gpt-5",
+        Some(&cc_parsed),
+    )
+    .expect("anthropic -> openai");
+    let ov: serde_json::Value = serde_json::from_slice(&built).expect("valid json");
+    assert_eq!(ov["reasoning_effort"], "high");
+    assert_eq!(
+        cc_bill.trace.snapshot()["dropped_fields"],
+        serde_json::json!(["cache_control", "thinking_history"])
+    );
+    // 故障转移切回原生同方言 Anthropic 渠道后，旧尝试的 dropped_fields 被清除
+    build_upstream_body(
+        &cc_bill,
+        &cc_info,
+        &anthropic,
+        &cc_raw,
+        "claude-sonnet-5-5",
+        Some(&cc_parsed),
+    )
+    .expect("failover to native anthropic");
+    assert!(cc_bill.trace.snapshot().get("dropped_fields").is_none());
+}

@@ -755,3 +755,47 @@ fn stream_blocks_never_overlap() {
     assert_eq!(starts, 3);
     assert!(open.is_none());
 }
+
+/// 兼容上游（如 OpenRouter 部分模型）把推理放在 `reasoning` 而非 `reasoning_content` 时，
+/// 非流式与流式回向都要转为 Anthropic thinking 块，不能静默丢失。
+#[test]
+fn response_and_stream_fall_back_to_reasoning_field() {
+    let body = json!({
+        "id": "chatcmpl-r", "object": "chat.completion", "model": "gpt-x",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {
+            "role": "assistant", "content": "42", "reasoning": "step by step"
+        }}]
+    });
+    let (out, _) =
+        response_openai_to_anthropic(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+    let out: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(out["content"][0]["type"], "thinking");
+    assert_eq!(out["content"][0]["thinking"], "step by step");
+    assert_eq!(out["content"][1]["text"], "42");
+
+    let mut st = OaiStreamToAnthropic::new("gpt-x");
+    let mut thinking = String::new();
+    let mut text = String::new();
+    for ev in [
+        oai_chunk(&json!({"reasoning": "plan"}), None),
+        oai_chunk(&json!({"content": "ok"}), Some("stop")),
+        ChatEvent::Done,
+    ] {
+        for item in st.step(Ok(ev)) {
+            if let ChatEvent::Data { raw, .. } = item.unwrap() {
+                let p: Value = serde_json::from_str(&raw).unwrap();
+                match p.pointer("/delta/type").and_then(Value::as_str) {
+                    Some("thinking_delta") => {
+                        thinking.push_str(p["delta"]["thinking"].as_str().unwrap_or(""));
+                    }
+                    Some("text_delta") => {
+                        text.push_str(p["delta"]["text"].as_str().unwrap_or(""));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(thinking, "plan");
+    assert_eq!(text, "ok");
+}

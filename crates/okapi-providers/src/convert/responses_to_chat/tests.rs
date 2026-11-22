@@ -422,4 +422,33 @@ mod sixth_scan_tests {
             "Hello"
         );
     }
+
+    #[test]
+    fn request_forwards_prompt_cache_key_and_session_metadata() {
+        let out = request(&json!({
+            "input": "hi",
+            "prompt_cache_key": "sess-123",
+            "prompt_cache_retention": "24h",
+            "service_tier": "priority",
+            "user": "u-1",
+            "metadata": {"trace": "abc"}
+        }))
+        .unwrap();
+        assert_eq!(out["prompt_cache_key"], "sess-123");
+        assert_eq!(out["prompt_cache_retention"], "24h");
+        assert_eq!(out["service_tier"], "priority");
+        assert_eq!(out["user"], "u-1");
+        assert_eq!(out["metadata"], json!({"trace": "abc"}));
+
+        let with_nulls = request(&json!({
+            "input": "hi",
+            "prompt_cache_key": null,
+            "service_tier": null,
+            "user": null
+        }))
+        .unwrap();
+        assert!(with_nulls.get("prompt_cache_key").is_none());
+        assert!(with_nulls.get("service_tier").is_none());
+        assert!(with_nulls.get("user").is_none());
+    }
 }
