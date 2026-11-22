@@ -24,6 +24,7 @@ mod channel_notes;
 mod cluster_inflight;
 mod kpi;
 mod media;
+mod model_cooldown;
 pub mod response_affinity;
 mod responses_ws;
 mod session_affinity;

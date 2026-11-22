@@ -40,10 +40,18 @@ pub fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
         {
             KeyFailure::QuotaExhausted
         }
-        UpstreamError::Status { status: 529, .. } => KeyFailure::RateLimited {
-            retry_after_secs: Some(err.retry_after_secs().unwrap_or(600)),
+        // 429 正文明说账号配额/欠费或凭证失效（如 billing_hard_limit_reached / Arrearage /
+        // BILLING_DISABLED / DeepSeek Insufficient Balance）：复用 account_fault，不能误判为 60s 限速。
+        UpstreamError::Status { status: 429, .. } => match err.account_fault() {
+            Some(AccountFault::QuotaExhausted) => KeyFailure::QuotaExhausted,
+            Some(AccountFault::Invalid) => KeyFailure::Invalid,
+            None => KeyFailure::RateLimited {
+                retry_after_secs: err.retry_after_secs(),
+            },
         },
-        UpstreamError::Status { status: 429, .. } => KeyFailure::RateLimited {
+        // 529（过载）：上游没给 Retry-After 时由 key_health 走指数退避（15→30→60→120→300s），
+        // 不再硬编码 600s 把整池打空。
+        UpstreamError::Status { status: 529, .. } => KeyFailure::RateLimited {
             retry_after_secs: err.retry_after_secs(),
         },
         UpstreamError::Status { status: 401, .. } => KeyFailure::Invalid,
@@ -239,11 +247,39 @@ mod tests {
             KeyFailure::QuotaExhausted
         ));
         assert!(matches!(
+            failure_kind_of(&status(
+                429,
+                r#"{"error":{"code":"billing_hard_limit_reached","message":"limit"}}"#
+            )),
+            KeyFailure::QuotaExhausted
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(
+                429,
+                r#"{"error":{"message":"Your credit balance is too low"}}"#
+            )),
+            KeyFailure::QuotaExhausted
+        ));
+        // 529 无 Retry-After 时交给 key_health 走 Redis 指数退避（不再硬编码 600s）
+        assert!(matches!(
             failure_kind_of(&status(529, "")),
             KeyFailure::RateLimited {
-                retry_after_secs: Some(600)
+                retry_after_secs: None
             }
         ));
+        // 模型/区域级 404/400 允许首字前换渠道且不伤整把 key
+        let model_404 = status(
+            404,
+            r#"{"error":{"code":"model_not_found","message":"no such model"}}"#,
+        );
+        assert!(retriable(&model_404));
+        assert!(matches!(failure_kind_of(&model_404), KeyFailure::Request));
+        let region_400 = status(
+            400,
+            r#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#,
+        );
+        assert!(retriable(&region_400));
+        assert!(matches!(failure_kind_of(&region_400), KeyFailure::Request));
         assert!(matches!(
             failure_kind_of(&status(503, "")),
             KeyFailure::Transient

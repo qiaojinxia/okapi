@@ -121,6 +121,7 @@ pub(super) async fn attempt_json(
                     code: codes::UPSTREAM_ERROR,
                     upstream_status: i16::try_from(status).ok(),
                     failure_kind: KeyFailure::Transient,
+                    model_fault: None,
                 });
             }
             if let Some(mut writer) = response_writer(bill, cand) {
@@ -195,6 +196,7 @@ pub(super) async fn attempt_json(
             code: codes::UPSTREAM_ERROR,
             upstream_status: None,
             failure_kind: KeyFailure::Transient,
+            model_fault: None,
         }),
         Err(err) => Err(classify_fatal(err, failover, channel)),
     }
@@ -287,30 +289,23 @@ pub(super) fn upstream_passthrough_response(
     request_id: Uuid,
 ) -> Response {
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    // Anthropic / Gemini 入口：上游若非本协议错误壳（如 OpenAI 渠道 400），转译为协议壳
+    let raw_status = status.as_u16();
+    // 跨方言错误转译：上游已是入口本方言错误壳时原样透传；否则先结构化提取 message/category，
+    // 再按入口协议规范渲染（避免把整段 JSON 塞进 message，也避免 OpenAI 入口透出 Anthropic/Gemini/Bedrock 壳）。
     let body = match ingress {
         Ingress::Anthropic if !body_is_anthropic_error(&body) => {
-            let message = String::from_utf8_lossy(&body);
-            Bytes::from(
-                serde_json::json!({
-                    "type": "error",
-                    "error": {"type": "upstream_error", "message": message},
-                })
-                .to_string(),
-            )
+            okapi_providers::error_normalize::NormalizedError::parse(raw_status, &body)
+                .render_anthropic(raw_status)
         }
         Ingress::Gemini if !body_is_gemini_error(&body) => {
-            let message = String::from_utf8_lossy(&body);
-            Bytes::from(
-                serde_json::json!({
-                    "error": {
-                        "code": status.as_u16(),
-                        "message": message,
-                        "status": okapi_kernel::error::gemini_status_name(status),
-                    },
-                })
-                .to_string(),
-            )
+            okapi_providers::error_normalize::NormalizedError::parse(raw_status, &body)
+                .render_gemini(raw_status, okapi_kernel::error::gemini_status_name(status))
+        }
+        Ingress::OpenAi | Ingress::Responses | Ingress::ResponsesCompact
+            if !body_is_openai_error(&body) =>
+        {
+            okapi_providers::error_normalize::NormalizedError::parse(raw_status, &body)
+                .render_openai(raw_status)
         }
         Ingress::OpenAi
         | Ingress::Responses
@@ -324,6 +319,22 @@ pub(super) fn upstream_passthrough_response(
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response());
     with_request_id(resp, request_id)
+}
+
+/// OpenAI 错误壳：`{"error": {...}}` 且既非 Anthropic（顶层 `type == "error"`）也非 Gemini（`error.code` 为数字且含 `error.status`）。
+pub(super) fn body_is_openai_error(body: &Bytes) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+        return false;
+    }
+    let Some(err) = v.get("error").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let is_gemini_shape =
+        err.get("code").is_some_and(serde_json::Value::is_number) && err.contains_key("status");
+    !is_gemini_shape
 }
 
 pub(super) fn body_is_anthropic_error(body: &Bytes) -> bool {
@@ -400,5 +411,48 @@ mod native_response_meta_tests {
         );
         assert_eq!(meta.model.as_deref(), Some("gemini-2.5-pro"));
         assert_eq!(meta.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[tokio::test]
+    async fn cross_dialect_upstream_errors_normalize_cleanly_while_native_passes_through() {
+        use axum::body::to_bytes;
+        let rid = Uuid::new_v4();
+
+        // 1. OpenAI 原生错误在 OpenAI 入口原样透传
+        let openai_native = Bytes::from_static(
+            br#"{"error":{"message":"bad param","type":"invalid_request_error","param":"top_p","code":"invalid_value"}}"#,
+        );
+        let resp = upstream_passthrough_response(Ingress::OpenAi, 400, openai_native.clone(), rid);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(body, openai_native);
+
+        // 2. Anthropic 上下文超长错误在 OpenAI 入口转译为规范 OpenAI 错误壳
+        let anthropic_err = Bytes::from_static(
+            br#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
+        );
+        let resp = upstream_passthrough_response(Ingress::OpenAi, 400, anthropic_err, rid);
+        let v: serde_json::Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert!(v.get("type").is_none());
+        assert_eq!(v["error"]["code"], "context_length_exceeded");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            v["error"]["message"],
+            "prompt is too long: 210000 tokens > 200000 maximum"
+        );
+
+        // 3. OpenAI 错误在 Anthropic 入口不再把整段 JSON 塞进 message
+        let openai_ctx = Bytes::from_static(
+            br#"{"error":{"message":"This model's maximum context length is 8192 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#,
+        );
+        let resp = upstream_passthrough_response(Ingress::Anthropic, 400, openai_ctx, rid);
+        let v: serde_json::Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            v["error"]["message"],
+            "This model's maximum context length is 8192 tokens."
+        );
     }
 }

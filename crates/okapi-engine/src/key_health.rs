@@ -11,8 +11,65 @@
 //! 其他渠道一起拖下水（全局默认出口是代理时就是整站）。
 use super::state::AppState;
 use okapi_kernel::policies::{EGRESS_PROBE_SETTING as PROBE_SETTING, ProbePolicy};
+use okapi_providers::account_fault::ChannelModelFault;
 use okapi_store::ChannelCandidate;
 use okapi_store::channels::{self, KeyFailure};
+
+const MODEL_UNAVAILABLE_COOLDOWN_SECS: i64 = 60;
+const REGION_RESTRICTED_COOLDOWN_SECS: i64 = 120;
+
+/// 单渠道单模型故障（模型未开通 / 部署缺失 / 出口地区受限）：
+/// 只在 Redis 对 `(channel_key, model)` 施加短冷却，不动 PG `channel_keys`，避免误伤同 key 其它模型。
+pub async fn model_failure(
+    state: &AppState,
+    cand: &ChannelCandidate,
+    model: &str,
+    fault: ChannelModelFault,
+) {
+    let (outcome, secs) = match fault {
+        ChannelModelFault::ModelUnavailable => {
+            ("model_unavailable", MODEL_UNAVAILABLE_COOLDOWN_SECS)
+        }
+        ChannelModelFault::RegionRestricted => {
+            ("region_restricted", REGION_RESTRICTED_COOLDOWN_SECS)
+        }
+    };
+    okapi_kernel::metrics::global().record_upstream_outcome(&cand.provider, outcome);
+    state
+        .sched
+        .model_cooldown_set(cand.channel_key_id, model, secs)
+        .await;
+}
+
+/// 同 [`failure`]，并对无显式 `Retry-After` 的 529 过载套用 Redis 指数退避（15→30→60→120→300s），
+/// 同时打脏标记以便 key 恢复成功时重置过载连续计数。
+pub async fn failure_for_status(
+    state: &AppState,
+    cand: &ChannelCandidate,
+    code: &str,
+    upstream_status: Option<i16>,
+    mut kind: KeyFailure,
+) {
+    let mut overload_backoff = false;
+    if upstream_status == Some(529)
+        && let KeyFailure::RateLimited {
+            retry_after_secs: retry @ None,
+        } = &mut kind
+    {
+        *retry = Some(state.sched.overload_backoff_secs(cand.channel_key_id).await);
+        overload_backoff = true;
+    }
+    failure(state, cand, code, kind).await;
+    if overload_backoff {
+        state
+            .health
+            .key_failures
+            .insert(cand.channel_key_id, ())
+            .await;
+        state.sched.health_mark_key_dirty(cand.channel_key_id).await;
+        state.health.dirty_keys_cache.invalidate(&0).await;
+    }
+}
 
 /// 登记一次上游失败。只有瞬态失败参与连续计数，也只有它留本地标记等成功来清。
 pub async fn failure(state: &AppState, cand: &ChannelCandidate, code: &str, kind: KeyFailure) {
@@ -182,6 +239,10 @@ pub async fn success(state: &AppState, cand: &ChannelCandidate) {
             .health_clear_key_dirty(cand.channel_key_id)
             .await;
         state.health.dirty_keys_cache.invalidate(&0).await;
+        state
+            .sched
+            .overload_backoff_reset(cand.channel_key_id)
+            .await;
         let _ = channels::clear_key_failures(&state.pg, cand.channel_key_id).await;
     })
     .await;

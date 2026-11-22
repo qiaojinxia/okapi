@@ -302,11 +302,13 @@ impl ForwardFailure {
 }
 
 enum AttemptError {
-    /// 首字前失败：可换渠道重试；failure_kind 驱动 key 状态机（§3.4）。
+    /// 首字前失败：可换渠道重试；failure_kind 驱动 key 状态机（§3.4），
+    /// model_fault 驱动 Redis `(channel_key, model)` 级短冷却而不伤整把 key。
     Retriable {
         code: &'static str,
         upstream_status: Option<i16>,
         failure_kind: KeyFailure,
+        model_fault: Option<okapi_providers::account_fault::ChannelModelFault>,
     },
     /// 不可重试：立即向客户端返回。
     Fatal(ForwardFailure),

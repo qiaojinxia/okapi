@@ -61,6 +61,7 @@ pub(super) async fn attempt_stream(
                 code: codes::UPSTREAM_TIMEOUT,
                 upstream_status: None,
                 failure_kind: KeyFailure::Request,
+                model_fault: None,
             });
         }
         Ok((Err(err), _)) => return Err(classify_fatal(err, failover, channel)),
@@ -71,6 +72,7 @@ pub(super) async fn attempt_stream(
             code: codes::UPSTREAM_ERROR,
             upstream_status: None,
             failure_kind: KeyFailure::Transient,
+            model_fault: None,
         });
     };
 
@@ -94,6 +96,7 @@ pub(super) async fn attempt_stream(
                 code: codes::UPSTREAM_TIMEOUT,
                 upstream_status: None,
                 failure_kind: KeyFailure::Request,
+                model_fault: None,
             })
         }
         Ok(Err(err)) => Err(classify_fatal(err, failover, channel)),
@@ -290,6 +293,7 @@ pub(super) fn empty_completion(
         } else {
             KeyFailure::Transient
         },
+        model_fault: None,
     }
 }
 

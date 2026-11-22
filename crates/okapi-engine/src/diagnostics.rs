@@ -255,9 +255,20 @@ impl Trace {
             // 已经收过尾的尝试又失败了：以失败的时刻为准
             .or_else(|| error.and(data.attempt_origin).map(elapsed_ms));
         let details = error.map(|err| error_details(err, &data.secrets));
+        let category = error.and_then(|err| match err {
+            UpstreamError::Status { status, body, .. } => Some(
+                okapi_providers::error_normalize::NormalizedError::parse(*status, body)
+                    .category
+                    .as_str(),
+            ),
+            _ => None,
+        });
         if let Some((phase, message)) = &details {
             data.fields["error_phase"] = json!(phase);
             data.fields["error_message"] = json!(message);
+        }
+        if let Some(cat) = category {
+            data.fields["upstream_error_category"] = json!(cat);
         }
         if data.attempt_recorded
             && let Some(last) = data.fields["attempts"]
@@ -277,6 +288,9 @@ impl Trace {
             }
             if let Some(err) = error {
                 last["error_code"] = json!(err.error_code());
+            }
+            if let Some(cat) = category {
+                last["upstream_error_category"] = json!(cat);
             }
             if let Some((phase, message)) = details {
                 last["error_phase"] = json!(phase);

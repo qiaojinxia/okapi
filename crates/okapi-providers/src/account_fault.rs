@@ -18,22 +18,51 @@ pub enum AccountFault {
     Invalid,
 }
 
+/// 渠道/模型级故障：问题出在「这条渠道/区域对这个模型不可用」，不是请求本身非法，
+/// 也不是整把 key 失效——首字前允许 failover 到同池其它渠道，并对 `(channel_key, model)` 做短冷却。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelModelFault {
+    /// 上游明确说明该模型 / 部署不存在（如 OpenAI `model_not_found`、Azure `DeploymentNotFound`、Bedrock `ResourceNotFoundException`）。
+    ModelUnavailable,
+    /// 上游明确说明当前出口地区 / IP 不支持访问（如 OpenAI `unsupported_country_region_territory`、Gemini `User location is not supported`）。
+    RegionRestricted,
+}
+
 /// 账号级错误都是几百字节的 JSON；更大的正文多半回显了请求，不读。
 const MAX_BODY: usize = 16 * 1024;
 
-/// `error.code` / `error.type` / 顶层 `code`：余额或配额耗尽。
-const QUOTA_CODES: [&str; 4] = [
+/// `error.code` / `error.type` / 顶层 `code` / `__type`：余额或配额耗尽。
+const QUOTA_CODES: [&str; 7] = [
     // OpenAI：账单硬上限 / 账单未激活（HTTP 400 或 429，视账号）
     "billing_hard_limit_reached",
     "billing_not_active",
     "insufficient_quota",
+    "insufficient_balance",
+    "quota_exceeded",
+    "billing_disabled",
     // 阿里云百炼：账号欠费（HTTP 400）
     "arrearage",
 ];
+/// Gemini / Google `details[].reason`：计费未启用或配额停用。
+const QUOTA_REASONS: [&str; 1] = ["billing_disabled"];
 /// 句首短语：余额耗尽。
-const QUOTA_PREFIXES: [&str; 1] = ["your credit balance is too low"];
-/// Gemini `details[].reason`：key 无效或已过期。
-const INVALID_REASONS: [&str; 1] = ["api_key_invalid"];
+const QUOTA_PREFIXES: [&str; 3] = [
+    "your credit balance is too low",
+    "insufficient balance",
+    "you exceeded your current quota",
+];
+/// `error.code` / `error.type` / 顶层 `code` / `__type`：凭证或账号失效（如 AWS Bedrock）。
+const INVALID_CODES: [&str; 3] = [
+    "unrecognizedclientexception",
+    "expiredtokenexception",
+    "invalidclienttokenid",
+];
+/// Gemini / Google `details[].reason`：key 无效、已过期、服务被封或账号停用。
+const INVALID_REASONS: [&str; 3] = [
+    "api_key_invalid",
+    "api_key_service_blocked",
+    "consumer_suspended",
+];
 /// 句首短语：凭证 / 账号不可用。
 const INVALID_PREFIXES: [&str; 5] = [
     "this organization has been disabled",
@@ -43,6 +72,17 @@ const INVALID_PREFIXES: [&str; 5] = [
     // AWS（Bedrock）：签名用的凭证无效
     "the security token included in the request is invalid",
 ];
+
+/// `error.code` / `error.type` / 顶层 `code` / `__type`：模型或部署在此渠道不存在。
+const MODEL_UNAVAILABLE_CODES: [&str; 3] = [
+    "model_not_found",
+    "deploymentnotfound",
+    "resourcenotfoundexception",
+];
+/// `error.code` / `error.type`：地区/出口 IP 受限。
+const REGION_RESTRICTED_CODES: [&str; 1] = ["unsupported_country_region_territory"];
+/// 句首短语：地区受限（Gemini `FAILED_PRECONDITION`）。
+const REGION_RESTRICTED_PREFIXES: [&str; 1] = ["user location is not supported"];
 
 /// 从上游错误正文认出账号级故障；认不出（或不是 JSON、过大）返回 None。
 #[must_use]
@@ -58,9 +98,10 @@ pub fn classify(body: &[u8]) -> Option<AccountFault> {
         error.and_then(|e| e.get("code")),
         error.and_then(|e| e.get("type")),
         root.get("code"),
+        root.get("__type"),
     ];
     let messages = [error.and_then(|e| e.get("message")), root.get("message")];
-    let reasons = error
+    let mut reasons = error
         .and_then(|e| e.get("details"))
         .and_then(Value::as_array)
         .into_iter()
@@ -68,9 +109,14 @@ pub fn classify(body: &[u8]) -> Option<AccountFault> {
         .filter_map(|detail| detail.get("reason").and_then(Value::as_str));
 
     // 先判更重的一类：两类同时命中时按「需要人工处理」算
-    if reasons
-        .clone()
-        .any(|reason| any_equal(reason, &INVALID_REASONS))
+    if codes
+        .iter()
+        .flatten()
+        .filter_map(|c| c.as_str())
+        .any(|c| any_equal(c, &INVALID_CODES))
+        || reasons
+            .clone()
+            .any(|reason| any_equal(reason, &INVALID_REASONS))
         || messages
             .iter()
             .flatten()
@@ -84,6 +130,7 @@ pub fn classify(body: &[u8]) -> Option<AccountFault> {
         .flatten()
         .filter_map(|c| c.as_str())
         .any(|c| any_equal(c, &QUOTA_CODES))
+        || reasons.any(|reason| any_equal(reason, &QUOTA_REASONS))
         || messages
             .iter()
             .flatten()
@@ -91,6 +138,49 @@ pub fn classify(body: &[u8]) -> Option<AccountFault> {
             .any(|m| any_prefix(m, &QUOTA_PREFIXES))
     {
         return Some(AccountFault::QuotaExhausted);
+    }
+    None
+}
+
+/// 识别「仅当前渠道/区域对该模型不可用」的 400/403/404 故障（只读服务端可控字段，防回显注入）。
+/// 泛化的 404（如未知路径 `not_found`）返回 None，仍由请求策略 `retry_statuses` 决定。
+#[must_use]
+pub fn classify_channel_model(status: u16, body: &[u8]) -> Option<ChannelModelFault> {
+    if !matches!(status, 400 | 403 | 404) || body.is_empty() || body.len() > MAX_BODY {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let root = value.as_object()?;
+    let error = root.get("error").and_then(Value::as_object);
+    let codes = [
+        error.and_then(|e| e.get("code")),
+        error.and_then(|e| e.get("type")),
+        root.get("code"),
+        root.get("__type"),
+    ];
+    let messages = [error.and_then(|e| e.get("message")), root.get("message")];
+    if matches!(status, 400 | 404)
+        && codes
+            .iter()
+            .flatten()
+            .filter_map(|c| c.as_str())
+            .any(|c| any_equal(c, &MODEL_UNAVAILABLE_CODES))
+    {
+        return Some(ChannelModelFault::ModelUnavailable);
+    }
+    if matches!(status, 400 | 403)
+        && (codes
+            .iter()
+            .flatten()
+            .filter_map(|c| c.as_str())
+            .any(|c| any_equal(c, &REGION_RESTRICTED_CODES))
+            || messages
+                .iter()
+                .flatten()
+                .filter_map(|m| m.as_str())
+                .any(|m| any_prefix(m, &REGION_RESTRICTED_PREFIXES)))
+    {
+        return Some(ChannelModelFault::RegionRestricted);
     }
     None
 }
@@ -266,6 +356,72 @@ mod tests {
         assert_eq!(
             classify_str(
                 r#"{"error":{"message":"余额不足，请充值后再试一次吧，谢谢你的耐心等待"}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn vendor_account_faults_and_channel_model_faults_are_classified_safely() {
+        // DeepSeek / Google / Bedrock 账号级故障
+        assert_eq!(
+            classify_str(
+                r#"{"error":{"message":"Insufficient Balance","type":"invalid_request_error"}}"#
+            ),
+            Some(AccountFault::QuotaExhausted)
+        );
+        assert_eq!(
+            classify_str(
+                r#"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"BILLING_DISABLED"}]}}"#
+            ),
+            Some(AccountFault::QuotaExhausted)
+        );
+        assert_eq!(
+            classify_str(
+                r#"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"API_KEY_SERVICE_BLOCKED"}]}}"#
+            ),
+            Some(AccountFault::Invalid)
+        );
+        assert_eq!(
+            classify_str(r#"{"__type":"UnrecognizedClientException","message":"bad token"}"#),
+            Some(AccountFault::Invalid)
+        );
+
+        // 渠道/模型级故障（仅伤 (channel_key, model)，允许首字前换渠道）
+        assert_eq!(
+            classify_channel_model(
+                404,
+                br#"{"error":{"code":"model_not_found","message":"The model does not exist"}}"#
+            ),
+            Some(ChannelModelFault::ModelUnavailable)
+        );
+        assert_eq!(
+            classify_channel_model(
+                404,
+                br#"{"error":{"code":"DeploymentNotFound","message":"deployment missing"}}"#
+            ),
+            Some(ChannelModelFault::ModelUnavailable)
+        );
+        assert_eq!(
+            classify_channel_model(
+                400,
+                br#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#
+            ),
+            Some(ChannelModelFault::RegionRestricted)
+        );
+        // 泛化 404（非 model_not_found）不自动归类，留给 retry_statuses 策略控制
+        assert_eq!(
+            classify_channel_model(
+                404,
+                br#"{"error":{"type":"not_found","message":"no such route on this relay"}}"#
+            ),
+            None
+        );
+        // 防回显：调用方把关键词塞进消息中间不能触发渠道故障
+        assert_eq!(
+            classify_channel_model(
+                400,
+                br#"{"error":{"type":"invalid_request_error","message":"field foo: User location is not supported"}}"#
             ),
             None
         );

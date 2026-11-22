@@ -129,10 +129,11 @@ impl StreamFailure {
 
 fn status_of(name: &str) -> Option<u16> {
     match name {
+        // Anthropic 风格过载统一映射 529（与 `anthropic::stream_error` 对齐，走过载指数退避冷却）
+        "overloaded_error" => Some(529),
         // 上游过载 / 暂不可用：换个时间或换个渠道就行
         "server_is_overloaded"
         | "slow_down"
-        | "overloaded_error"
         | "service_unavailable_error"
         | "service_unavailable" => Some(503),
         // 限速 / 订阅窗口用尽 / 配额耗尽：按 429 走 key 冷却（insufficient_quota 由网关按体判成配额耗尽）

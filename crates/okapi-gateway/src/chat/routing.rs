@@ -168,13 +168,32 @@ pub(super) async fn eligible_candidates(
         .state
         .retain_margin_ok_ordered(&bill.group, &mut candidates, quota_order, shape.as_ref())
         .await;
+    // 跳过处于 `(channel_key, model)` Redis 冷却中的候选（如 model_not_found / 地区限制），
+    // 不影响同一把 key 上的其它模型；管理员点名测试（pin）不受冷却过滤。
+    let mut next_model_cooldown: Option<i64> = None;
+    if bill.pin.is_none() && !candidates.is_empty() {
+        let key_ids: Vec<i64> = candidates.iter().map(|c| c.channel_key_id).collect();
+        let active = bill
+            .state
+            .sched
+            .model_cooldown_active(&bill.model, &key_ids)
+            .await;
+        if !active.is_empty() {
+            next_model_cooldown = active.values().copied().min();
+            candidates.retain(|c| !active.contains_key(&c.channel_key_id));
+        }
+    }
     if candidates.is_empty() {
         let mut err = AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             super::super::state::no_candidates_code(retained.margin_removed),
         );
+        let earliest = [retained.next_quota_reset, next_model_cooldown]
+            .into_iter()
+            .flatten()
+            .min();
         if retained.margin_removed == 0
-            && let Some(secs) = recovery_secs(bill, retained.next_quota_reset).await
+            && let Some(secs) = recovery_secs(bill, earliest).await
         {
             err = err.with_retry_after(secs);
         }

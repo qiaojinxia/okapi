@@ -33,6 +33,7 @@ pub mod custom_pass;
 pub mod egress_meter;
 pub mod egress_probe;
 pub mod error;
+pub mod error_normalize;
 pub mod gemini;
 pub mod http;
 pub mod image_store;

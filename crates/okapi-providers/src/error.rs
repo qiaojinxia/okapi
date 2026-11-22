@@ -116,9 +116,28 @@ impl UpstreamError {
                 status: 401 | 402 | 403 | 408 | 429 | 500..=599,
                 ..
             } => true,
-            Self::Status { .. } => self.account_fault().is_some(),
+            Self::Status { .. } => {
+                self.account_fault().is_some() || self.channel_model_fault().is_some()
+            }
             Self::Build(reason) => reason.starts_with("channel_control:"),
             Self::Session { .. } => false,
+        }
+    }
+
+    /// 仅当前渠道/区域对该模型不可用的故障（如 `model_not_found`、`DeploymentNotFound`、
+    /// `unsupported_country_region_territory`、Gemini 地区限制）：允许首字前换渠道且不拉黑整把 key。
+    #[must_use]
+    pub fn channel_model_fault(&self) -> Option<crate::account_fault::ChannelModelFault> {
+        match self {
+            Self::Status { status, body, .. } => {
+                crate::account_fault::classify_channel_model(*status, body)
+            }
+            Self::Connect(_)
+            | Self::Unreachable { .. }
+            | Self::Timeout
+            | Self::Stream(_)
+            | Self::Build(_)
+            | Self::Session { .. } => None,
         }
     }
 

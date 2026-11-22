@@ -444,10 +444,12 @@ fn account_level_errors_inside_request_statuses_register_on_the_key_and_fail_ove
             code,
             upstream_status,
             failure_kind,
+            model_fault,
         } => {
             assert_eq!(code, "upstream_status");
             assert_eq!(upstream_status, Some(400));
             assert!(matches!(failure_kind, KeyFailure::QuotaExhausted));
+            assert_eq!(model_fault, None);
         }
         AttemptError::Fatal(_) => panic!("账号级错误应换渠道"),
     }

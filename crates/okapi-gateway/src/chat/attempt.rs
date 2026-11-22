@@ -157,6 +157,7 @@ pub(super) async fn try_model(
                     code: codes::UPSTREAM_TIMEOUT,
                     upstream_status: None,
                     failure_kind: KeyFailure::Request,
+                    model_fault: None,
                 })
             });
             if oauth
@@ -269,6 +270,7 @@ pub(super) async fn try_model(
                     failure_kind: KeyFailure::Transient | KeyFailure::Request | KeyFailure::Unreachable { .. },
                     code,
                     upstream_status,
+                    model_fault: None,
                 }) if *code != codes::EMPTY_COMPLETION && *code != codes::NO_AVAILABLE_CHANNEL && matches!(upstream_status, None | Some(408 | 500..=528 | 530..=599))
             );
             if retry < same_key_retries && transient {
@@ -306,6 +308,7 @@ pub(super) async fn try_model(
                 code,
                 upstream_status,
                 failure_kind,
+                model_fault,
             }) => {
                 if code == codes::NO_AVAILABLE_CHANNEL {
                     // Admission denied before the wire attempt. Busy candidates
@@ -324,9 +327,22 @@ pub(super) async fn try_model(
                     request_id = %bill.request_id,
                     channel_key = cand.channel_key_id,
                     code,
+                    ?model_fault,
                     "首字前失败，failover 下一候选"
                 );
-                super::super::key_health::failure(&bill.state, &cand, code, failure_kind).await;
+                if let Some(fault) = model_fault {
+                    super::super::key_health::model_failure(&bill.state, &cand, &bill.model, fault)
+                        .await;
+                } else {
+                    super::super::key_health::failure_for_status(
+                        &bill.state,
+                        &cand,
+                        code,
+                        upstream_status,
+                        failure_kind,
+                    )
+                    .await;
+                }
                 last_code = code;
                 last_status = upstream_status;
                 last_kind = Some(failure_kind);
@@ -429,6 +445,7 @@ pub(super) fn classify_fatal(
             code: err.error_code(),
             upstream_status: err.upstream_status(),
             failure_kind: failure_kind_of(&err),
+            model_fault: err.channel_model_fault(),
         };
     }
     match err {
