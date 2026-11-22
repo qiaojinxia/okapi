@@ -9,7 +9,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, codes};
 use okapi_kernel::error::AppError;
-use okapi_kernel::sched_redis::session_hash;
+use okapi_kernel::sched_redis::session_hash_with_prefix;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -47,7 +47,12 @@ pub async fn chat_completions(
             probe.messages.len(),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, None, &probe.messages),
+        session: session_hash_with_prefix(
+            &headers,
+            probe.prompt_cache_key.as_deref(),
+            &probe.prefix_segments(),
+            &probe.messages,
+        ),
         service_tier: probe.service_tier.clone(),
         needs_tools: features.tools,
         needs_vision: features.vision,
@@ -153,7 +158,12 @@ pub(super) async fn responses_entry(
             input_messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, probe.prompt_cache_key.as_deref(), &input_messages),
+        session: session_hash_with_prefix(
+            &headers,
+            probe.prompt_cache_key.as_deref(),
+            &probe.prefix_segments(),
+            &input_messages,
+        ),
         service_tier: probe.service_tier.clone(),
         needs_tools: features.tools,
         needs_vision: features.vision,
@@ -251,7 +261,12 @@ pub async fn gemini_generate(
             input_messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, None, &input_messages),
+        session: session_hash_with_prefix(
+            &headers,
+            probe.cached_content.as_deref(),
+            &probe.prefix_segments(),
+            &input_messages,
+        ),
         service_tier: None,
         needs_tools: features.tools,
         needs_vision: features.vision,
@@ -305,9 +320,10 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
             probe.messages.len(),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(
+        session: session_hash_with_prefix(
             &headers,
             probe.client_session_id().as_deref(),
+            &probe.prefix_segments(),
             &probe.messages,
         ),
         service_tier: None,

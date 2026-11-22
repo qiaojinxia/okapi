@@ -164,7 +164,6 @@ pub async fn my_breakdown(
             "original_micro": total[5].saturating_add(total[6]),
             "errors": errors,
             "success_rate_bp": if total[0] > 0 { json!(rate_bp(total[0].saturating_sub(errors), total[0])) } else { Value::Null },
-            "cache_hit_bp": rate_bp(total[2], total[1]),
             "avg_rpm_micro": scaled_ratio(total[0], minutes, 1_000_000),
             "avg_tpm_micro": scaled_ratio(tokens, minutes, 1_000_000),
             "avg_rate_window_minutes": minutes,

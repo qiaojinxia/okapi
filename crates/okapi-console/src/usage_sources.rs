@@ -204,7 +204,20 @@ pub(super) fn metrics(
     );
     result.insert(
         "measured_cache_hit_coverage_bp".into(),
-        ratio(paired, requests),
+        ratio(paired, eligible),
+    );
+    // 窗口内按全部结算输入 token 计的有效缓存命中下界（未上报字段的请求按 0 计入分母）：
+    // 与仅统计已上报子集的 `measured_cache_hit_bp` 并列，避免 Gemini 等未命中省略字段的上游造成幸存者偏差。
+    result.insert(
+        "observed_cache_hit_bp".into(),
+        if complete {
+            match (cached, prompt) {
+                (Some(c), Some(p)) if p > 0 => ratio(c, p),
+                _ => Value::Null,
+            }
+        } else {
+            Value::Null
+        },
     );
     result.insert("settled_cache_hit_bp".into(), settled);
     result
@@ -375,5 +388,47 @@ mod cache_eligibility_tests {
         // Old rows without provenance counters are not reinterpreted.
         assert_eq!(cache_eligible_requests(&json!({}), 11, Some(146_000)), 11);
         assert_eq!(cache_eligible_requests(&row, 10, Some(146_000)), 10);
+    }
+
+    #[test]
+    fn coverage_uses_eligible_requests_and_observed_rate_avoids_survivor_bias() {
+        // 10 笔有效上游请求 + 1 笔未达上游的 0-prompt 失败请求：
+        // 10 笔里仅 1 笔上报了缓存读取（命中 9000/10000），其余 9 笔省略缓存字段（如 Gemini 未命中）。
+        let row = json!({
+            "source_observed": 11,
+            "source_prompt_total": 100_000,
+            "source_completion_total": 5_000,
+            "source_cached_total": 9_000,
+            "source_prompt_upstream_n": 10,
+            "source_prompt_upstream_tokens": 100_000,
+            "source_cache_n": 1,
+            "source_cache_prompt": 10_000,
+            "source_cache_read": 9_000,
+        });
+        let m = super::metrics(&row, 11, [Some(100_000), Some(5_000)], Some(9_000), 1);
+        assert_eq!(m["measured_cache_hit_bp"], json!(9_000));
+        // 覆盖率分母为 10（eligible）而非 11（含 0-prompt 失败）
+        assert_eq!(m["measured_cache_hit_coverage_bp"], json!(1_000));
+        // 有效下界命中率 = 9_000 / 100_000 = 900 bp（9%），避免被子集 90% 误导
+        assert_eq!(m["observed_cache_hit_bp"], json!(900));
+        // 严格全量口径因覆盖未满 100% 仍为 null
+        assert_eq!(m["cache_hit_bp"], serde_json::Value::Null);
+
+        // 当 10 笔有效请求全部上报（含 1 笔 0-prompt 失败）时，覆盖率应为 100%（10000 bp）
+        let full = json!({
+            "source_observed": 11,
+            "source_prompt_total": 100_000,
+            "source_completion_total": 5_000,
+            "source_cached_total": 50_000,
+            "source_prompt_upstream_n": 10,
+            "source_prompt_upstream_tokens": 100_000,
+            "source_cache_n": 10,
+            "source_cache_prompt": 100_000,
+            "source_cache_read": 50_000,
+        });
+        let full_m = super::metrics(&full, 11, [Some(100_000), Some(5_000)], Some(50_000), 10);
+        assert_eq!(full_m["measured_cache_hit_coverage_bp"], json!(10_000));
+        assert_eq!(full_m["cache_hit_bp"], json!(5_000));
+        assert_eq!(full_m["observed_cache_hit_bp"], json!(5_000));
     }
 }

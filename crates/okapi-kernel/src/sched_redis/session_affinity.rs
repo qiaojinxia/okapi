@@ -2,9 +2,16 @@
 use super::SchedulerRedis;
 use fred::interfaces::KeysInterface;
 use fred::types::Expiration;
+use sha2::{Digest, Sha256};
 
 /// 会话亲和 TTL（滑动续期）。
 const SESSION_TTL_SECS: i64 = 3600;
+
+/// 将规范模型名压成短十六进制标签（隔离 Redis 键且不受 `/` / `:` / `@` 等字符影响）。
+fn model_tag(model: &str) -> String {
+    let digest = Sha256::digest(model.as_bytes());
+    hex::encode(&digest[..4])
+}
 
 /// 会话粘性映射的一次命中。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +49,17 @@ impl SchedulerRedis {
         format!("stick:sess:{{{user_id}}}:v1:{hash}:at")
     }
 
+    /// 按模型隔离的 L2 粘性键（v2）：防止同一会话内的轻量小模型辅助请求（如 Haiku 标题生成）
+    /// 覆盖主对话大模型的 Prompt Cache 亲和账号。
+    #[must_use]
+    pub fn sticky_model_key(user_id: i64, model: &str, hash: &str) -> String {
+        format!("stick:sess:{{{user_id}}}:v2:{}:{hash}", model_tag(model))
+    }
+
+    fn sess_model_at_key(user_id: i64, model: &str, hash: &str) -> String {
+        format!("stick:sess:{{{user_id}}}:v2:{}:{hash}:at", model_tag(model))
+    }
+
     /// 读会话粘性映射并滑动续期（GET + EXPIRE 两步；续期非关键路径无需原子）。
     /// 一并带回上一次成功请求的时刻：额度准入据此判断提示缓存是否还热。
     pub async fn sticky_get(&self, user_id: i64, session_hash: &str) -> Option<StickyHit> {
@@ -58,6 +76,42 @@ impl SchedulerRedis {
         // 两个键同寿：映射被读续期，时刻不能先过期，否则热会话会被当成「时刻未知」
         let _: Result<bool, _> = self.client.expire(&key, SESSION_TTL_SECS, None).await;
         let _: Result<bool, _> = self.client.expire(&at_key, SESSION_TTL_SECS, None).await;
+        Some(hit)
+    }
+
+    /// 按模型隔离读会话粘性映射（单次 pipeline 同时查 v2 与兼容 v1）：
+    /// 优先命中模型专属 `v2`；滚动升级期间若 `v2` 尚无记录则回退读旧 `v1`，零丢温。
+    pub async fn sticky_get_for_model(
+        &self,
+        user_id: i64,
+        model: &str,
+        session_hash: &str,
+    ) -> Option<StickyHit> {
+        let v2_key = Self::sticky_model_key(user_id, model, session_hash);
+        let v2_at = Self::sess_model_at_key(user_id, model, session_hash);
+        let v1_key = Self::sess_key(user_id, session_hash);
+        let v1_at = Self::sess_at_key(user_id, session_hash);
+        let pipe = self.client.pipeline();
+        let _: () = pipe.get(&v2_key).await.ok()?;
+        let _: () = pipe.get(&v2_at).await.ok()?;
+        let _: () = pipe.get(&v1_key).await.ok()?;
+        let _: () = pipe.get(&v1_at).await.ok()?;
+        let values: Vec<Option<String>> = pipe.all().await.ok()?;
+        if let Some(hit) = values
+            .first()
+            .and_then(|v| v.as_deref())
+            .and_then(|k| StickyHit::parse(k, values.get(1).and_then(|v| v.as_deref())))
+        {
+            let _: Result<bool, _> = self.client.expire(&v2_key, SESSION_TTL_SECS, None).await;
+            let _: Result<bool, _> = self.client.expire(&v2_at, SESSION_TTL_SECS, None).await;
+            return Some(hit);
+        }
+        let hit = values
+            .get(2)
+            .and_then(|v| v.as_deref())
+            .and_then(|k| StickyHit::parse(k, values.get(3).and_then(|v| v.as_deref())))?;
+        let _: Result<bool, _> = self.client.expire(&v1_key, SESSION_TTL_SECS, None).await;
+        let _: Result<bool, _> = self.client.expire(&v1_at, SESSION_TTL_SECS, None).await;
         Some(hit)
     }
 
@@ -90,6 +144,65 @@ impl SchedulerRedis {
         };
         if let Err(err) = result {
             tracing::debug!(error = %err, "sticky_set 失败（忽略）");
+        }
+    }
+
+    /// 建立/刷新按模型隔离的会话粘性映射（单次 pipeline 双写 `v2` 与回滚兼容 `v1`）。
+    /// 新版实例一律优先读 `v2`，不同模型互不覆盖；回滚到旧版实例时仍可读 `v1`。
+    pub async fn sticky_set_for_model(
+        &self,
+        user_id: i64,
+        model: &str,
+        session_hash: &str,
+        channel_key_id: i64,
+    ) {
+        let now = chrono::Utc::now().timestamp().to_string();
+        let key_val = channel_key_id.to_string();
+        let ttl = Some(Expiration::EX(SESSION_TTL_SECS));
+        let pipe = self.client.pipeline();
+        let queued = async {
+            let _: () = pipe
+                .set(
+                    Self::sticky_model_key(user_id, model, session_hash),
+                    key_val.as_str(),
+                    ttl.clone(),
+                    None,
+                    false,
+                )
+                .await?;
+            let _: () = pipe
+                .set(
+                    Self::sess_model_at_key(user_id, model, session_hash),
+                    now.as_str(),
+                    ttl.clone(),
+                    None,
+                    false,
+                )
+                .await?;
+            let _: () = pipe
+                .set(
+                    Self::sess_key(user_id, session_hash),
+                    key_val.as_str(),
+                    ttl.clone(),
+                    None,
+                    false,
+                )
+                .await?;
+            pipe.set(
+                Self::sess_at_key(user_id, session_hash),
+                now.as_str(),
+                ttl,
+                None,
+                false,
+            )
+            .await
+        };
+        let result: Result<(), fred::error::Error> = match queued.await {
+            Ok(()) => pipe.all::<Vec<String>>().await.map(|_| ()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = result {
+            tracing::debug!(error = %err, "sticky_set_for_model 失败（忽略）");
         }
     }
 }
@@ -128,5 +241,21 @@ mod sticky_hit_tests {
         assert!(hit(None).is_warm(9_999_999, 270), "旧映射保持此前行为");
         // 时钟回拨（上一次成功比现在还晚）不会溢出，也算热
         assert!(hit(Some(2_000)).is_warm(1_000, 270));
+    }
+
+    #[test]
+    fn model_scoped_sticky_keys_isolate_models_within_same_session() {
+        use super::SchedulerRedis;
+        let opus = SchedulerRedis::sticky_model_key(42, "claude-opus-4-5", "abc123");
+        let haiku = SchedulerRedis::sticky_model_key(42, "claude-haiku-4-5", "abc123");
+        let legacy = SchedulerRedis::sess_key(42, "abc123");
+        assert_ne!(opus, haiku, "同一会话下不同模型必须落入独立粘性键");
+        assert_ne!(opus, legacy);
+        assert!(opus.starts_with("stick:sess:{42}:v2:"));
+        assert!(haiku.starts_with("stick:sess:{42}:v2:"));
+        assert_eq!(
+            SchedulerRedis::sess_model_at_key(42, "claude-opus-4-5", "abc123"),
+            format!("{opus}:at")
+        );
     }
 }

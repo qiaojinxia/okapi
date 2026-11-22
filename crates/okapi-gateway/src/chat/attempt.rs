@@ -291,7 +291,12 @@ pub(super) async fn try_model(
                 if let Some(session) = bill.session.as_ref().filter(|_| bill.pin.is_none()) {
                     bill.state
                         .sched
-                        .sticky_set(bill.user_id, session, cand.channel_key_id)
+                        .sticky_set_for_model(
+                            bill.user_id,
+                            &bill.model,
+                            session,
+                            cand.channel_key_id,
+                        )
                         .await;
                 }
                 super::super::key_health::success(&bill.state, &cand).await;

@@ -361,7 +361,7 @@ async fn remember_session(bill: &RequestBilling, cand: &ChannelCandidate) {
     if let Some(session) = &bill.session {
         bill.state
             .sched
-            .sticky_set(bill.user_id, session, cand.channel_key_id)
+            .sticky_set_for_model(bill.user_id, &bill.model, session, cand.channel_key_id)
             .await;
     }
 }

@@ -142,7 +142,12 @@ pub(super) async fn eligible_candidates(
     // 估增量），所以读取放在准入之前；把它提到候选首位仍在准入之后——被额度挡下的账号，
     // 亲和不越过准入。
     let sticky_hit = match bill.session.as_ref().filter(|_| bill.pin.is_none()) {
-        Some(session) => bill.state.sched.sticky_get(bill.user_id, session).await,
+        Some(session) => {
+            bill.state
+                .sched
+                .sticky_get_for_model(bill.user_id, &bill.model, session)
+                .await
+        }
         None => None,
     };
     let warm_key = sticky_hit

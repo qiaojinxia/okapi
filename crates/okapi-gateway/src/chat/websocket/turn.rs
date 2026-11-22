@@ -2,7 +2,7 @@ use super::super::{
     AppError, ChatEvent, FailureReply, ForwardFailure, Ingress, ProbeInfo, RequestBilling,
     RespMeta, ResponsesRequestProbe, StatusCode, UsageProbe, capture_chunk_meta,
     capture_response_event, check_input, codes, elapsed_ms_i32, estimate_prompt_tokens,
-    prepare_chat, request_features, session_hash, settle_failure, settle_stream,
+    prepare_chat, request_features, session_hash_with_prefix, settle_failure, settle_stream,
 };
 use super::{Session, Work, bridge, history, routing};
 use futures::StreamExt;
@@ -76,9 +76,10 @@ fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInf
             messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(
+        session: session_hash_with_prefix(
             &session.headers,
             probe.prompt_cache_key.as_deref(),
+            &probe.prefix_segments(),
             &messages,
         ),
         needs_tools: features.tools,

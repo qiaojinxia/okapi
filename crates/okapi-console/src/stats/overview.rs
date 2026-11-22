@@ -93,6 +93,7 @@ pub(super) fn pack_overview(rows: &[Value], known: [i64; 3]) -> Value {
             "measured_cache_hit_bp",
             "measured_cache_hit_requests",
             "measured_cache_hit_coverage_bp",
+            "observed_cache_hit_bp",
             "settled_cache_hit_bp",
             "token_detail_observations",
             "token_detail_history",

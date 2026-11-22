@@ -630,21 +630,26 @@ async fn a_warm_session_runs_to_the_keep_line_while_a_new_one_stops_at_the_place
     let strict = message(&env, "session-s").await;
     assert_eq!(strict.status, 503);
 
-    // 缓存过期（超过 TTL）的会话不再算热：把成功时刻拨到十分钟前
+    // 缓存过期（超过 TTL）的会话不再算热：把成功时刻拨到十分钟前（v2 模型键与兼容 v1 键同步拨回）
     set_control(&env, control).await;
     seed_header_observation(&env, 90.5, 10.0).await;
     let mapping = session_key(&env, "session-s");
-    let _: () = env
-        .redis
-        .set(
-            format!("{mapping}:at"),
-            (now() - 600).to_string(),
-            Some(fred::types::Expiration::EX(600)),
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+    let hash = mapping.rsplit(':').next().unwrap();
+    let model_mapping =
+        okapi_kernel::sched_redis::SchedulerRedis::sticky_model_key(env.user, &env.model, hash);
+    for at_key in [format!("{model_mapping}:at"), format!("{mapping}:at")] {
+        let _: () = env
+            .redis
+            .set(
+                at_key,
+                (now() - 600).to_string(),
+                Some(fred::types::Expiration::EX(600)),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+    }
     let expired = message(&env, "session-s").await;
     assert_eq!(expired.status, 503, "缓存过期，按冷启动算");
 }

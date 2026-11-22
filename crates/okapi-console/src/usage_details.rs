@@ -102,7 +102,17 @@ async fn source_rows(
 
 type ModelDayRows = HashMap<(String, String), Value>;
 
-fn cache_write_metrics(writes: i64, requests: i64, known: i64) -> [(&'static str, Value); 3] {
+fn cache_write_metrics(
+    writes: i64,
+    cached: i64,
+    prompt: i64,
+    requests: i64,
+    eligible: i64,
+    known: i64,
+    read_known: i64,
+) -> [(&'static str, Value); 5] {
+    let write_complete = eligible > 0 && known == eligible;
+    let ratio_complete = write_complete && read_known == eligible && writes > 0;
     [
         (
             "cache_write_tokens",
@@ -121,6 +131,22 @@ fn cache_write_metrics(writes: i64, requests: i64, known: i64) -> [(&'static str
             },
         ),
         ("cache_write_known_requests", json!(known)),
+        (
+            "cache_write_bp",
+            if write_complete && prompt > 0 {
+                json!(scaled_ratio(writes, prompt, 10_000))
+            } else {
+                Value::Null
+            },
+        ),
+        (
+            "cache_read_write_ratio_bp",
+            if ratio_complete {
+                json!(scaled_ratio(cached, writes, 10_000))
+            } else {
+                Value::Null
+            },
+        ),
     ]
 }
 
@@ -193,7 +219,11 @@ pub async fn enrich(
         let ttft_n = perf.map_or(0, |r| ch_i64(r, "ttft_samples"));
         let observed = perf.map_or(0, |r| ch_i64(r, "ttft_observed"));
         let output = perf.map_or(0, |r| ch_i64(r, "latency_output"));
-        for (name, value) in cache_write_metrics(writes, requests, known) {
+        let eligible =
+            super::usage_sources::cache_eligible_requests(provenance, requests, Some(prompt));
+        for (name, value) in cache_write_metrics(
+            writes, cached, prompt, requests, eligible, known, read_known,
+        ) {
             row[name] = value;
         }
         row["cache_read_known_requests"] = json!(read_known);
@@ -250,17 +280,14 @@ pub async fn enrich(
 }
 
 fn total_metrics(counts: [i64; 14], source_totals: &Value) -> Value {
+    let eligible =
+        super::usage_sources::cache_eligible_requests(source_totals, counts[0], Some(counts[9]));
     let mut total = json!({
         "cache_read_known_requests": counts[8],
-        "cache_hit_bp": cache_rate(
-            counts[10],
-            counts[9],
-            super::usage_sources::cache_eligible_requests(source_totals, counts[0], Some(counts[9])),
-            counts[8],
-        ),
-
     });
-    for (name, value) in cache_write_metrics(counts[2], counts[0], counts[1]) {
+    for (name, value) in cache_write_metrics(
+        counts[2], counts[10], counts[9], counts[0], eligible, counts[1], counts[8],
+    ) {
         total[name] = value;
     }
     for (name, value) in super::ttft_average::metrics(counts[5], counts[6], counts[0], counts[11]) {
@@ -377,5 +404,34 @@ mod tests {
         assert_eq!(nullable_ratio(0, 0, 0, 0, 1), Value::Null);
         assert_eq!(nullable_ratio(1200, 2, 4, 2, 1), Value::Null);
         assert_eq!(nullable_ratio(1200, 2, 2, 2, 1), json!(600));
+    }
+
+    #[test]
+    fn cache_write_economy_metrics_report_write_share_and_read_write_ratio() {
+        let mut counts = [0; 14];
+        counts[0] = 5; // requests
+        counts[1] = 4; // known writes (matches 4 eligible)
+        counts[2] = 2_000; // cache writes
+        counts[8] = 4; // known reads (matches 4 eligible)
+        counts[9] = 10_000; // prompt
+        counts[10] = 6_000; // cached reads
+        let source = json!({
+            "source_observed": 5,
+            "source_prompt_upstream_n": 4,
+            "source_prompt_upstream_tokens": 10_000,
+            "source_cache_n": 4,
+            "source_cache_prompt": 10_000,
+            "source_cache_read": 6_000,
+        });
+        let total = total_metrics(counts, &source);
+        // 写入占比 = 2_000 / 10_000 = 2000 bp (20%)
+        assert_eq!(total["cache_write_bp"], json!(2_000));
+        // 读写比 = 6_000 / 2_000 = 3.0× = 30000 bp
+        assert_eq!(total["cache_read_write_ratio_bp"], json!(30_000));
+        // 覆盖不完整时返回 null
+        counts[1] = 3;
+        let partial = total_metrics(counts, &source);
+        assert_eq!(partial["cache_write_bp"], Value::Null);
+        assert_eq!(partial["cache_read_write_ratio_bp"], Value::Null);
     }
 }

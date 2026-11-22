@@ -22,7 +22,7 @@ use okapi_kernel::error::with_request_id;
 use okapi_kernel::sched_redis::response_affinity::{
     ResponseBinding, ResponseParent, ResponseWriter,
 };
-use okapi_kernel::sched_redis::session_hash;
+use okapi_kernel::sched_redis::session_hash_with_prefix;
 use okapi_ledger::Pool;
 use okapi_pricing::{CalcContext, PriceBook};
 use okapi_providers::convert::tool_loss::ForeignTools;

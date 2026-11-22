@@ -23,6 +23,9 @@ pub struct ChatRequestProbe {
     pub messages: Vec<MessageProbe>,
     #[serde(default, deserialize_with = "tool_json")]
     pub tools: String,
+    /// 客户端声明的提示缓存分组键（OpenAI `/v1/chat/completions` 原生支持），作 L2 粘性键。
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +77,16 @@ impl ChatRequestProbe {
             out.push(Cow::Borrowed(&self.tools));
         }
         out
+    }
+
+    /// 供无显式会话 ID 时的缓存粘性兜底哈希使用：工具定义是前缀缓存的重要组成部分。
+    #[must_use]
+    pub fn prefix_segments(&self) -> Vec<Cow<'_, str>> {
+        if self.tools.is_empty() {
+            Vec::new()
+        } else {
+            vec![Cow::Borrowed(&self.tools)]
+        }
     }
 }
 
@@ -197,6 +210,17 @@ impl MessagesRequestProbe {
         }
         out
     }
+
+    /// 顶层 `system` 与 `tools` 前缀片段（无显式会话 ID 时用于区分不同 Agent 的缓存亲和）。
+    #[must_use]
+    pub fn prefix_segments(&self) -> Vec<Cow<'_, str>> {
+        let mut out = Vec::new();
+        push_text(&self.system, &mut out);
+        if !self.tools.is_empty() {
+            out.push(Cow::Borrowed(&self.tools));
+        }
+        out
+    }
 }
 
 /// OpenAI Responses API 请求探针（入口解析用；直转与降级共用）。
@@ -270,6 +294,19 @@ impl ResponsesRequestProbe {
         out
     }
 
+    /// 顶层 `instructions` 与 `tools` 前缀片段（无 `prompt_cache_key` / 会话头时用于缓存粘性兜底）。
+    #[must_use]
+    pub fn prefix_segments(&self) -> Vec<Cow<'_, str>> {
+        let mut out = Vec::new();
+        if let Some(s) = self.instructions.as_deref().filter(|s| !s.is_empty()) {
+            out.push(Cow::Borrowed(s));
+        }
+        if !self.tools.is_empty() {
+            out.push(Cow::Borrowed(&self.tools));
+        }
+        out
+    }
+
     /// input → 消息探针（会话粘性种子用；string 视为单条 user）。
     #[must_use]
     pub fn input_messages(&self) -> Vec<MessageProbe> {
@@ -309,6 +346,9 @@ pub struct GeminiRequestProbe {
     pub generation_config: Option<GeminiGenerationConfigProbe>,
     #[serde(default, deserialize_with = "tool_json")]
     pub tools: String,
+    /// Gemini 显式 Context Caching 资源名（`cachedContents/...`），绑定在创建它的具体账号/项目上。
+    #[serde(default, rename = "cachedContent", alias = "cached_content")]
+    pub cached_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -375,6 +415,23 @@ impl GeminiRequestProbe {
                         .or_else(|| part.pointer("/function_response/response")),
                     &mut out,
                 );
+            }
+        }
+        if !self.tools.is_empty() {
+            out.push(Cow::Borrowed(&self.tools));
+        }
+        out
+    }
+
+    /// 顶层 `systemInstruction` 与 `tools` 前缀片段（无 `cachedContent` / 会话头时用于缓存粘性兜底）。
+    #[must_use]
+    pub fn prefix_segments(&self) -> Vec<Cow<'_, str>> {
+        let mut out = Vec::new();
+        if let Some(sys) = &self.system_instruction {
+            for part in &sys.parts {
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push(Cow::Borrowed(t));
+                }
             }
         }
         if !self.tools.is_empty() {

@@ -135,14 +135,27 @@ impl SchedulerRedis {
 
 /// 会话标识提取（§3.2）：优先客户端自报的会话 ID——Claude Code 的 `x-claude-code-session-id`
 /// 头、请求体自报的会话（`body_session`：Anthropic 入口是 `metadata.user_id` 里的 session，
-/// Responses 入口是 `prompt_cache_key`，Codex CLI 填的就是会话 id）、通用的 `session_id` /
-/// `session-id`（Codex CLI 0.160 起）/ `x-session-id` 头（Nginx 需 `underscores_in_headers on`）；
-/// 都没有才取首两条消息规范化文本哈希。内容哈希只是近似：开场相同的两个会话会撞在一起，压缩上下文后同一会话会变。
-/// 哈希 = SHA-256 前 8 字节 hex（xxhash 为 M3 性能优化项）。
+/// Chat / Responses 入口是 `prompt_cache_key`，Gemini 入口是显式 `cachedContent` 资源名）、
+/// 通用的 `session_id` / `session-id`（Codex CLI 0.160 起）/ `x-session-id` 头（Nginx 需 `underscores_in_headers on`）；
+/// 都没有才取前缀（`system` / `instructions` / `tools`）与首两条消息的规范化文本哈希。
+/// 哈希 = SHA-256 前 8 字节 hex。
 #[must_use]
 pub fn session_hash(
     headers: &HeaderMap,
     body_session: Option<&str>,
+    messages: &[okapi_api::MessageProbe],
+) -> Option<String> {
+    session_hash_with_prefix(headers, body_session, &[] as &[&str], messages)
+}
+
+/// 同 [`session_hash`]，并在无显式会话 ID 时把顶层 `system` / `instructions` / `tools` 前缀纳入兜底哈希，
+/// 避免不同 Agent 共用相同首句（如 `"hello"`）撞桶，同时让同一 Agent 的 system+tools 前缀保持缓存亲和。
+/// 当 `prefix` 均为空时产出与 [`session_hash`] 字节级一致的哈希。
+#[must_use]
+pub fn session_hash_with_prefix<S: AsRef<str>>(
+    headers: &HeaderMap,
+    body_session: Option<&str>,
+    prefix: &[S],
     messages: &[okapi_api::MessageProbe],
 ) -> Option<String> {
     let header = |name: &str| {
@@ -162,13 +175,28 @@ pub fn session_hash(
     }
 
     let mut text = String::new();
+    let mut has_prefix = false;
+    for segment in prefix {
+        let segment = segment.as_ref().trim();
+        if !segment.is_empty() {
+            if !has_prefix {
+                text.push_str("__prefix__\u{0}");
+                has_prefix = true;
+            }
+            text.push_str(segment);
+            text.push('\u{0}');
+        }
+    }
+    let mut has_msg_content = false;
     for message in messages.iter().take(2) {
         text.push_str(&message.role);
         text.push('\u{0}');
+        let before = text.len();
         append_content_text(&mut text, &message.content);
+        has_msg_content |= text.len() > before;
         text.push('\u{0}');
     }
-    if text.len() <= messages.len().saturating_mul(2) {
+    if !has_prefix && !has_msg_content {
         return None; // 无实际内容
     }
     Some(short_hash(text.as_bytes()))
@@ -269,5 +297,30 @@ mod session_hash_tests {
             session_hash(&none, None, &same_opening),
             "空白 ID 回落到内容哈希"
         );
+    }
+
+    #[test]
+    fn prefix_segments_separate_agents_with_same_opening_and_preserve_empty_parity() {
+        use super::session_hash_with_prefix;
+        let none = HeaderMap::new();
+        let opening = messages("hello");
+        // 空前缀与旧 session_hash 字节级等价
+        assert_eq!(
+            session_hash_with_prefix(&none, None, &["", "   "], &opening),
+            session_hash(&none, None, &opening)
+        );
+        // 不同 system/tools 前缀即便首句相同也分到不同粘性键
+        let agent_a = session_hash_with_prefix(&none, None, &["You are Agent A"], &opening);
+        let agent_b = session_hash_with_prefix(&none, None, &["You are Agent B"], &opening);
+        assert!(agent_a.is_some() && agent_b.is_some());
+        assert_ne!(agent_a, agent_b);
+        // 仅有 system/tools（如首条是纯图片消息无文本）也能产生稳定粘性键
+        let image_only = vec![MessageProbe {
+            role: "user".into(),
+            content: serde_json::json!([{"type": "image_url"}]),
+            tool_calls: serde_json::Value::Null,
+        }];
+        assert!(session_hash_with_prefix(&none, None, &["system prompt"], &image_only).is_some());
+        assert!(session_hash_with_prefix(&none, None, &[] as &[&str], &image_only).is_none());
     }
 }
