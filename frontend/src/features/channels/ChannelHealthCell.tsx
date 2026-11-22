@@ -473,7 +473,7 @@ export function SuccessRate24hBars({
   })()
 
   return (
-    <span className={cn('flex w-full min-w-0 flex-col gap-1', variant === 'compact' && 'max-w-[264px]')} title="">
+    <span className={cn('flex w-full min-w-0 flex-col gap-1', variant === 'compact' && 'max-w-[240px]')} title="">
       <Tooltip content={hoverCard} className="block w-full">
         <span
           data-slot="health-24h-bars"
@@ -499,9 +499,9 @@ export function SuccessRate24hBars({
                   aria-hidden
                   className={cn(
                     'block h-full rounded-full transition-[transform,opacity,filter] duration-100',
-                    variant === 'expanded' ? 'w-[3.5px] sm:w-[4px]' : 'w-[2.5px]',
+                    variant === 'expanded' ? 'w-[4px]' : 'w-[3px]',
                     SLOT_BAR_CLASS[state],
-                    hovered && 'scale-y-115 scale-x-125 brightness-110',
+                    hovered && 'scale-y-115 brightness-110',
                     hoveredIdx !== null && !hovered && 'opacity-65',
                   )}
                 />
