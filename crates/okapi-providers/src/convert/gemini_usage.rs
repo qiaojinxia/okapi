@@ -9,6 +9,9 @@ use std::collections::HashSet;
 #[serde(rename_all = "camelCase")]
 struct Metadata {
     prompt_token_count: Option<u32>,
+    /// 内置工具（Google Search Grounding / Code Execution / URL Context）注入的输入 token，
+    /// 与 `promptTokenCount` 同属计费输入且计入 `totalTokenCount`。
+    tool_use_prompt_token_count: Option<u32>,
     #[serde(default)]
     candidates_token_count: Option<u32>,
     thoughts_token_count: Option<u32>,
@@ -62,12 +65,28 @@ fn modalities(
 }
 
 fn normalize(meta: &Metadata) -> Option<UsageProbe> {
+    let prompt = match (meta.prompt_token_count, meta.tool_use_prompt_token_count) {
+        (Some(p), Some(t)) => Some(p.checked_add(t)?),
+        (Some(p), None) => Some(p),
+        (None, Some(t)) => Some(t),
+        (None, None) => None,
+    };
     let thoughts = meta.thoughts_token_count.unwrap_or(0);
-    let completion = meta
-        .candidates_token_count
-        .map_or(Some(None), |n| n.checked_add(thoughts).map(Some))?;
+    let completion = match (meta.candidates_token_count, meta.thoughts_token_count) {
+        (Some(c), _) => Some(c.checked_add(thoughts)?),
+        // 思考模型将 maxOutputTokens 全部耗尽于 thoughts 时可能省略 candidatesTokenCount；
+        // 若 totalTokenCount 显示还包含额外正文输出，交由 UsageProbe 按 total - prompt 推算，否则直接记为 thoughts。
+        (None, Some(t)) => {
+            let inferred_larger = meta
+                .total_token_count
+                .zip(prompt)
+                .is_some_and(|(total, p)| total > u64::from(p) + u64::from(t));
+            if inferred_larger { None } else { Some(t) }
+        }
+        (None, None) => None,
+    };
     let mut probe: UsageProbe = serde_json::from_value(serde_json::json!({
-        "prompt_tokens": meta.prompt_token_count,
+        "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": meta.total_token_count,
     }))
@@ -124,6 +143,7 @@ pub(super) fn parse(meta: Option<&Value>) -> Option<UsageProbe> {
     let meta = meta.filter(|v| !v.is_null())?;
     let gemini_axes = [
         "promptTokenCount",
+        "toolUsePromptTokenCount",
         "candidatesTokenCount",
         "totalTokenCount",
     ]
@@ -174,4 +194,79 @@ pub(super) fn parse(meta: Option<&Value>) -> Option<UsageProbe> {
         }
     }
     Some(serde_json::from_value(canonical).unwrap_or_else(|_| UsageProbe::invalid()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+    use serde_json::json;
+
+    #[test]
+    fn tool_use_prompt_tokens_are_counted_in_prompt_and_match_total() {
+        let meta = json!({
+            "promptTokenCount": 100,
+            "toolUsePromptTokenCount": 500,
+            "cachedContentTokenCount": 60,
+            "candidatesTokenCount": 80,
+            "thoughtsTokenCount": 20,
+            "totalTokenCount": 700,
+        });
+        let usage = parse(Some(&meta)).unwrap().to_token_usage().unwrap();
+        assert_eq!(usage.prompt_tokens, 600);
+        assert_eq!(usage.cached_tokens, 60);
+        assert_eq!(usage.prompt_uncached(), 540);
+        assert_eq!(usage.completion_tokens, 100);
+        assert_eq!(usage.reasoning_tokens, 20);
+        assert!(usage.cache_read_reported);
+    }
+
+    #[test]
+    fn pure_thinking_without_candidates_token_count_retains_thoughts_and_validates_total() {
+        // 无 totalTokenCount 的纯思考帧：不再丢失 thoughtsTokenCount
+        let without_total = json!({
+            "promptTokenCount": 100,
+            "thoughtsTokenCount": 500,
+        });
+        let u1 = parse(Some(&without_total))
+            .unwrap()
+            .to_token_usage()
+            .unwrap();
+        assert_eq!(u1.prompt_tokens, 100);
+        assert_eq!(u1.completion_tokens, 500);
+        assert_eq!(u1.reasoning_tokens, 500);
+
+        // 带一致 totalTokenCount 的纯思考终态
+        let with_exact_total = json!({
+            "promptTokenCount": 100,
+            "thoughtsTokenCount": 500,
+            "totalTokenCount": 600,
+        });
+        let u2 = parse(Some(&with_exact_total))
+            .unwrap()
+            .to_token_usage()
+            .unwrap();
+        assert_eq!(u2.completion_tokens, 500);
+        assert_eq!(u2.reasoning_tokens, 500);
+
+        // totalTokenCount 高于 prompt + thoughts 时仍可按 total - prompt 还原完整补全量
+        let with_extra_candidates = json!({
+            "promptTokenCount": 100,
+            "thoughtsTokenCount": 500,
+            "totalTokenCount": 650,
+        });
+        let u3 = parse(Some(&with_extra_candidates))
+            .unwrap()
+            .to_token_usage()
+            .unwrap();
+        assert_eq!(u3.completion_tokens, 550);
+        assert_eq!(u3.reasoning_tokens, 500);
+
+        // totalTokenCount 小于 prompt + thoughts 仍保持 fail-closed 判非法
+        let broken = json!({
+            "promptTokenCount": 100,
+            "thoughtsTokenCount": 500,
+            "totalTokenCount": 550,
+        });
+        assert!(parse(Some(&broken)).unwrap().to_token_usage().is_err());
+    }
 }

@@ -4,7 +4,7 @@
 //!
 //! usage 映射基线：Anthropic 的 `input_tokens` 不含缓存读写，OpenAI 的
 //! `prompt_tokens` 含缓存 —— 故 prompt = input + cache_read + cache_creation，
-//! `cached_tokens` = cache_read（cache_creation 按普通 prompt 计，1.25x 溢价不建模）。
+//! `cached_tokens` = cache_read，`cache_write_tokens` = cache_creation（支持 5m / 1h TTL 拆分计价）。
 
 use crate::anthropic::{AnthropicEvent, AnthropicUpstream, MessagesResponse};
 use crate::error::UpstreamError;
