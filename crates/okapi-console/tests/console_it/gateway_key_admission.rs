@@ -526,3 +526,302 @@ async fn banned_owner_blocks_keys_minted_after_the_ban() {
     assert_eq!(status, 401, "属主已封禁，其名下新令牌也必须失效：{body}");
     assert_eq!(body["error"]["code"], "key_disabled", "{body}");
 }
+
+/// daily_token_limit 管理面写入后必须立刻在网关落闸（429 rate_limited / tpd + Retry-After），
+/// 且 /api/me 透出生效约束，清空后恢复。
+#[tokio::test]
+async fn daily_token_limit_enforced_and_exposed_in_me() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let (token, key_id) = new_key(&bed.pg, bed.user_id, "tpd").await;
+    assert_eq!(chat(&bed, &token, &bed.model).await.0, 200);
+
+    let admin_url = format!("http://{}/admin/keys/{key_id}", bed.console);
+    let resp = client
+        .patch(&admin_url)
+        .bearer_auth(&bed.super_token)
+        .json(&json!({ "daily_token_limit": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let blocked = client
+        .post(format!("http://{}/v1/chat/completions", bed.gateway))
+        .bearer_auth(&token)
+        .json(&json!({
+            "model": bed.model,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 429);
+    assert!(
+        blocked.headers().contains_key("retry-after"),
+        "tpd 限流应带 Retry-After"
+    );
+    let body: Value = blocked.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+    assert_eq!(body["error"]["param"], "tpd", "{body}");
+
+    let me: Value = client
+        .get(format!("http://{}/api/me", bed.console))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["key_limits"]["daily_token_limit"], 1);
+    assert_eq!(me["key_limits"]["restricted"], true);
+
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "daily_token_limit": null }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(chat(&bed, &token, &bed.model).await.0, 200);
+}
+
+/// PATCH /admin/keys/{id} 支持 pool_override 校验、写入、列表透出与清空。
+#[tokio::test]
+async fn admin_pool_override_validates_writes_lists_and_clears() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let (token, key_id) = new_key(&bed.pg, bed.user_id, "pool-ovr").await;
+    let pool = format!("pl-{}", &bed.model[bed.model.len().saturating_sub(6)..]);
+    sqlx::query("INSERT INTO channel_pools (pool_code, description) VALUES ($1, 'test')")
+        .bind(&pool)
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+
+    let admin_url = format!("http://{}/admin/keys/{key_id}", bed.console);
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "pool_override": "no-such-pool-ever" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "pool_override": "   " }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "pool_override": pool }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+
+    let list: Value = client
+        .get(format!(
+            "http://{}/admin/keys?user_id={}",
+            bed.console, bed.user_id
+        ))
+        .bearer_auth(&bed.super_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == key_id)
+        .unwrap();
+    assert_eq!(row["pool_override"], pool);
+
+    let me: Value = client
+        .get(format!("http://{}/api/me", bed.console))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["pool"], pool);
+
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "pool_override": null }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let me_after: Value = client
+        .get(format!("http://{}/api/me", bed.console))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me_after["pool"], "default");
+}
+
+/// 模型白名单支持通配符与别名归一去重。
+#[tokio::test]
+async fn allowlist_wildcard_and_alias_canonicalization() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let alias = format!("alias-{}", bed.model);
+    sqlx::query(
+        "INSERT INTO model_aliases (pattern, target_model, priority, enabled) VALUES ($1, $2, 10, true)",
+    )
+    .bind(&alias)
+    .bind(&bed.model)
+    .execute(&bed.pg)
+    .await
+    .unwrap();
+
+    let (sub_token, sub_id) = new_key(&bed.pg, bed.user_id, "sub-wl").await;
+    let admin_url = format!("http://{}/admin/keys/{sub_id}", bed.console);
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "model_allowlist": [alias, bed.model, bed.model] }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let stored: Option<Value> =
+        sqlx::query_scalar("SELECT model_allowlist FROM api_keys WHERE id = $1")
+            .bind(sub_id)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(json!([bed.model])));
+
+    let prefix = format!("{}*", &bed.model[..bed.model.len().saturating_sub(2)]);
+    assert_eq!(
+        client
+            .patch(&admin_url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "model_allowlist": [prefix] }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(chat(&bed, &sub_token, &bed.model).await.0, 200);
+    assert_eq!(chat(&bed, &sub_token, &bed.other_model).await.0, 403);
+}
+
+/// 仅带速率限制的受限子 key 不得在无 Web 会话时越权删改主账户其他 key，也不得修改访问控制，但可给自己改名。
+#[tokio::test]
+async fn restricted_rate_limited_subkey_cannot_mutate_other_keys() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let (sub_token, sub_id) = new_key(&bed.pg, bed.user_id, "sub-rl").await;
+    let (_, victim_id) = new_key(&bed.pg, bed.user_id, "victim").await;
+
+    assert_eq!(
+        client
+            .patch(format!("http://{}/admin/keys/{sub_id}", bed.console))
+            .bearer_auth(&bed.super_token)
+            .json(&json!({ "rpm_limit": 100 }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let del_other = client
+        .delete(format!("http://{}/api/me/keys/{victim_id}", bed.console))
+        .bearer_auth(&sub_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_other.status(), 403);
+    assert_eq!(
+        del_other.json::<Value>().await.unwrap()["error"]["code"],
+        "key_limits_session_required"
+    );
+    let patch_other = client
+        .patch(format!("http://{}/api/me/keys/{victim_id}", bed.console))
+        .bearer_auth(&sub_token)
+        .json(&json!({ "status": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch_other.status(), 403);
+    assert_eq!(
+        patch_other.json::<Value>().await.unwrap()["error"]["code"],
+        "key_limits_session_required"
+    );
+    let patch_self_access = client
+        .patch(format!("http://{}/api/me/keys/{sub_id}", bed.console))
+        .bearer_auth(&sub_token)
+        .json(&json!({ "group_code": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patch_self_access.status(), 403);
+    assert_eq!(
+        client
+            .patch(format!("http://{}/api/me/keys/{sub_id}", bed.console))
+            .bearer_auth(&sub_token)
+            .json(&json!({ "name": "self-renamed" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .delete(format!("http://{}/api/me/keys/{victim_id}", bed.console))
+            .header("cookie", &bed.cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+}

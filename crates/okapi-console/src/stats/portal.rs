@@ -134,16 +134,21 @@ pub async fn my_breakdown(
     let live = if user_scope {
         Value::Null
     } else {
-        let (rpm, tpm, rpd) = state.sched.key_rate_snapshot(key.user_id, key.key_id).await;
+        let ((rpm, tpm, rpd), tpd) = tokio::join!(
+            state.sched.key_rate_snapshot(key.user_id, key.key_id),
+            state.sched.key_daily_tokens(key.user_id, key.key_id),
+        );
         json!({
             "rpm": rpm,
             "tpm": tpm,
             "rpd": rpd,
+            "tpd": tpd,
             "rate_basis": "admission_estimate",
             "rate_window": "calendar_minute",
             "rpm_limit": key.rpm_limit,
             "tpm_limit": key.tpm_limit,
             "rpd_limit": key.rpd_limit,
+            "daily_token_limit": key.daily_token_limit,
         })
     };
 

@@ -22,7 +22,7 @@ pub use self::billing::{LedgerQuery, UsageQuery, ledger, orders, usage};
 pub(super) use self::groups::ensure_selectable;
 pub use self::groups::{aff, groups};
 pub use self::keys::{PatchKeyReq, delete_key, keys, patch_key};
-pub(super) use self::keys::{normalize_allowlist, normalize_ip_allowlist, validate_key_limits};
+pub(super) use self::keys::{normalize_ip_allowlist, resolve_allowlist, validate_key_limits};
 pub use self::redeem::{RedeemReq, redeem};
 
 use crate::console_auth::authenticate;
@@ -65,13 +65,17 @@ pub async fn me(
     let has_web_session = super::auth_web::require_session(&state, &headers)
         .await
         .is_ok_and(|user_id| user_id == key.actor_user_id());
-    let key_info: Option<(String, String, String)> = if key.key_id > 0 {
-        sqlx::query_as("SELECT k.name, k.key_prefix, u.username FROM api_keys k JOIN users u ON u.id = COALESCE(k.member_user_id,k.user_id) WHERE k.id = $1 AND k.user_id = $2")
-            .bind(key.key_id)
-            .bind(key.user_id)
-            .fetch_optional(&state.pg)
-            .await
-            .map_err(okapi_store::StoreError::from)?
+    let key_info: Option<(String, String, String, Option<i64>, i64)> = if key.key_id > 0 {
+        sqlx::query_as(
+            "SELECT k.name, k.key_prefix, u.username, k.quota_micro, k.used_micro \
+             FROM api_keys k JOIN users u ON u.id = COALESCE(k.member_user_id,k.user_id) \
+             WHERE k.id = $1 AND k.user_id = $2",
+        )
+        .bind(key.key_id)
+        .bind(key.user_id)
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?
     } else {
         None
     };
@@ -116,6 +120,20 @@ pub async fn me(
         "key_prefix": key_info.as_ref().map(|info| &info.1),
         "has_web_session": has_web_session,
         "group": key.group_code,
+        "pool": key.pool_code,
+        "key_limits": (key.key_id > 0).then(|| json!({
+            "restricted": key.is_restricted(),
+            "quota_micro": key_info.as_ref().and_then(|info| info.3),
+            "used_micro": key_info.as_ref().map_or(0, |info| info.4),
+            "rpm_limit": key.rpm_limit,
+            "tpm_limit": key.tpm_limit,
+            "rpd_limit": key.rpd_limit,
+            "daily_token_limit": key.daily_token_limit,
+            "max_concurrency": key.max_concurrency,
+            "model_allowlist": key.model_allowlist,
+            "ip_allowlist": key.ip_allowlist,
+            "expires_at": key.expires_at.map(|t| t.to_rfc3339()),
+        })),
         "balance_micro": balance.as_micros(),
         "balance_expires_at": balance_expires_at.map(|t| t.to_rfc3339()),
         // 订阅池剩余（窗口内才有；无订阅 / 窗口外 = 0）与池可用截止 unix 秒（0 = 无）

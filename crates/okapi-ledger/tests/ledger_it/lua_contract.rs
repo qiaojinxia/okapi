@@ -332,7 +332,7 @@ async fn rate_limits_reject_without_writes_and_release_with_commit() {
         .await
         .unwrap();
 
-    let cases: [(&str, i64, LimitCaps); 4] = [
+    let cases: [(&str, i64, LimitCaps); 5] = [
         (
             "rpm",
             11,
@@ -355,6 +355,15 @@ async fn rate_limits_reject_without_writes_and_release_with_commit() {
             13,
             LimitCaps {
                 rpd: 1,
+                ..LimitCaps::default()
+            },
+        ),
+        (
+            "tpd",
+            15,
+            // est_tokens 固定 10：第一笔 10 ≤ 15，第二笔 20 > 15
+            LimitCaps {
+                tpd: 15,
                 ..LimitCaps::default()
             },
         ),

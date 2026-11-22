@@ -123,6 +123,8 @@ pub struct LimitCaps {
     pub rpm: i64,
     pub tpm: i64,
     pub rpd: i64,
+    /// 每日 Token 上限（对应 `api_keys.daily_token_limit`）。
+    pub tpd: i64,
     pub concurrency: i64,
 }
 
@@ -331,6 +333,7 @@ impl BalanceLedger {
             format!("rl:{{{user_id}}}:k:{api_key_id}:tpm:{minute_bucket}"),
             format!("rl:{{{user_id}}}:k:{api_key_id}:rpd:{day_bucket}"),
             Self::conc_key(user_id, api_key_id),
+            format!("rl:{{{user_id}}}:k:{api_key_id}:tpd:{day_bucket}"),
         ];
         let mut args = vec![
             request_id.to_string(),
@@ -341,6 +344,7 @@ impl BalanceLedger {
             caps.tpm.to_string(),
             caps.rpd.to_string(),
             caps.concurrency.to_string(),
+            caps.tpd.to_string(),
             est_tokens.to_string(),
             api_key_id.to_string(),
             now.timestamp().to_string(),

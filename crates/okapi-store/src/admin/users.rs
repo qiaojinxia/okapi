@@ -210,6 +210,8 @@ pub struct ApiKeyPatch {
     pub expires_at: Option<Option<DateTime<Utc>>>,
     pub model_allowlist: Option<Option<serde_json::Value>>,
     pub group_override: Option<Option<String>>,
+    /// key 级渠道池覆盖；Some(None) = 解除（跟随分组）。
+    pub pool_override: Option<Option<String>>,
     /// IP 白名单（地址 / CIDR 字符串数组；Some(None) = 解除限制）。
     pub ip_allowlist: Option<Option<serde_json::Value>>,
     pub rpm_limit: Option<Option<i32>>,
@@ -257,7 +259,8 @@ pub async fn patch_api_key(
             max_concurrency   = CASE WHEN $19::bool THEN $20::int ELSE max_concurrency END,
             ip_allowlist      = CASE WHEN $21::bool THEN $22::jsonb ELSE ip_allowlist END,
             quota_mode        = CASE WHEN $23::bool THEN CASE WHEN $24::bigint IS NULL THEN 0 ELSE 1 END ELSE quota_mode END,
-            quota_micro       = CASE WHEN $23::bool THEN $24::bigint ELSE quota_micro END
+            quota_micro       = CASE WHEN $23::bool THEN $24::bigint ELSE quota_micro END,
+            pool_override     = CASE WHEN $25::bool THEN $26::varchar ELSE pool_override END
         WHERE id = $1 AND deleted_at IS NULL
           AND ($2::bigint IS NULL OR user_id = $2)
         RETURNING key_hash, user_id
@@ -287,6 +290,8 @@ pub async fn patch_api_key(
     .bind(patch.ip_allowlist.as_ref().and_then(Option::as_ref))
     .bind(patch.quota_micro.is_some())
     .bind(patch.quota_micro.flatten())
+    .bind(patch.pool_override.is_some())
+    .bind(patch.pool_override.as_ref().and_then(Option::as_deref))
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| TouchedApiKey {

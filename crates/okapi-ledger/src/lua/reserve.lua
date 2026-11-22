@@ -2,12 +2,12 @@
 -- KEYS[1] bal:{uid}
 -- KEYS[2] rl:{uid}:k:<kid>:rpm:<bucket>  KEYS[3] rl:{uid}:k:<kid>:tpm:<bucket>
 -- KEYS[4] rl:{uid}:k:<kid>:rpd:<day>     KEYS[5] conc:{uid}:k:<kid>
--- KEYS[6] clean:{uid}（可选：零 PG 快路径租约键，同 {uid} hash-tag）
+-- KEYS[6] rl:{uid}:k:<kid>:tpd:<day>     KEYS[7] clean:{uid}（可选：零 PG 快路径租约键，同 {uid} hash-tag）
 -- ARGV[1] request_id  ARGV[2] est_micro  ARGV[3] ttl_ms（截止时间在脚本里按 Redis TIME 算）
--- ARGV[4] rpm_cap  ARGV[5] tpm_cap  ARGV[6] rpd_cap  ARGV[7] conc_cap
--- ARGV[8] est_tokens  ARGV[9] api_key_id  ARGV[10] now_unix_s
--- ARGV[11] mode（可选：'fast' 仅在 clean:{uid} 有效时放行，否则返回 SLOW_PATH；'stamp' 成功后写入 clean:{uid}）
--- ARGV[12] clean_until_unix（mode='stamp'）  ARGV[13] clean_ttl_secs（mode='stamp'）
+-- ARGV[4] rpm_cap  ARGV[5] tpm_cap  ARGV[6] rpd_cap  ARGV[7] conc_cap  ARGV[8] tpd_cap
+-- ARGV[9] est_tokens  ARGV[10] api_key_id  ARGV[11] now_unix_s
+-- ARGV[12] mode（可选：'fast' 仅在 clean:{uid} 有效时放行，否则返回 SLOW_PATH；'stamp' 成功后写入 clean:{uid}）
+-- ARGV[13] clean_until_unix（mode='stamp'）  ARGV[14] clean_ttl_secs（mode='stamp'）
 -- 全部 KEYS 同 {uid} hash-tag（Cluster 单槽原子）。cap<=0 = 不限。
 -- 预扣字段值 = "<est_micro>|<deadline_ms>|<api_key_id>|<pool>"（pool 0 钱包 / 1 订阅池；
 -- 释放时按 kid 归还并发槽、按 pool 回到同一个池）。
@@ -33,14 +33,14 @@ local function integer(raw, signed)
 end
 
 local est = integer(ARGV[2], false)
-local est_tokens = integer(ARGV[8], false)
+local est_tokens = integer(ARGV[9], false)
 local ttl = integer(ARGV[3], false)
 if not est or not est_tokens or not ttl then return {0, 'INVALID_RESERVATION'} end
 
-local mode = ARGV[11] or ''
+local mode = ARGV[12] or ''
 if mode == 'fast' then
-    local clean_until = integer(redis.call('GET', KEYS[6]) or '', false)
-    local now_fast = integer(ARGV[10] or '', false)
+    local clean_until = integer(redis.call('GET', KEYS[7]) or '', false)
+    local now_fast = integer(ARGV[11] or '', false)
     if not clean_until or not now_fast or clean_until <= now_fast then
         return {0, 'SLOW_PATH'}
     end
@@ -55,9 +55,9 @@ end
 
 -- A script is isolated, but Redis does not roll back writes on runtime errors.
 -- Validate ALL counters, including unlimited ones, before changing any state.
-local increments = {1, est_tokens, 1, 1}
+local increments = {1, est_tokens, 1, 1, est_tokens}
 local current, caps = {}, {}
-for i = 1, 4 do
+for i = 1, 5 do
     caps[i] = tonumber(ARGV[i + 3])
     if not caps[i] or caps[i] > maximum then return {0, 'INVALID_RESERVATION'} end
     current[i] = integer(redis.pcall('GET', KEYS[i + 1]) or '0', false)
@@ -71,14 +71,17 @@ for i = 1, 3 do
         return {0, 'RATE_LIMITED', axes[i]}
     end
 end
+if caps[5] > 0 and current[5] + increments[5] > caps[5] then
+    return {0, 'RATE_LIMITED', 'tpd'}
+end
 local durable_slots = nil
 if caps[4] > 0 then
-    durable_slots = durable_concurrency(KEYS[1], ARGV[9])
+    durable_slots = durable_concurrency(KEYS[1], ARGV[10])
     if not durable_slots then return {0, 'HOLD_RECOVERY_REQUIRED'} end
     if current[4] + 1 > caps[4] - durable_slots then return {0, 'RATE_LIMITED', 'concurrency'} end
 end
 
-local now = tonumber(ARGV[10] or '0')
+local now = tonumber(ARGV[11] or '0')
 local sub = integer(redis.call('HGET', KEYS[1], 'sub') or '0', true)
 local sub_until = integer(redis.call('HGET', KEYS[1], 'sub_until') or '0', true)
 if not sub or not sub_until then return {0, 'ADMISSION_STATE_INVALID'} end
@@ -107,23 +110,24 @@ end
 
 -- Keep large safe integers as decimal strings when passing them to Redis.
 redis.call('HINCRBY', KEYS[1], field, est == 0 and '0' or '-' .. ARGV[2])
-if durable_slots then redis.call('HSET', KEYS[1], 'hc:' .. ARGV[9], tostring(durable_slots)) end
+if durable_slots then redis.call('HSET', KEYS[1], 'hc:' .. ARGV[10], tostring(durable_slots)) end
 -- 截止时间用 Redis 自己的时钟：sweep 也按 Redis TIME 判过期，网关与 worker 的本机时钟漂移
 -- 不再缩放在途保护窗（以前网关写、worker 判，时钟差超过 TTL 就会把正在输出的请求提前退款）。
 local clock = redis.call('TIME')
 local deadline = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000) + ttl
-local receipt = ARGV[2] .. '|' .. string.format('%.0f', deadline) .. '|' .. ARGV[9] .. '|' .. pool
+local receipt = ARGV[2] .. '|' .. string.format('%.0f', deadline) .. '|' .. ARGV[10] .. '|' .. pool
 if epoch ~= '' then receipt = receipt .. '|w:' .. epoch end
 redis.call('HSET', KEYS[1], 'r:' .. ARGV[1], receipt)
 redis.call('INCR', KEYS[2]); redis.call('EXPIRE', KEYS[2], 120)
-redis.call('INCRBY', KEYS[3], ARGV[8]); redis.call('EXPIRE', KEYS[3], 120)
+redis.call('INCRBY', KEYS[3], ARGV[9]); redis.call('EXPIRE', KEYS[3], 120)
 redis.call('INCR', KEYS[4]); redis.call('EXPIRE', KEYS[4], 172800)
 redis.call('INCR', KEYS[5]); redis.call('EXPIRE', KEYS[5], 3600)
+redis.call('INCRBY', KEYS[6], ARGV[9]); redis.call('EXPIRE', KEYS[6], 172800)
 if mode == 'stamp' and not (sub_until > 0 and now >= sub_until) then
-    local clean_until = integer(ARGV[12] or '', false)
-    local clean_ttl = integer(ARGV[13] or '', false)
+    local clean_until = integer(ARGV[13] or '', false)
+    local clean_ttl = integer(ARGV[14] or '', false)
     if clean_until and clean_ttl and clean_ttl > 0 then
-        redis.call('SET', KEYS[6], ARGV[12], 'EX', clean_ttl)
+        redis.call('SET', KEYS[7], ARGV[13], 'EX', clean_ttl)
     end
 end
 return {1, redis.call('HGET', KEYS[1], field), pool, epoch}

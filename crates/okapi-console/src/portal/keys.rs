@@ -195,17 +195,55 @@ pub(crate) fn normalize_ip_allowlist(list: Option<Vec<String>>) -> Result<Option
     Ok((!out.is_empty()).then(|| json!(out)))
 }
 
-/// 模型白名单归一化：空数组等价于"不限"，避免落成一把谁也调不通的死 key。
-pub(crate) fn normalize_allowlist(list: Option<Vec<String>>) -> Option<Value> {
-    let items: Vec<String> = list?
-        .into_iter()
-        .map(|m| m.trim().to_owned())
-        .filter(|m| !m.is_empty())
-        .collect();
-    if items.is_empty() {
-        return None;
+/// 模型白名单归一化（纯文本）：去空白、去重、校验长度与控制字符；空数组等价于"不限"，避免落成一把谁也调不通的死 key。
+pub(crate) fn normalize_allowlist(list: Option<Vec<String>>) -> Result<Option<Value>, AppError> {
+    let Some(list) = list else {
+        return Ok(None);
+    };
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.len() > 128 || entry.chars().any(char::is_control) {
+            return Err(AppError::bad_request().with_param("model_allowlist"));
+        }
+        let owned = entry.to_owned();
+        if !out.contains(&owned) {
+            out.push(owned);
+        }
     }
-    Some(json!(items))
+    Ok((!out.is_empty()).then(|| json!(out)))
+}
+
+/// 模型白名单归一化 + 别名解析：非通配条目命中已知别名时自动归一为 canonical 真名，
+/// 避免用户填入别名保存成功却在网关 403；通配模式（含 `*`）与未建档名原样保留并去重。
+pub(crate) async fn resolve_allowlist(
+    pg: &sqlx::PgPool,
+    list: Option<Vec<String>>,
+) -> Result<Option<Value>, AppError> {
+    let Some(Value::Array(items)) = normalize_allowlist(list)? else {
+        return Ok(None);
+    };
+    let mut out: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(entry) = item.as_str() else {
+            continue;
+        };
+        let resolved = if entry.contains('*') {
+            entry.to_owned()
+        } else {
+            okapi_store::channels::resolve_model(pg, entry)
+                .await
+                .map_err(AppError::from)?
+                .map_or_else(|| entry.to_owned(), |meta| meta.canonical)
+        };
+        if !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    Ok((!out.is_empty()).then(|| json!(out)))
 }
 
 pub(crate) fn validate_key_limits(
@@ -238,17 +276,14 @@ pub async fn patch_key(
         ));
     }
     validate_key_limits(req.quota_micro.flatten(), req.expires_at.flatten())?;
-    // A delegated/restricted credential must not remove its own restrictions.
+    // A delegated/restricted credential must not lift restrictions or mutate other owner keys.
     let changes_access = req.quota_micro.is_some()
         || req.expires_at.is_some()
         || req.model_allowlist.is_some()
         || req.group_code.is_some()
         || req.ip_allowlist.is_some();
-    if changes_access
-        && (key.quota_limited
-            || key.model_allowlist.is_some()
-            || key.expires_at.is_some()
-            || key.ip_allowlist.is_some())
+    if (changes_access || id != key.key_id)
+        && key.is_restricted()
         && super::super::auth_web::require_session(&state, &headers)
             .await
             .ok()
@@ -284,6 +319,10 @@ pub async fn patch_key(
         Some(list) => Some(normalize_ip_allowlist(list)?),
         None => None,
     };
+    let model_allowlist = match req.model_allowlist {
+        Some(list) => Some(resolve_allowlist(&state.pg, list).await?),
+        None => None,
+    };
     let patch = okapi_store::admin::ApiKeyPatch {
         quota_micro: req.quota_micro,
         name: req
@@ -296,7 +335,7 @@ pub async fn patch_key(
             .transpose()?,
         status: req.status,
         expires_at: req.expires_at,
-        model_allowlist: req.model_allowlist.map(normalize_allowlist),
+        model_allowlist,
         group_override,
         ip_allowlist,
         ..Default::default()
@@ -333,10 +372,42 @@ pub async fn delete_key(
             codes::PERMISSION_DENIED,
         ));
     }
+    // A restricted sub-key must not delete other keys belonging to the owner without a web session.
+    if key.is_restricted()
+        && super::super::auth_web::require_session(&state, &headers)
+            .await
+            .ok()
+            != Some(key.user_id)
+    {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "key_limits_session_required",
+        ));
+    }
     let touched = okapi_store::admin::soft_delete_api_key(&state.pg, id, Some(key.user_id)).await?;
     let Some(touched) = touched else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     };
     state.sched.auth_del(&touched.key_hash).await;
     Ok(Json(json!({ "ok": true, "key_id": id })))
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_allowlist_dedups_trims_and_rejects_control_chars() {
+        let out = normalize_allowlist(Some(vec![
+            " claude-* ".into(),
+            String::new(),
+            "gpt-4o".into(),
+            "claude-*".into(),
+        ]))
+        .unwrap();
+        assert_eq!(out, Some(json!(["claude-*", "gpt-4o"])));
+        assert_eq!(normalize_allowlist(Some(vec!["  ".into()])).unwrap(), None);
+        assert!(normalize_allowlist(Some(vec!["bad\nmodel".into()])).is_err());
+        assert!(normalize_allowlist(Some(vec!["a".repeat(129)])).is_err());
+    }
 }

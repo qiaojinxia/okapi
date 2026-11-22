@@ -1,5 +1,5 @@
 //! 管理面改 / 删任意用户的 API key。
-use super::{audit, ensure_group_usable, guard};
+use super::{audit, ensure_group_usable, ensure_pool_exists, guard};
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -28,6 +28,9 @@ pub struct AdminPatchKeyReq {
     /// key 级定价组覆盖；null = 回落用户组。
     #[serde(default, deserialize_with = "super::super::double_option")]
     pub group_override: Option<Option<String>>,
+    /// key 级渠道池覆盖；null = 解除（跟随生效分组的池）。
+    #[serde(default, deserialize_with = "super::super::double_option")]
+    pub pool_override: Option<Option<String>>,
     #[serde(default, deserialize_with = "super::super::double_option")]
     pub rpm_limit: Option<Option<i32>>,
     #[serde(default, deserialize_with = "super::super::double_option")]
@@ -78,6 +81,22 @@ pub async fn patch_api_key(
     if let Some(Some(group)) = &req.group_override {
         ensure_group_usable(&state, group, "group_override").await?;
     }
+    let pool_override = match req.pool_override.clone() {
+        Some(Some(raw)) => {
+            let code = raw.trim().to_owned();
+            if code.is_empty() {
+                return Err(AppError::bad_request().with_param("pool_override"));
+            }
+            ensure_pool_exists(&state, &code).await?;
+            Some(Some(code))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+    let model_allowlist = match req.model_allowlist.clone() {
+        Some(list) => Some(super::super::portal::resolve_allowlist(&state.pg, list).await?),
+        None => None,
+    };
 
     let patch = okapi_store::admin::ApiKeyPatch {
         quota_micro: req.quota_micro,
@@ -91,11 +110,9 @@ pub async fn patch_api_key(
             .transpose()?,
         status: req.status,
         expires_at: req.expires_at,
-        model_allowlist: req
-            .model_allowlist
-            .clone()
-            .map(super::super::portal::normalize_allowlist),
+        model_allowlist,
         group_override: req.group_override.clone(),
+        pool_override: pool_override.clone(),
         rpm_limit: req.rpm_limit,
         tpm_limit: req.tpm_limit,
         rpd_limit: req.rpd_limit,
@@ -118,8 +135,8 @@ pub async fn patch_api_key(
         &id.to_string(),
         json!({
             "user_id": touched.user_id, "status": req.status,
-            "group_override": req.group_override, "rpm_limit": req.rpm_limit,
-            "tpm_limit": req.tpm_limit, "rpd_limit": req.rpd_limit,
+            "group_override": req.group_override, "pool_override": pool_override,
+            "rpm_limit": req.rpm_limit, "tpm_limit": req.tpm_limit, "rpd_limit": req.rpd_limit,
             "daily_token_limit": req.daily_token_limit,
             "max_concurrency": req.max_concurrency, "expires_at": req.expires_at,
         }),

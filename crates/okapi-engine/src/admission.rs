@@ -54,13 +54,14 @@ fn local_minute_of_day(now: chrono::DateTime<chrono::Utc>, utc_offset_seconds: i
     .unwrap_or(0)
 }
 
-/// key 的 RPM / TPM / RPD / 并发上限（未配 = 0 = 不限）。
+/// key 的 RPM / TPM / RPD / TPD / 并发上限（未配 = 0 = 不限）。
 pub fn limit_caps(key: &AuthedKey) -> LimitCaps {
     let cap = |v: Option<i32>| v.map_or(0, i64::from);
     LimitCaps {
         rpm: cap(key.rpm_limit),
         tpm: cap(key.tpm_limit),
         rpd: cap(key.rpd_limit),
+        tpd: key.daily_token_limit.unwrap_or(0),
         concurrency: cap(key.max_concurrency),
     }
 }

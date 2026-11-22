@@ -48,6 +48,9 @@ pub struct AuthedKey {
     pub rpm_limit: Option<i32>,
     pub tpm_limit: Option<i32>,
     pub rpd_limit: Option<i32>,
+    /// key 级每日 Token 上限（与 `api_keys.daily_token_limit` 对齐；None = 不限）。
+    #[serde(default)]
+    pub daily_token_limit: Option<i64>,
     pub max_concurrency: Option<i32>,
     pub model_allowlist: Option<serde_json::Value>,
     /// key 级 IP 白名单（地址或 CIDR 字符串；None/空 = 不限）。此前列在库里、网关从不读。
@@ -138,16 +141,60 @@ impl AuthedKey {
         }
     }
 
-    /// 模型白名单检查（null = 不限）。
+    /// 是否带有任一访问或配额限制（受限子 key 不得在无主账户 Web 会话时自我放宽或删改同账户其他 key）。
+    #[must_use]
+    pub fn is_restricted(&self) -> bool {
+        self.quota_limited
+            || self.model_allowlist.is_some()
+            || self.expires_at.is_some()
+            || self.ip_allowlist.is_some()
+            || self.rpm_limit.is_some()
+            || self.tpm_limit.is_some()
+            || self.rpd_limit.is_some()
+            || self.daily_token_limit.is_some()
+            || self.max_concurrency.is_some()
+    }
+
+    /// 模型白名单检查（null = 不限；条目支持精确名与 `*` 通配，例如 `claude-*`、`*-mini`）。
     #[must_use]
     pub fn allows_model(&self, model: &str) -> bool {
         match &self.model_allowlist {
             None => true,
-            Some(list) => list
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(model))),
+            Some(list) => list.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|pattern| wildcard_match(pattern, model))
+            }),
         }
     }
+}
+
+/// 线性两指针 `*` 通配匹配（无正则回溯，与 `model_aliases` 同一 `*` 语义）。
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let (p, t) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_p, mut star_t) = (None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star_p = Some(pi);
+            pi += 1;
+            star_t = ti;
+        } else if let Some(sp) = star_p {
+            pi = sp + 1;
+            star_t += 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 /// 按 key 哈希查找（SHA-256 hex；明文不落库）。
@@ -219,15 +266,15 @@ pub async fn find_key_by_hash(
     .fetch_optional(pool)
     .await?;
 
-    let (quota_limited, session_hash) = if let Some(row) = &row {
-        sqlx::query_as::<_, (bool, Option<String>)>(
-            "SELECT quota_mode = 1, session_hash FROM api_keys WHERE id = $1",
+    let (quota_limited, session_hash, daily_token_limit) = if let Some(row) = &row {
+        sqlx::query_as::<_, (bool, Option<String>, Option<i64>)>(
+            "SELECT quota_mode = 1, session_hash, daily_token_limit FROM api_keys WHERE id = $1",
         )
         .bind(row.key_id)
         .fetch_one(pool)
         .await?
     } else {
-        (false, None)
+        (false, None, None)
     };
     // Team keys authenticate the member as well as the wallet. Removing a
     // membership or banning its user must disable their delegated credentials.
@@ -266,6 +313,7 @@ pub async fn find_key_by_hash(
             rpm_limit: r.rpm_limit,
             tpm_limit: r.tpm_limit,
             rpd_limit: r.rpd_limit,
+            daily_token_limit,
             max_concurrency: r.max_concurrency,
             model_allowlist: r.model_allowlist,
             ip_allowlist: parse_policy(r.ip_allowlist)?,
@@ -355,6 +403,7 @@ pub async fn find_user_session_actor(
             rpm_limit: None,
             tpm_limit: None,
             rpd_limit: None,
+            daily_token_limit: None,
             max_concurrency: None,
             model_allowlist: None,
             ip_allowlist: None,
@@ -396,5 +445,41 @@ mod scope_tests {
         let key:AuthedKey=serde_json::from_value(serde_json::json!({"key_id":1,"user_id":1,"key_status":1,"quota_limited":false,"user_status":1,"role":10,"permissions":["channel.write.own"],"group_code":"default","multiplier_scaled":1_000_000})).unwrap();
         assert_eq!(key.permission_scope("channel.write"), PermScope::Own);
         assert!(!key.has_permission("channel.write"));
+    }
+
+    #[test]
+    fn allows_model_supports_exact_and_wildcard_patterns() {
+        let mut key: AuthedKey = serde_json::from_value(serde_json::json!({
+            "key_id": 1, "user_id": 1, "key_status": 1, "quota_limited": false,
+            "user_status": 1, "role": 1, "group_code": "default", "multiplier_scaled": 1_000_000,
+            "model_allowlist": ["claude-*", "*-mini", "gemini-2.5-*-flash", "gpt-4o"]
+        }))
+        .unwrap();
+        assert!(key.allows_model("claude-sonnet-4-5"));
+        assert!(key.allows_model("claude-"));
+        assert!(key.allows_model("gpt-4o-mini"));
+        assert!(key.allows_model("gemini-2.5-pro-flash"));
+        assert!(key.allows_model("gpt-4o"));
+        assert!(!key.allows_model("gpt-4o-2024-08-06"));
+        assert!(!key.allows_model("o3-pro"));
+        key.model_allowlist = Some(serde_json::json!([]));
+        assert!(!key.allows_model("gpt-4o"));
+        key.model_allowlist = None;
+        assert!(key.allows_model("anything"));
+    }
+
+    #[test]
+    fn is_restricted_detects_rate_and_token_limits() {
+        let mut key: AuthedKey = serde_json::from_value(serde_json::json!({
+            "key_id": 1, "user_id": 1, "key_status": 1, "quota_limited": false,
+            "user_status": 1, "role": 1, "group_code": "default", "multiplier_scaled": 1_000_000
+        }))
+        .unwrap();
+        assert!(!key.is_restricted());
+        key.daily_token_limit = Some(100_000);
+        assert!(key.is_restricted());
+        key.daily_token_limit = None;
+        key.rpm_limit = Some(10);
+        assert!(key.is_restricted());
     }
 }

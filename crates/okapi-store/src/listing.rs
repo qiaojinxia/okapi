@@ -438,7 +438,7 @@ pub async fn list_groups(pool: &PgPool, slice: Slice) -> Result<Page<GroupListRo
     Ok(Page { data, total })
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ApiKeyListRow {
     pub id: i64,
     pub user_id: i64,
@@ -453,8 +453,12 @@ pub struct ApiKeyListRow {
     pub used_micro: i64,
     pub model_allowlist: Option<serde_json::Value>,
     pub group_override: Option<String>,
+    pub pool_override: Option<String>,
     pub ip_allowlist: Option<serde_json::Value>,
     pub rpm_limit: Option<i32>,
+    pub tpm_limit: Option<i32>,
+    pub rpd_limit: Option<i32>,
+    pub daily_token_limit: Option<i64>,
     pub max_concurrency: Option<i32>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -472,12 +476,13 @@ pub async fn list_api_keys(
     let (limit, offset) = (slice.capped_limit(), slice.offset);
     let pattern = like_pattern(query);
     // 大表 limit 永远被封顶，data.len() 不等于 total，COUNT 不能省——只并行
-    let (rows, total) = tokio::try_join!(
-        sqlx::query!(
-            r#"
+    let (data, total) = tokio::try_join!(
+        sqlx::query_as::<_, ApiKeyListRow>(
+            r"
         SELECT k.id, k.user_id, u.username, k.team_id, k.name, k.key_prefix, k.status,
                k.quota_mode, k.quota_micro, k.used_micro, k.model_allowlist,
-               k.group_override, k.ip_allowlist, k.rpm_limit, k.max_concurrency,
+               k.group_override, k.pool_override, k.ip_allowlist, k.rpm_limit, k.tpm_limit,
+               k.rpd_limit, k.daily_token_limit, k.max_concurrency,
                k.expires_at, k.last_used_at, k.created_at
         FROM api_keys k JOIN users u ON u.id = k.user_id
         WHERE k.deleted_at IS NULL
@@ -485,12 +490,12 @@ pub async fn list_api_keys(
           AND ($2::text IS NULL OR k.name ILIKE $2 OR u.username ILIKE $2)
         ORDER BY k.id DESC
         LIMIT $3 OFFSET $4
-        "#,
-            user,
-            pattern.as_deref(),
-            limit,
-            offset
+        ",
         )
+        .bind(user)
+        .bind(pattern.as_deref())
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool),
         sqlx::query_scalar!(
             r#"SELECT COUNT(*)::bigint AS "c!"
@@ -503,32 +508,7 @@ pub async fn list_api_keys(
         )
         .fetch_one(pool),
     )?;
-    Ok(Page {
-        data: rows
-            .into_iter()
-            .map(|r| ApiKeyListRow {
-                id: r.id,
-                user_id: r.user_id,
-                username: r.username,
-                team_id: r.team_id,
-                name: r.name,
-                key_prefix: r.key_prefix,
-                status: r.status,
-                quota_mode: r.quota_mode,
-                quota_micro: r.quota_micro,
-                used_micro: r.used_micro,
-                model_allowlist: r.model_allowlist,
-                group_override: r.group_override,
-                ip_allowlist: r.ip_allowlist,
-                rpm_limit: r.rpm_limit,
-                max_concurrency: r.max_concurrency,
-                expires_at: r.expires_at,
-                last_used_at: r.last_used_at,
-                created_at: r.created_at,
-            })
-            .collect(),
-        total,
-    })
+    Ok(Page { data, total })
 }
 
 #[derive(Debug, Serialize)]

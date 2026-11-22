@@ -262,7 +262,7 @@ pub async fn create_key(
         Some(name) => super::super::identifiers::ensure_optional_text("name", name, 128)?,
         None => "web",
     };
-    let allowlist = super::super::portal::normalize_allowlist(req.model_allowlist);
+    let allowlist = super::super::portal::resolve_allowlist(&state.pg, req.model_allowlist).await?;
     let group_code = req
         .group_code
         .as_deref()

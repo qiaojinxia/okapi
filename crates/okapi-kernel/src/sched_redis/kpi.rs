@@ -99,6 +99,18 @@ impl SchedulerRedis {
         (at(0), at(1), at(2))
     }
 
+    /// 读某把 key 当日已预扣估算 Token（TPD，与 `reserve.lua` 的 `rl:{uid}:k:<kid>:tpd:<day>` 一致）。
+    pub async fn key_daily_tokens(&self, user_id: i64, key_id: i64) -> i64 {
+        let day = chrono::Utc::now().format("%Y%m%d");
+        let key = format!("rl:{{{user_id}}}:k:{key_id}:tpd:{day}");
+        self.client
+            .get::<Option<i64>, _>(key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    }
+
     /// 某一秒的四个序列键。`{kpi}` hash-tag 保证 Cluster 下同槽，
     /// 使跨序列跨秒的 MGET 成立（否则读窗口要退化成 N 次往返）。
     pub(super) fn kpi_keys(sec: i64) -> Vec<String> {

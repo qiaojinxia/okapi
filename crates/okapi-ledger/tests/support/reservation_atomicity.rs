@@ -8,12 +8,14 @@ const MAXIMUM: u64 = 9_007_199_254_740_991;
 fn keys(bed: &Bed) -> Vec<String> {
     let slot = format!("{{{}}}:k:{}", bed.request.user_id, bed.request.api_key_id);
     let minute = bed.now.timestamp().div_euclid(60);
+    let day = bed.now.format("%Y%m%d");
     vec![
         bed.balance_key(),
         format!("rl:{slot}:rpm:{minute}"),
         format!("rl:{slot}:tpm:{minute}"),
-        format!("rl:{slot}:rpd:{}", bed.now.format("%Y%m%d")),
+        format!("rl:{slot}:rpd:{day}"),
         format!("conc:{slot}"),
+        format!("rl:{slot}:tpd:{day}"),
     ]
 }
 
@@ -32,6 +34,7 @@ async fn seeded(caps: i64, subscription: bool) -> TestResult<Bed> {
         rpm: caps,
         tpm: caps,
         rpd: caps,
+        tpd: caps,
         concurrency: caps,
     };
     for key in keys(&bed).into_iter().skip(1) {
@@ -74,7 +77,7 @@ async fn rejected_unchanged(bed: &Bed) -> TestResult {
 
 async fn corrupt_types(subscription: bool) -> TestResult {
     for caps in [0, -1, 100] {
-        for axis in 1..=4 {
+        for axis in 1..=5 {
             let bed = seeded(caps, subscription).await?;
             let key = &keys(&bed)[axis];
             bed.redis.del::<(), _>(key).await?;
@@ -98,7 +101,7 @@ async fn wrong_counter_types_cannot_partially_debit_subscription() -> TestResult
 #[tokio::test]
 async fn malformed_and_overflowing_counters_cannot_change_funds() -> TestResult {
     for caps in [0, 100] {
-        for axis in 1..=4 {
+        for axis in 1..=5 {
             for invalid in [
                 "bad",
                 "",
@@ -195,7 +198,7 @@ async fn largest_safe_integers_and_zero_cost_admit_exactly() -> TestResult {
 
     let edge = seeded(0, false).await?;
     for (index, key) in keys(&edge).into_iter().enumerate().skip(1) {
-        let increment = if index == 2 { 10 } else { 1 };
+        let increment = if index == 2 || index == 5 { 10 } else { 1 };
         edge.redis
             .set::<(), _, _>(key, maximum - increment, None, None, false)
             .await?;

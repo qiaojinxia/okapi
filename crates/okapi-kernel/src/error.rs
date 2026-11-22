@@ -92,7 +92,7 @@ impl AppError {
                 "rpm" | "tpm" | "group_rpm" | "model_rpm" | "token_count_rpm" | "invalid_api_key",
             ) => 60,
             Some("group_rph") => 3600,
-            Some("rpd" | "token_count_rpd") => 86_400,
+            Some("rpd" | "tpd" | "token_count_rpd") => 86_400,
             _ => return,
         };
         let remaining = period - chrono::Utc::now().timestamp().rem_euclid(period);
@@ -282,6 +282,7 @@ mod retry_after_tests {
             "group_rpm",
             "group_rph",
             "rpd",
+            "tpd",
             "token_count_rpd",
         ] {
             let error = || {

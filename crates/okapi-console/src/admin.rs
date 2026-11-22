@@ -51,11 +51,11 @@ pub(super) use self::channels::{
     ensure_cost_milli, ensure_max_concurrency, ensure_pool_scope, normalize_members,
     normalize_models,
 };
-use self::groups::ensure_group_usable;
 pub use self::groups::{
     UpsertGroupReq, UpsertPoolReq, UserGroupItem, UserGroupsReq, set_user_groups, upsert_group,
     upsert_pool,
 };
+use self::groups::{ensure_group_usable, ensure_pool_exists};
 pub use self::keys::{AdminPatchKeyReq, delete_api_key, patch_api_key};
 pub use self::models::{UpsertModelReq, upsert_model};
 pub use self::ops::{
