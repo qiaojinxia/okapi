@@ -126,6 +126,13 @@ impl Trace {
         if !is_stream_failure_event(raw) {
             return;
         }
+        // 到了 max_output_tokens / 被内容过滤的 `response.incomplete` 是请求造成的正常收尾（chat 流里的
+        // `finish_reason: "length"`），不记上游失败；否则这类流会以 502 落日志、拉低渠道成功率。
+        if raw.contains("response.incomplete")
+            && okapi_providers::stream_failure::incomplete_by_request(raw)
+        {
+            return;
+        }
         let Ok(value) = serde_json::from_str::<Value>(raw) else {
             return;
         };
@@ -614,6 +621,19 @@ mod tests {
         assert_eq!(snapshot["error_message"], "quota exceeded");
         assert_eq!(snapshot["attempts"][0]["status"], 200);
         assert_eq!(snapshot["attempts"][0]["outcome"], "success");
+    }
+
+    #[test]
+    fn incomplete_at_the_output_cap_is_not_an_upstream_failure() {
+        let trace = Trace::new(&HeaderMap::new());
+        trace.stream_event(
+            r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#,
+        );
+        assert!(trace.snapshot()["request_failed"].is_null());
+        trace.stream_event(
+            r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"upstream_gone"}}}"#,
+        );
+        assert_eq!(trace.snapshot()["request_failed"], true);
     }
 
     #[test]

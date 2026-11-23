@@ -222,6 +222,33 @@ async fn mock_native_responses(
     }
 }
 
+/// 原生 Responses 上游：输出到 `max_output_tokens` 就以 `response.incomplete` 收尾（OpenAI 的正常截断）。
+async fn mock_incomplete_responses() -> axum::response::Response {
+    let usage = json!({"input_tokens": 100, "output_tokens": 128, "total_tokens": 228});
+    let events = [
+        json!({"type":"response.created","sequence_number":0,
+            "response":{"id":"resp_cap","object":"response","status":"in_progress","model":"gpt-upstream","output":[]}}),
+        json!({"type":"response.output_text.delta","sequence_number":1,
+            "item_id":"msg_1","output_index":0,"content_index":0,"delta":"cut at the cap"}),
+        json!({"type":"response.incomplete","sequence_number":2,
+            "response":{"id":"resp_cap","object":"response","status":"incomplete","model":"gpt-upstream",
+                "incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage": usage}}),
+    ];
+    let mut out = String::new();
+    for data in &events {
+        let _ = write!(
+            out,
+            "event: {}\ndata: {data}\n\n",
+            data["type"].as_str().unwrap()
+        );
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        out,
+    )
+        .into_response()
+}
+
 fn compact_output() -> Value {
     json!({"id": "cmp-response-1", "object": "response.compaction", "created_at": 1,
         "output": [
@@ -294,6 +321,7 @@ async fn spawn_mock() -> (SocketAddr, MockCalls) {
         .route("/oai/v1/chat/completions", post(mock_chat))
         .route("/oai/v1/responses", post(mock_native_responses))
         .route("/oai/v1/responses/compact", post(mock_compact))
+        .route("/capped/v1/responses", post(mock_incomplete_responses))
         .route("/codex/responses/compact", post(mock_compact))
         // 只实现了 chat 的"openai"上游：/responses 由 axum 回 404
         .route("/chatonly/v1/chat/completions", post(mock_chat))
@@ -834,6 +862,31 @@ async fn native_stream_passthrough_and_billing() {
         amount, 240,
         "usage 必须来自 response.completed 而非字符估算"
     );
+}
+
+/// 到了 `max_output_tokens` 的 `response.incomplete` 是请求造成的正常收尾：按用量结算，
+/// 日志不记上游失败（此前记成 502 / upstream_error，拉低渠道成功率；chat 的 `length` 一直记 200）。
+#[tokio::test]
+async fn native_stream_cut_at_the_output_cap_is_not_logged_as_an_upstream_failure() {
+    let env = setup("openai", "/capped/v1", None).await;
+    let resp = post_responses(&env, true).await;
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("response.incomplete"), "{text}");
+    let (status, _) = wait_record(&env.pg, env.user_id).await;
+    assert_eq!(status, 20);
+    let (upstream_status, error_code, failed): (Option<i16>, Option<String>, Option<Value>) =
+        sqlx::query_as(
+            "SELECT upstream_status, error_code, usage_details->'diagnostics'->'request_failed'
+             FROM billing_records WHERE user_id = $1 AND log_type = 2",
+        )
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(upstream_status, Some(200));
+    assert_eq!(error_code, None);
+    assert_eq!(failed, None);
 }
 
 /// 直转·非流式：Responses 对象原样返回（reasoning item 在 output 里），计费一致。

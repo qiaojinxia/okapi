@@ -240,8 +240,11 @@ impl Progress {
             kind,
             "response.completed" | "response.failed" | "response.incomplete" | "error"
         );
+        // 到了 max_output_tokens / 被内容过滤的 incomplete 是正常收尾（与 HTTP 流、chat 的 length 同口径）
         if self.error.is_none()
             && matches!(kind, "error" | "response.failed" | "response.incomplete")
+            && !(kind == "response.incomplete"
+                && okapi_providers::stream_failure::incomplete_by_request(raw))
         {
             let status = probe
                 .status

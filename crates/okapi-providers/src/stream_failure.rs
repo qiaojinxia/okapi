@@ -148,9 +148,42 @@ fn status_of(name: &str) -> Option<u16> {
     }
 }
 
+/// Responses 的 `response.incomplete` 是不是请求自己造成的停止：到了 `max_output_tokens`，或被内容过滤。
+///
+/// 这两种是正常收尾，不是上游失败——同一件事在 chat 流里是 `finish_reason: "length"`，记 200、
+/// 不动 key 状态。认不出的原因（或体不是 JSON）返回 false，由调用方照旧按失败记。
+#[must_use]
+pub fn incomplete_by_request(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw).is_ok_and(|event| {
+        matches!(
+            event
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str),
+            Some("max_output_tokens" | "content_filter")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_is_request_caused_only_for_the_documented_reasons() {
+        for reason in ["max_output_tokens", "content_filter"] {
+            let raw = format!(
+                r#"{{"type":"response.incomplete","response":{{"status":"incomplete","incomplete_details":{{"reason":"{reason}"}}}}}}"#
+            );
+            assert!(incomplete_by_request(&raw), "{raw}");
+        }
+        for raw in [
+            r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"server_shutdown"}}}"#,
+            r#"{"type":"response.incomplete","response":{"status":"incomplete"}}"#,
+            "not json",
+        ] {
+            assert!(!incomplete_by_request(raw), "{raw}");
+        }
+    }
 
     fn status_and_code(raw: &str) -> Option<(Option<u16>, String)> {
         detect(raw).map(|failure| (failure.status(), failure.message()))
