@@ -141,16 +141,11 @@ pub async fn admin_list(
         limit: q.limit.unwrap_or(50).clamp(1, 200),
         offset: q.offset.unwrap_or(0).min(10_000),
     };
-    let rows = list(&state.pg, state.ch.as_ref(), &filter).await?;
-    let data = enrich_admin_summaries(&state, &rows).await?;
-    let backend = if state.ch.is_some() {
-        "clickhouse"
-    } else {
-        "postgres"
-    };
+    let page = list(&state.pg, state.ch.as_ref(), &filter).await?;
+    let data = enrich_admin_summaries(&state, &page.rows).await?;
     Ok(Json(json!({
         "data": data,
-        "backend": backend,
+        "backend": page.backend,
         "clickhouse_enabled": state.ch.is_some(),
     })))
 }
@@ -295,10 +290,10 @@ pub async fn portal_list(
         limit: q.limit.unwrap_or(50).clamp(1, 200),
         offset: q.offset.unwrap_or(0).min(10_000),
     };
-    let rows = list(&state.pg, state.ch.as_ref(), &filter).await?;
+    let page = list(&state.pg, state.ch.as_ref(), &filter).await?;
     Ok(Json(json!({
-        "data": rows,
-        "backend": if state.ch.is_some() { "clickhouse" } else { "postgres" },
+        "data": page.rows,
+        "backend": page.backend,
     })))
 }
 

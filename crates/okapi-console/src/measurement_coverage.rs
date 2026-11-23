@@ -3,7 +3,7 @@
 //! 每个来源 MV 都由 `request_log_raw` 的每一次写入无条件喂入，新数据按构造就是完整的。
 //! 开发阶段不保留旧历史的兼容（库可以重置），所以不再有「逐粒度对账 → 回原始表补齐」
 //! 的恢复路径：那条路径把一次查询膨胀到几十 KB，ClickHouse 光规划就要秒级。
-use super::stats::ch_i64;
+use crate::ch_access::ch_i64;
 use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
 

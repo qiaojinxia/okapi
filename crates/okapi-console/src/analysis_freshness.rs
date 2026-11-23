@@ -11,10 +11,10 @@ pub async fn read(state: &AppState) -> Result<Value, AppError> {
     let rows = ch.query_json_each_row("SELECT toUnixTimestamp64Milli(maxMerge(last_event)) AS event_ms, toUnixTimestamp64Milli(maxMerge(last_ingested)) AS ingest_ms FROM mv_analysis_5min").await?;
     let event_ms = rows
         .first()
-        .map_or(0, |r| super::stats::ch_i64(r, "event_ms"));
+        .map_or(0, |r| crate::ch_access::ch_i64(r, "event_ms"));
     let ingest_ms = rows
         .first()
-        .map_or(0, |r| super::stats::ch_i64(r, "ingest_ms"));
+        .map_or(0, |r| crate::ch_access::ch_i64(r, "ingest_ms"));
     let backlog = okapi_store::delivery::backlog(&state.pg).await?;
     let (pending, oldest, failed) = (
         backlog.pending_events,

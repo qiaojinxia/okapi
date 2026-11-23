@@ -1,10 +1,11 @@
 //! 拆分：按维度排名的度量表与上一窗口对比。
 use super::super::query::Query;
-use super::super::stats::{ch_i64, rate_bp};
+use super::super::stats::rate_bp;
 use super::{
     CubeQuery, Names, Scope, accumulate_core_metrics, accumulate_original, aggregate_metrics,
     describe_scope, pack_core_metrics, pack_metrics, resolve_names,
 };
+use crate::ch_access::ch_i64;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

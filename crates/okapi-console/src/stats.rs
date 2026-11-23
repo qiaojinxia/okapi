@@ -9,9 +9,7 @@
 //! 本文件放共用的窗口参数、取数小工具与成本覆盖率注解；各看板端点按主题分在子模块
 //! （channels / models / overview / health / finance / portal），并从这里原路径再导出。
 
-use axum::http::StatusCode;
-use okapi_api::codes;
-use okapi_engine::state::AppState;
+use crate::ch_access::{ch_i64, ch_or_disabled};
 use okapi_kernel::error::AppError;
 use okapi_store::ChClient;
 use serde::Deserialize;
@@ -30,22 +28,6 @@ pub use self::health::{clients, diagnose, errors};
 pub use self::models::{model_trend, models};
 pub use self::overview::{OverviewQuery, RealtimeQuery, overview, realtime};
 pub use self::portal::{BreakdownQuery, my_breakdown, my_daily};
-
-fn ch_or_disabled(state: &AppState) -> Result<&ChClient, AppError> {
-    state
-        .ch
-        .as_ref()
-        .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, codes::STATS_DISABLED))
-}
-
-/// CH 的 JSONEachRow 把 64 位整数序列化为字符串，需两种形态都认。
-pub(super) fn ch_i64(row: &Value, key: &str) -> i64 {
-    row.get(key).map_or(0, |v| {
-        v.as_str()
-            .map_or_else(|| v.as_i64(), |s| s.parse::<i64>().ok())
-            .unwrap_or(0)
-    })
-}
 
 #[derive(Deserialize)]
 pub struct WindowQuery {

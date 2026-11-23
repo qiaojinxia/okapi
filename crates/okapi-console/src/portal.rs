@@ -30,31 +30,15 @@ pub(super) use self::keys::{
 };
 pub use self::redeem::{RedeemReq, redeem};
 
+use crate::ch_access::{ch_i64, ch_or_disabled};
 use crate::console_auth::authenticate;
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use okapi_api::codes;
+use axum::http::HeaderMap;
 use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
-use okapi_store::ChClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
-
-fn ch_or_disabled(state: &AppState) -> Result<&ChClient, AppError> {
-    state
-        .ch
-        .as_ref()
-        .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, codes::STATS_DISABLED))
-}
-
-fn ch_i64(row: &Value, key: &str) -> i64 {
-    row.get(key).map_or(0, |v| {
-        v.as_str()
-            .map_or_else(|| v.as_i64(), |s| s.parse::<i64>().ok())
-            .unwrap_or(0)
-    })
-}
 
 /// GET /api/me：身份、余额与**生效权限点**（热余额为准，快照列对账用）。
 ///

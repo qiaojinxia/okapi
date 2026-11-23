@@ -65,7 +65,7 @@ fn normalize_row(row: &Value) -> Value {
         "discount_micro",
         "errors",
     ] {
-        value[field] = json!(super::stats::ch_i64(row, field));
+        value[field] = json!(crate::ch_access::ch_i64(row, field));
     }
     value
 }

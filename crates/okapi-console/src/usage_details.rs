@@ -1,5 +1,6 @@
 //! 日历窗口与门户附加指标；历史缺失的采集维度返回 null，不显示成零。
-use super::stats::{ch_i64, scaled_ratio};
+use super::stats::scaled_ratio;
+use crate::ch_access::ch_i64;
 use chrono::{Days, NaiveDate};
 use okapi_kernel::error::AppError;
 use okapi_store::ChClient;

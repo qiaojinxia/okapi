@@ -1,10 +1,11 @@
 //! 流向：用户 → 分组 → 渠道 → 模型的桑基图。
 use super::super::query::Query;
-use super::super::stats::{ch_i64, rate_bp};
+use super::super::stats::rate_bp;
 use super::{
     CubeQuery, aggregate_metrics, ch_or_disabled, ch_str, describe_scope, pack_metrics,
     parse_choices,
 };
+use crate::ch_access::ch_i64;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

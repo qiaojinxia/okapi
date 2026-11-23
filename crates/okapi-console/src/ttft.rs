@@ -2,7 +2,8 @@
 //! Never merge raw with the new MV: they overlap. Counts must match the original
 //! request aggregate before percentiles can represent the entire selected period.
 
-use super::stats::{ch_i64, rate_bp};
+use super::stats::rate_bp;
+use crate::ch_access::ch_i64;
 use okapi_kernel::error::AppError;
 use okapi_store::ChClient;
 use serde_json::{Value, json};

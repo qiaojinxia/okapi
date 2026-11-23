@@ -165,23 +165,23 @@ pub async fn stat(
     crate::usage_observations::enrich(
         &observed_row,
         &mut result,
-        crate::stats::ch_i64(&observed_row, "records"),
+        crate::ch_access::ch_i64(&observed_row, "records"),
     );
     if let Some(object) = result.as_object_mut() {
         object.extend(crate::input_units::metrics(
             &observed_row,
-            crate::stats::ch_i64(&observed_row, "records"),
+            crate::ch_access::ch_i64(&observed_row, "records"),
         ));
     }
     let metrics = crate::usage_sources::metrics(
         &result,
-        crate::stats::ch_i64(&result, "records"),
+        crate::ch_access::ch_i64(&result, "records"),
         [
-            Some(crate::stats::ch_i64(&result, "prompt_tokens")),
-            Some(crate::stats::ch_i64(&result, "completion_tokens")),
+            Some(crate::ch_access::ch_i64(&result, "prompt_tokens")),
+            Some(crate::ch_access::ch_i64(&result, "completion_tokens")),
         ],
-        Some(crate::stats::ch_i64(&result, "cached_tokens")),
-        crate::stats::ch_i64(&result, "cache_read_samples"),
+        Some(crate::ch_access::ch_i64(&result, "cached_tokens")),
+        crate::ch_access::ch_i64(&result, "cache_read_samples"),
     );
     if let Some(object) = result.as_object_mut() {
         for field in crate::usage_sources::FIELDS {
@@ -194,7 +194,7 @@ pub async fn stat(
         }
         object.extend(crate::output_rate::metrics(
             &observed_row,
-            crate::stats::ch_i64(&observed_row, "records"),
+            crate::ch_access::ch_i64(&observed_row, "records"),
         ));
     }
     Ok(Json(result))
@@ -340,7 +340,7 @@ pub async fn series(
             let cell = |field: &str| {
                 by_day
                     .get(&name)
-                    .map_or(0, |row| crate::stats::ch_i64(row, field))
+                    .map_or(0, |row| crate::ch_access::ch_i64(row, field))
             };
             let values = [
                 cell("requests"),

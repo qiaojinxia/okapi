@@ -173,7 +173,14 @@ pub(super) async fn key_aggregate_usage(
     let sql = format!(
         "SELECT api_key_id, sumMerge(amount) AS amount_micro, countMerge(requests) AS requests FROM mv_apikey_day WHERE api_key_id IN ({ids}) GROUP BY api_key_id"
     );
-    ch.query_json_each_row(&sql).await.unwrap_or_default()
+    match ch.query_json_each_row(&sql).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            // 读不到就先按 0 显示（列表本身照常），但要留痕：此前错误被整个吞掉，花费恒为 0 也看不出原因
+            tracing::warn!(error = %err, "密钥用量读 ClickHouse 失败，花费与请求数暂按 0 显示");
+            Vec::new()
+        }
+    }
 }
 
 /// 自助面可改字段：收窄自己这把 key（名字 / 状态 / 过期 / 白名单），外加**在可选集合内**

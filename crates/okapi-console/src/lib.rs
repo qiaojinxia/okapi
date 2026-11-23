@@ -14,6 +14,7 @@ mod audit_fallback;
 mod audit_snapshots;
 pub mod auth_web;
 mod cache_usage;
+mod ch_access;
 pub mod channel_balance;
 mod channel_creation;
 mod channel_credentials;

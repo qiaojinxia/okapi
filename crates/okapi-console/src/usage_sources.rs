@@ -1,5 +1,6 @@
 //! Token provenance is additive; raw and the new aggregate overlap and must not be added.
-use super::stats::{ch_i64, rate_bp};
+use super::stats::rate_bp;
+use crate::ch_access::ch_i64;
 use okapi_kernel::error::AppError;
 use okapi_store::ChClient;
 use serde_json::{Map, Value, json};

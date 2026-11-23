@@ -251,10 +251,16 @@ pub async fn get_by_request_id(
     request_id: Uuid,
     owner_user_id: Option<i64>,
 ) -> Result<Option<ArchiveRecord>, StoreError> {
-    if let Some(ch) = ch
-        && let Ok(Some(rec)) = get_ch(ch, request_id, owner_user_id).await
-    {
-        return Ok(Some(rec));
+    if let Some(ch) = ch {
+        match get_ch(ch, request_id, owner_user_id).await {
+            Ok(Some(rec)) => return Ok(Some(rec)),
+            // 不在 ClickHouse：可能是 ClickHouse 写失败时落进 PG 的那几条
+            Ok(None) => {}
+            Err(err) if err.is_ch_unavailable() => {
+                tracing::warn!(error = %err, "ClickHouse 不可用，对话存档详情改查 PostgreSQL");
+            }
+            Err(err) => return Err(err),
+        }
     }
     get_pg(pg, request_id, owner_user_id).await
 }
@@ -263,21 +269,10 @@ pub async fn get_by_request_id(
 // `toString(request_id)`）时别名不能和列同名，否则 `created_at >= now64(3) - …`、`request_id = toUUID(…)`
 // 比较的是字符串，整条查询报 ILLEGAL_TYPE_OF_ARGUMENT，于是回退到（ClickHouse 在用时为空的）PG 表，
 // 列表「暂无数据」、详情 404。文本列一律叫 `*_text`。
-fn ch_i64(v: &Value, key: &str) -> i64 {
-    v.get(key).map_or(0, |x| {
-        x.as_str()
-            .and_then(|s| s.parse::<i64>().ok())
-            .or_else(|| x.as_i64())
-            .or_else(|| x.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .unwrap_or(0)
-    })
-}
+use crate::ch::row::int as ch_i64;
 
 fn ch_str(v: &Value, key: &str) -> String {
-    v.get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
+    crate::ch::row::text(v, key).to_owned()
 }
 
 async fn get_ch(
@@ -373,24 +368,99 @@ async fn get_pg(
     }))
 }
 
-/// 分页检索对话存档列表（CH 启用时读 CH，否则读 PG）。
+/// 一页存档摘要，连同实际读的是哪个后端（`"clickhouse"` / `"postgres"`）。
+#[derive(Debug, Clone)]
+pub struct ArchivePage {
+    pub rows: Vec<ArchiveSummary>,
+    pub backend: &'static str,
+}
+
+/// 单页上限与翻页深度上限。
+const MAX_PAGE: u32 = 200;
+const MAX_OFFSET: u32 = 10_000;
+
+/// 分页检索对话存档列表。
+///
+/// ClickHouse 启用时读 ClickHouse；ClickHouse 写失败的那几条落在 PG（见 [`insert`]），这时两边按时间合并，
+/// 详情与统计一直认它们，列表也要列得出来。只有 ClickHouse 不可用（[`StoreError::is_ch_unavailable`]）才整页
+/// 改读 PG；查询本身出错照实报错，不伪装成「暂无数据」。
 pub async fn list(
     pg: &PgPool,
     ch: Option<&ChClient>,
     filter: &ArchiveFilter,
-) -> Result<Vec<ArchiveSummary>, StoreError> {
+) -> Result<ArchivePage, StoreError> {
+    let limit = filter.limit.clamp(1, MAX_PAGE);
+    let offset = filter.offset.min(MAX_OFFSET);
     if let Some(ch) = ch {
-        match list_ch(ch, filter).await {
-            Ok(rows) => return Ok(rows),
-            Err(err) => {
-                tracing::warn!(error = %err, "ClickHouse 对话存档检索失败，回退查 PostgreSQL");
+        let spilled = pg_has_rows(pg).await?;
+        // 有落进 PG 的：两边各取到本页末尾为止，合并后再切页
+        let (fetch, skip) = if spilled {
+            (offset + limit, 0)
+        } else {
+            (limit, offset)
+        };
+        match list_ch(ch, filter, fetch, skip).await {
+            Ok(rows) if !spilled => {
+                return Ok(ArchivePage {
+                    rows,
+                    backend: "clickhouse",
+                });
             }
+            Ok(rows) => {
+                let spill = list_pg(pg, filter, fetch, 0).await?;
+                return Ok(ArchivePage {
+                    rows: merge_newest_first(rows, spill, offset, limit),
+                    backend: "clickhouse",
+                });
+            }
+            Err(err) if err.is_ch_unavailable() => {
+                tracing::warn!(error = %err, "ClickHouse 不可用，对话存档列表改查 PostgreSQL");
+            }
+            Err(err) => return Err(err),
         }
     }
-    list_pg(pg, filter).await
+    Ok(ArchivePage {
+        rows: list_pg(pg, filter, limit, offset).await?,
+        backend: "postgres",
+    })
 }
 
-async fn list_ch(ch: &ChClient, filter: &ArchiveFilter) -> Result<Vec<ArchiveSummary>, StoreError> {
+/// PG 里有没有存档（ClickHouse 启用时只有写失败降级的那几条）。
+async fn pg_has_rows(pg: &PgPool) -> Result<bool, StoreError> {
+    Ok(
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM conversation_archives)")
+            .fetch_one(pg)
+            .await?,
+    )
+}
+
+/// 两段各自按时间倒序的摘要合并成一页；同一请求两边都有时留 ClickHouse 那条。
+fn merge_newest_first(
+    ch_rows: Vec<ArchiveSummary>,
+    pg_rows: Vec<ArchiveSummary>,
+    offset: u32,
+    limit: u32,
+) -> Vec<ArchiveSummary> {
+    let seen: std::collections::HashSet<Uuid> = ch_rows.iter().map(|r| r.request_id).collect();
+    let mut rows = ch_rows;
+    rows.extend(
+        pg_rows
+            .into_iter()
+            .filter(|r| !seen.contains(&r.request_id)),
+    );
+    rows.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+    rows.into_iter()
+        .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .collect()
+}
+
+async fn list_ch(
+    ch: &ChClient,
+    filter: &ArchiveFilter,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<ArchiveSummary>, StoreError> {
     ensure_ch_table(ch).await?;
     let mut clauses = vec!["1 = 1".to_owned()];
     let mut owned_params: Vec<(&'static str, String)> = Vec::new();
@@ -433,8 +503,6 @@ async fn list_ch(ch: &ChClient, filter: &ArchiveFilter) -> Result<Vec<ArchiveSum
         clauses.push(format!("created_at >= now64(3) - INTERVAL {clamped} HOUR"));
     }
 
-    let limit = filter.limit.clamp(1, 200);
-    let offset = filter.offset.min(10_000);
     let sql = format!(
         "SELECT toString(created_at) AS created_at_text, toString(request_id) AS request_id_text, \
          user_id, api_key_id, channel_id, model, requested_model, endpoint, is_stream, \
@@ -487,7 +555,12 @@ fn escape_like(raw: &str) -> String {
     out
 }
 
-async fn list_pg(pg: &PgPool, filter: &ArchiveFilter) -> Result<Vec<ArchiveSummary>, StoreError> {
+async fn list_pg(
+    pg: &PgPool,
+    filter: &ArchiveFilter,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<ArchiveSummary>, StoreError> {
     let model_pat = filter
         .model
         .as_deref()
@@ -503,8 +576,7 @@ async fn list_pg(pg: &PgPool, filter: &ArchiveFilter) -> Result<Vec<ArchiveSumma
     let since = filter
         .hours
         .map(|h| Utc::now() - Duration::hours(i64::from(h.clamp(1, 24 * 365))));
-    let limit = i64::from(filter.limit.clamp(1, 200));
-    let offset = i64::from(filter.offset.min(10_000));
+    let (limit, offset) = (i64::from(limit), i64::from(offset));
 
     let rows = sqlx::query(
         r"SELECT request_id, user_id, api_key_id, channel_id, model, requested_model,
@@ -630,6 +702,17 @@ pub async fn prune(
     })
 }
 
+async fn ch_stats(ch: &ChClient) -> Result<Vec<Value>, StoreError> {
+    ensure_ch_table(ch).await?;
+    ch.query_json_each_row(
+        "SELECT count() AS cnt, \
+         if(count() > 0, toString(min(created_at)), '') AS oldest, \
+         if(count() > 0, toString(max(created_at)), '') AS newest \
+         FROM conversation_archives FINAL",
+    )
+    .await
+}
+
 /// 查询当前生效存储后端与存档数量/时间跨度。
 pub async fn stats(pg: &PgPool, ch: Option<&ChClient>) -> Result<ArchiveStats, StoreError> {
     let pg_row = sqlx::query(
@@ -644,18 +727,18 @@ pub async fn stats(pg: &PgPool, ch: Option<&ChClient>) -> Result<ArchiveStats, S
     let mut newest: Option<DateTime<Utc>> = pg_row.try_get("newest")?;
 
     let mut ch_count = None;
-    if let Some(ch) = ch
-        && ensure_ch_table(ch).await.is_ok()
-        && let Ok(rows) = ch
-            .query_json_each_row(
-                "SELECT count() AS cnt, \
-                 if(count() > 0, toString(min(created_at)), '') AS oldest, \
-                 if(count() > 0, toString(max(created_at)), '') AS newest \
-                 FROM conversation_archives FINAL",
-            )
-            .await
-        && let Some(row) = rows.first()
-    {
+    let ch_rows = match ch {
+        Some(ch) => match ch_stats(ch).await {
+            Ok(rows) => Some(rows),
+            Err(err) if err.is_ch_unavailable() => {
+                tracing::warn!(error = %err, "ClickHouse 不可用，对话存档统计只计 PostgreSQL");
+                None
+            }
+            Err(err) => return Err(err),
+        },
+        None => None,
+    };
+    if let Some(row) = ch_rows.as_ref().and_then(|rows| rows.first()) {
         let c = u64::try_from(ch_i64(row, "cnt").max(0)).unwrap_or(0);
         ch_count = Some(c);
         if c > 0 {
@@ -669,7 +752,8 @@ pub async fn stats(pg: &PgPool, ch: Option<&ChClient>) -> Result<ArchiveStats, S
     let clickhouse_enabled = ch.is_some();
     let total_count = pg_count.saturating_add(ch_count.unwrap_or(0));
     Ok(ArchiveStats {
-        backend: if clickhouse_enabled {
+        // ClickHouse 不可用时新存档写进 PG：报实际在用的
+        backend: if ch_count.is_some() {
             "clickhouse".into()
         } else {
             "postgres".into()

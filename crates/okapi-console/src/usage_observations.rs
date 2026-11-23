@@ -1,5 +1,6 @@
 //! Detail observation of complete settlement records; legacy counters stay unknown.
-use super::stats::{ch_i64, scaled_ratio};
+use super::stats::scaled_ratio;
+use crate::ch_access::ch_i64;
 use serde_json::{Value, json};
 
 /// (数值列, 上报标志列)：CH 事件表与 PG 账本（billing_records 的生成列）同名同义。

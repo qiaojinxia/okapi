@@ -1,11 +1,11 @@
 //! 趋势：按时间桶的度量序列与堆叠维度。
 use super::super::query::Query;
-use super::super::stats::ch_i64;
 use super::{
     CubeQuery, FLOW_OTHER, Names, Scope, accumulate_core_metrics, accumulate_original,
     aggregate_metrics, ch_str, describe_scope, pack_core_metrics, pack_metrics, resolve_names,
     row_key, sum_core_rows, sum_metric_rows,
 };
+use crate::ch_access::ch_i64;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

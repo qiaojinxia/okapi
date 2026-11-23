@@ -89,7 +89,7 @@ pub async fn list_users(
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::USER_READ).await?;
-    let slice = q.bounded();
+    let slice = q.slice();
     let (limit, offset) = (slice.capped_limit(), slice.offset);
     // 空查询用 NULL 表示"不过滤"，避免 '%%' 走不上索引的语义歧义；`%` `_` 已转义
     let needle = okapi_store::listing::like_pattern(q.keyword());
@@ -243,9 +243,9 @@ pub async fn user_usage(
             let day = r.get("day").and_then(Value::as_str).unwrap_or_default();
             let model = r.get("model").and_then(Value::as_str).unwrap_or_default();
             let (reqs, spend, toks) = (
-                super::super::stats::ch_i64(r, "reqs"),
-                super::super::stats::ch_i64(r, "spend"),
-                super::super::stats::ch_i64(r, "toks"),
+                crate::ch_access::ch_i64(r, "reqs"),
+                crate::ch_access::ch_i64(r, "spend"),
+                crate::ch_access::ch_i64(r, "toks"),
             );
             let d = per_day.entry(day.to_owned()).or_default();
             d.0 += reqs;

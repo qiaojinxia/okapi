@@ -1,7 +1,7 @@
 //! 资产清点与单个实体（用户 / 渠道 / key）的用量。
 use super::super::query::Query;
-use super::super::stats::ch_i64;
 use super::{ch_or_disabled, ch_str};
+use crate::ch_access::ch_i64;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

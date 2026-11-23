@@ -12,12 +12,10 @@
 //! 本文件放查询参数（`CubeQuery` → 过滤条件 `Scope`）、度量列与名称解析；四个端点与它们的
 //! 折叠逻辑在子模块（trend / breakdown / flow / inventory），度量累加与打包在 metrics。
 
-use axum::http::StatusCode;
+use crate::ch_access::{ch_or_disabled, ch_str};
 use chrono::Days;
-use okapi_api::codes;
 use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
-use okapi_store::ChClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -40,17 +38,6 @@ use self::metrics::{
 };
 use self::trend::primary_key_column;
 pub use self::trend::trend;
-
-fn ch_or_disabled(state: &AppState) -> Result<&ChClient, AppError> {
-    state
-        .ch
-        .as_ref()
-        .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, codes::STATS_DISABLED))
-}
-
-fn ch_str<'a>(row: &'a Value, key: &str) -> &'a str {
-    row.get(key).and_then(Value::as_str).unwrap_or_default()
-}
 
 /// 去空白；空串视为未提供。
 fn trimmed(field: Option<&str>) -> Option<&str> {

@@ -1,6 +1,7 @@
 //! 立方体度量的累加与打包：核心度量、原价、缓存度量（趋势 / 拆分 / 流向共用）。
-use super::super::stats::{ch_i64, rate_bp};
+use super::super::stats::rate_bp;
 use super::AGG;
+use crate::ch_access::ch_i64;
 use serde_json::{Value, json};
 
 pub(super) fn aggregate_metrics() -> String {

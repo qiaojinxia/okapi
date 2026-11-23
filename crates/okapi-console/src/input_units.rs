@@ -1,5 +1,6 @@
 //! Independent input units; unknown history never becomes a measured character zero.
-use super::stats::{ch_i64, scaled_ratio};
+use super::stats::scaled_ratio;
+use crate::ch_access::ch_i64;
 use okapi_kernel::error::AppError;
 use serde_json::{Map, Value, json};
 

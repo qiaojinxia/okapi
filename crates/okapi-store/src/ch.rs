@@ -7,6 +7,7 @@
 
 mod calendar;
 mod population;
+pub mod row;
 pub mod server_tools;
 
 use crate::error::StoreError;

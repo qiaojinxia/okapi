@@ -1,5 +1,6 @@
 //! Token throughput has its own paired samples; character latency is not a Token denominator.
-use super::stats::{ch_i64, scaled_ratio};
+use super::stats::scaled_ratio;
+use crate::ch_access::ch_i64;
 use serde_json::{Map, Value, json};
 
 pub(super) const FIELDS: [&str; 6] = [

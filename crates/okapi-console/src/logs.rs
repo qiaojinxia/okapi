@@ -10,35 +10,16 @@
 //! 故一律走 `query_with_params` 绑定参数，SQL 里只出现 clamp 过的整数。
 
 use super::query::Query;
+use crate::ch_access::{ch_i64, ch_or_disabled, ch_str};
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use okapi_api::{codes, permissions};
+use axum::http::HeaderMap;
+use okapi_api::permissions;
 use okapi_engine::state::AppState;
 use okapi_kernel::error::AppError;
-use okapi_store::ChClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-
-fn ch_or_disabled(state: &AppState) -> Result<&ChClient, AppError> {
-    state
-        .ch
-        .as_ref()
-        .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, codes::STATS_DISABLED))
-}
-
-fn ch_i64(row: &Value, key: &str) -> i64 {
-    row.get(key).map_or(0, |v| {
-        v.as_str()
-            .map_or_else(|| v.as_i64(), |s| s.parse::<i64>().ok())
-            .unwrap_or(0)
-    })
-}
-
-fn ch_str<'a>(row: &'a Value, key: &str) -> &'a str {
-    row.get(key).and_then(Value::as_str).unwrap_or_default()
-}
 
 // A reported zero is valid; a legacy zero cannot prove measurement took place.
 fn observed_ms(row: &Value, value: &str, reported: &str) -> Option<i64> {
@@ -723,6 +704,7 @@ fn rate_bp(part: i64, total: i64) -> i64 {
 #[cfg(test)]
 mod request_id_filter_tests {
     use super::*;
+    use axum::http::StatusCode;
 
     fn query(request_id: &str) -> LogQuery {
         LogQuery {
