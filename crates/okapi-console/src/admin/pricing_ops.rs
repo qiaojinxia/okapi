@@ -31,7 +31,7 @@ pub async fn list_pricing_epochs(
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_WRITE).await?;
-    let slice = q.bounded();
+    let slice = q.slice();
     let (limit, offset) = (slice.capped_limit(), slice.offset);
     let (rows, total) = tokio::try_join!(
         sqlx::query_as::<_, EpochRow>(

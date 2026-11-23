@@ -40,14 +40,10 @@ pub struct PageQuery {
 }
 
 impl PageQuery {
-    /// 所有 HTTP 列表都有界；内部配置加载可直接使用 store 的 `Slice::ALL`。
+    /// 所有 HTTP 列表都有界：不传 limit 也只回一页（`DEFAULT_LIMIT`），store 层再封顶 `MAX_PAGE`；
+    /// 内部配置加载可直接使用 store 的 `Slice::ALL`。
     pub fn slice(&self) -> Slice {
         Slice::new(Some(self.limit.unwrap_or(DEFAULT_LIMIT)), self.offset)
-    }
-
-    /// 大表列表的切片：不传 limit 也只回一页（`DEFAULT_LIMIT`），store 层再封顶 `MAX_PAGE`。
-    pub fn bounded(&self) -> Slice {
-        self.slice()
     }
 
     /// 去空白后的关键词；空串视为不过滤。

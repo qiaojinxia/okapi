@@ -92,7 +92,7 @@ pub async fn list_redemptions(
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
     let page =
-        okapi_store::listing::list_redemptions(&state.pg, q.batch, q.status, q.bounded()).await?;
+        okapi_store::listing::list_redemptions(&state.pg, q.batch, q.status, q.slice()).await?;
     Ok(Json(json!({ "data": page.data, "total": page.total })))
 }
 
@@ -103,7 +103,7 @@ pub async fn list_keys(
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::USER_READ).await?;
     let page =
-        okapi_store::listing::list_api_keys(&state.pg, q.user_id, q.keyword(), q.bounded()).await?;
+        okapi_store::listing::list_api_keys(&state.pg, q.user_id, q.keyword(), q.slice()).await?;
     Ok(Json(json!({ "data": page.data, "total": page.total })))
 }
 
