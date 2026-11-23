@@ -3965,6 +3965,42 @@ API key 渠道在界面上什么上限都设不了。早先那套「请求数 / 
 `channel_controls::a_quota_probe_rejected_with_401_refreshes_the_token_once`（401 → 刷新一次并读到额度、新凭证落库；六小时内再 401 不刷新；invalid_grant → status 6）。
 变异检查三处（查询去掉 `c.status = 1` / 401 不刷新 / 去掉六小时租约）各被对应用例咬住。`cargo +1.99.0 clippy --workspace --all-targets -D warnings` 干净。
 
+### 11.80 架构复查：口径收拢、双后端读法、构建（2026-11-23）
+
+11-21 那次之后进了 53 笔（engine 拆出、DataPlaneBridge、CH 宽视图、存档、审计、验真……），按网关 / providers / console+store /
+kernel+工程 / 前端五块重看一遍。改的只挑行为不变的收拢和几处坐实的 bug；大块的（结算后副作用挪到最后一帧之后、`UpstreamError::Build`
+分类、非 chat 操作进适配器注册表、处理器返回类型化 DTO、CH 入库攒批）只记不动。
+
+- **池策略一处读**：`RequestBilling::{attempt_cap, apply_pool_policy, deadline}`。HTTP 的失败转移本来按池策略的 `max_attempts` /
+  `first_output_timeout_secs` 走，Responses WebSocket 那条一直用请求策略的缺省值；8 分钟总时限的字面量四处合成 `REQUEST_DEADLINE`。
+  Responses 的 `input_tokens` 不再写死最多试 3 个。Anthropic `count_tokens` 不记模型 RPM 是有意的（Claude Code 几乎每轮都数一次），注释改成实话。
+- **`response.incomplete` 不再记成上游失败**：到了 `max_output_tokens` / 被内容过滤是请求造成的正常收尾（chat 的 `finish_reason: length`
+  一直记 200），此前诊断探针把它当失败，流泵据此把这次请求记成 502 `upstream_error`、拉低渠道成功率；WebSocket 一轮还会因此判失败。
+  判断收在 `stream_failure::incomplete_by_request`，诊断与 WebSocket 共用；认不出的原因照旧按失败记。
+- **`okapi all` 的控制台与 worker 共用一道结算闸**（`AppState::sharing_pg`）：两份流控各把闸开到后台池的一半，合起来占满整个池。
+  在途结算计数仍各算各的。
+- **CH 双后端读法只在 ClickHouse 不可用时回退**：`StoreError::is_ch_unavailable` 区分连不上 / 5xx / 流中断与查询写错（4xx，或 500 但异常码是
+  43、47、62、386 这类分析期错误——ClickHouse 不少分析错误走缺省的 500）。存档的列表 / 详情 / 统计按它回退，查询错误照实报，不再伪装成「暂无数据」
+  （11-22 同名别名就是被回退藏住的）。ClickHouse 写失败落进 PG 的存档以前只有详情和统计认，列表现在按时间与 CH 合并后再切页；
+  列表与统计报的 `backend` 是实际读的那个。console 里四份一样的 `ch_or_disabled` / `ch_i64` / `ch_str` 合成 `ch_access`，取值函数下沉到
+  `okapi_store::ch::row`；门户密钥用量读 CH 失败不再静默成 0，留 warn。
+- **零碎**：`PageQuery::bounded` 与 `slice` 一模一样，删掉；providers 删掉没有调用方的 `openai_to_anthropic::chat`、`openai_to_gemini::chat`、
+  `request_chat_to_responses`，五份 `NON_STREAM_TIMEOUT` 合成 `http::NON_STREAM_TIMEOUT`。
+- **构建**：`okapi-store` 的 `test-support` feature 去掉（模块只校验环境变量，常驻）——dev-dependency 打开的 feature 让 `cargo build` 与
+  `cargo test` 各编一份 store 及全部下游。镜像构建钉 `rust:1.99.0-slim-bookworm`（与 `rust-toolchain.toml` 一致，不再每次下载工具链），
+  cargo 注册表 / git / `target` 走 BuildKit 缓存挂载，二进制编完拷出；`.dockerignore` 加 `docs` / `IMPLEMENTATION.md` / `.claude` / `.verify`。
+- **前端**：用户抽屉的角色下拉、日志页的密钥筛选以前只拿到第一页（后端缺省 20 条），改走 `loadAll`（`roleOptions` / `fetchAllMyKeys`）；
+  金额输入统一 `usdToMicro`（只认十进制、最多 6 位小数），管理员入账、兑换码、充值不再把 `1e3` 读成 1000；设置卡片保存后写缓存的
+  「先停在途读取再写」收成 `commitSetting`（注册策略卡以前漏了停读取）；渠道时间线抽屉、用户用量页签按需加载，渠道 / 用户列表首包不再带 recharts。
+
+**验收**：store `conversation_archive` 四条（CH 列回 + 时间过滤、PG 落盘行合并分页、CH 不可用回退、查询错误报错不回退——最后一条用假 CH 回 500 + Code 43）；
+`error::tests`、`ch::row::tests`；gateway `native_stream_cut_at_the_output_cap_is_not_logged_as_an_upstream_failure`；`stream_failure` 与诊断的单测；
+engine `state` 用例加 `sharing_pg`（同一道闸、在途计数分开）；e2e `write-forms` 的入账多五种非法输入与一笔负数。
+全量隔离套件 177 个目标 2421 过、3 败，三条在 9e4d3bd 上一样红：`route_error_envelope` ×2（`api-surface.py` 读到 `kernel/metrics/snapshot.rs`
+的路由写法就抛异常）、`usage_provenance::partial_usage_retains_known_counts_and_sources_through_protocol_hops`（44 轮各建一个连接池，`PoolTimedOut`）。
+交互 e2e 814 条 809 过，4 条在 9e4d3bd 的构建上一样红（account-mask、date-popover、model-config:630、write-forms 池成员），1 条是沙盒里读不到
+`crates/` 的路径问题。`cargo clippy --workspace --all-targets -D warnings`（1.99）零告警。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
