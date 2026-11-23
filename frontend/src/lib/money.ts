@@ -3,6 +3,18 @@
 
 const QUOTA_PER_USD = 500_000
 
+/// 界面上按 USD 填的金额 → micro-USD 整数（后端一律 micro 整数）。只认十进制写法、最多 6 位小数，
+/// `signed` 时允许负号；`1e3`、`abc`、`1.0000001`、超出安全整数都返回 null，表单据此禁用提交。
+/// 不用 `Math.round(Number(text) * 1e6)`：`Number` 会把 `1e3` 读成 1000、把 `abc` 读成 NaN 再兜成 0，
+/// 管理员入账时多一个字母就是另一笔钱。
+export function usdToMicro(text: string, { signed = false } = {}): number | null {
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,6}))?$/.exec(text.trim())
+  if (!match || (match[1] === '-' && !signed)) return null
+  const micro = Number(match[2] + (match[3] ?? '').padEnd(6, '0'))
+  if (!Number.isSafeInteger(micro)) return null
+  return match[1] === '-' && micro !== 0 ? -micro : micro
+}
+
 export function formatMoney(micro: number, locale: string): string {
   const usd = micro / 1_000_000
   return new Intl.NumberFormat(locale, {

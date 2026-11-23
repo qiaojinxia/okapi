@@ -34,6 +34,15 @@ export function invalidateSetting(client: QueryClient, key: string): Promise<voi
  * 调用方已把刚保存的值 `setQueryData` 进单键缓存时用：只刷设置总表与派生视图，不再重读单键——
  * 省一次请求，也免得一个更早发出的读取把刚保存的快照盖回去。
  */
+/**
+ * 设置保存成功后把提交的值写进缓存：先停掉这个键上在途的读取，再写。顺序不能反——保存前发出的
+ * 旧读取晚到一步，会把刚存的值盖回去，表单随之显示旧值。派生视图仍由 `invalidateSettingViews` 刷新。
+ */
+export async function commitSetting(client: QueryClient, key: string, value: unknown): Promise<void> {
+  await client.cancelQueries({ queryKey: qk.setting(key), exact: true })
+  client.setQueryData(qk.setting(key), { value })
+}
+
 export function invalidateSettingViews(client: QueryClient, key: string): Promise<void> {
   return refresh(client, settingViews(key))
 }

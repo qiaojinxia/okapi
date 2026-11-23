@@ -13,7 +13,7 @@ import { ErrorState, LoadingState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { invalidateSettingViews } from '@/lib/invalidate'
+import { commitSetting, invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 const SECURITY = ['starttls', 'tls', 'none'] as const
@@ -93,8 +93,7 @@ export function SmtpCard() {
   const save = useMutation({
     mutationFn: (value: SavedSmtp) => apiFetch('/admin/settings', { method: 'POST', body: { key: 'smtp', value } }),
     onSuccess: async (_response, value) => {
-      await queryClient.cancelQueries({ queryKey: qk.setting('smtp'), exact: true })
-      queryClient.setQueryData(qk.setting('smtp'), { value })
+      await commitSetting(queryClient, 'smtp', value)
       setDraft(null)
       toast.success(t('admin:smtpSaved'))
       void invalidateSettingViews(queryClient, 'smtp')

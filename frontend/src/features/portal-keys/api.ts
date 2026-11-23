@@ -1,4 +1,5 @@
 import { apiFetch } from '@/lib/api'
+import { loadAll } from '@/lib/load-all'
 import type { Page } from '@/lib/query-keys'
 
 // `/api/me/keys` 的接口层：门户密钥页、试用台、日志页的密钥筛选、新手引导都读这一个接口，
@@ -52,6 +53,12 @@ export interface MyKeysPage {
 }
 
 /// 一页密钥；不传 page 取全部（日志页的密钥筛选要全量）。
-export function fetchMyKeys(page?: Page): Promise<MyKeysPage> {
-  return apiFetch<MyKeysPage>(page ? `/api/me/keys?limit=${page.limit}&offset=${page.offset}` : '/api/me/keys')
+export function fetchMyKeys(page: Page): Promise<MyKeysPage> {
+  return apiFetch<MyKeysPage>(`/api/me/keys?limit=${page.limit}&offset=${page.offset}`)
+}
+
+/// 全部密钥（日志页的密钥筛选）。不带参数的 `/api/me/keys` 只回第一页（后端缺省 20 条）。
+export async function fetchAllMyKeys(): Promise<MyKeysPage> {
+  const data = await loadAll<MyKey>('/api/me/keys', (key) => key.id)
+  return { data, total: data.length }
 }

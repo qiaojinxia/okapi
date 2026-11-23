@@ -17,7 +17,7 @@ import type { TopupResp } from '@/features/topup/payment'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatMoney } from '@/lib/money'
+import { formatMoney, usdToMicro } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
@@ -192,7 +192,8 @@ function RechargeCard() {
   const [gateway, setGateway] = useState('epay')
   const [error, setError] = useState<string | null>(null)
 
-  const amountMicro = Math.round((Number(usd) || 0) * 1_000_000)
+  // 写不成金额的（`1e3`、`abc`）记 0，按低于起充额处理
+  const amountMicro = usdToMicro(usd) ?? 0
   const belowMin = amountMicro < MIN_TOPUP_USD * 1_000_000
   const presetHit = PRESETS.find((v) => String(v) === usd)
 

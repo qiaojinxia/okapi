@@ -2,11 +2,10 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { ArrowUpRight, ChevronRight, Loader2, RefreshCw } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { lazy, Suspense, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip } from '@/components/ui/tooltip'
-import { ChannelTimelineDrawer } from '@/features/channels/ChannelTimelineDrawer'
 import type { ChannelBalance, ChannelKeyRow, ChannelProbe } from '@/features/channels/types'
 import type { ChannelHourlyBucket, ChannelRow as ChannelStatRow } from '@/features/stats/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
@@ -15,6 +14,9 @@ import { apiFetch } from '@/lib/api'
 import { formatBp, formatCount, formatMoneyAggregate, formatUpstreamBalance } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
+
+// 时间线抽屉带着 recharts：点开才加载，渠道列表的首包不背它
+const ChannelTimelineDrawer = lazy(() => import('@/features/channels/ChannelTimelineDrawer').then((m) => ({ default: m.ChannelTimelineDrawer })))
 
 /// channel_keys.status：1 active / 2 cooling / 3 rate_limited / 4 quota_exhausted / 5 banned / 6 invalid
 const KEY_STATE: Record<number, string> = {
@@ -598,7 +600,7 @@ export function Health24h({
             </span>
           )}
         </button>
-        {open && <ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} />}
+        {open && <Suspense fallback={null}><ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} /></Suspense>}
       </>
     )
   }
@@ -655,7 +657,7 @@ export function Health24h({
           </span>
         )}
       </button>
-      {open && <ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} />}
+      {open && <Suspense fallback={null}><ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} /></Suspense>}
     </>
   )
 }

@@ -11,7 +11,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { invalidateSettingViews } from '@/lib/invalidate'
+import { commitSetting, invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 import { scaledInteger } from './setting-catalog'
 
@@ -102,9 +102,9 @@ export function RegistrationCard() {
           value,
         },
       }),
-    onSuccess: (_response, value) => {
+    onSuccess: async (_response, value) => {
       // 先回填已提交的数据再清草稿，避免显示旧值或让后续编辑被异步回读覆盖。
-      queryClient.setQueryData(qk.setting('registration_policy'), { value })
+      await commitSetting(queryClient, 'registration_policy', value)
       toast.success(t('admin:regSaved'))
       setDraft(null)
       void invalidateSettingViews(queryClient, 'registration_policy')

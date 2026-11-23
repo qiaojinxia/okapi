@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ScrollText } from 'lucide-react'
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { fetchRoles } from '@/features/roles/api'
+import { roleOptions } from '@/features/roles/api'
 import type { Overview } from '@/features/users/types'
 import { Badge } from '@/components/ui/badge'
 import { BalanceSection } from '@/features/users/BalanceSection'
@@ -14,7 +14,6 @@ import { GroupsSection } from '@/features/users/GroupsSection'
 import { MultiplierSection } from '@/features/users/MultiplierSection'
 import { RoleSection } from '@/features/users/RoleSection'
 import { SubscriptionSection } from '@/features/users/SubscriptionSection'
-import { UsageSection } from '@/features/users/UsageSection'
 import { Tabs } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
@@ -24,6 +23,9 @@ import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { roleLabel } from '@/lib/roles'
 import { useConfirm } from '@/components/ui/confirm'
+
+// 用量页签带着 recharts：抽屉打开才加载，用户列表的首包不背它
+const UsageSection = lazy(() => import('@/features/users/UsageSection').then((m) => ({ default: m.UsageSection })))
 
 const USER_TABS = ['usage', 'actions', 'role', 'balance', 'subscription', 'groups'] as const
 type UserTab = (typeof USER_TABS)[number]
@@ -46,10 +48,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
     queryKey: qk.userOverview(userId),
     queryFn: () => apiFetch<Overview>(`/admin/users/${userId}/overview`),
   })
-  const roles = useQuery({
-    queryKey: qk.adminRoles,
-    queryFn: () => fetchRoles(),
-  })
+  const roles = useQuery(roleOptions())
 
   // 调完余额切回"用量"签，最近变动里就该看到刚那一笔
   const invalidate = () => void invalidateUser(queryClient, userId)
@@ -145,7 +144,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
         onChange={(id) => setTab(id as UserTab)}
       />
 
-      {tab === 'usage' && <UsageSection userId={userId} />}
+      {tab === 'usage' && <Suspense fallback={null}><UsageSection userId={userId} /></Suspense>}
       {tab === 'actions' && (
         <FieldGroup title={t('admin:userActions')} hint={t('admin:banHint')}>
           <div className="flex flex-wrap gap-2">

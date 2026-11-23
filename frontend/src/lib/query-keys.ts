@@ -58,6 +58,8 @@ export const qk = {
   adminUsersPage: (q: string, page: Page) => paged([...adminUsers, q] as const, page),
   adminRoles,
   adminRolesPage: (page: Page) => paged(adminRoles, page),
+  /// 用户抽屉的角色下拉（全量）；挂在 `adminRoles` 前缀下，角色增删改后一起失效。
+  adminRoleOptions: [...adminRoles, 'options'] as const,
   adminPermissions: ['admin', 'permissions'] as const,
   adminPools,
   adminPoolsPage: (page: Page) => paged(adminPools, page),

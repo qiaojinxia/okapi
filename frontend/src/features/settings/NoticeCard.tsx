@@ -18,7 +18,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { invalidateSettingViews } from '@/lib/invalidate'
+import { commitSetting, invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 const KEY = 'site_notices'
@@ -83,8 +83,7 @@ export function NoticeCard() {
     mutationFn: ({ next }: { next: StoredNotice[]; done: string }) =>
       apiFetch('/admin/settings', { method: 'POST', body: { key: KEY, value: next } }),
     onSuccess: async (_response, { next, done }) => {
-      await queryClient.cancelQueries({ queryKey: qk.setting(KEY), exact: true })
-      queryClient.setQueryData(qk.setting(KEY), { value: next })
+      await commitSetting(queryClient, KEY, next)
       setEditing(null)
       toast.success(done)
       void invalidateSettingViews(queryClient, KEY)

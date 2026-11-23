@@ -359,9 +359,19 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   await drawer.locator('#amt').fill('0.29')
   await credit.click()
   await expect(page.getByRole('status').filter({ hasText: '入账后余额' })).toHaveCount(2)
+  // 写不成金额的不放行：`Number('1e3')` 是 1000、`Number('abc')` 兜成 0，以前都会照发
+  for (const junk of ['1e3', 'abc', '1.0000001', '0', '--1']) {
+    await drawer.locator('#amt').fill(junk)
+    await expect(credit, junk).toBeDisabled()
+  }
+  await drawer.locator('#amt').fill('-2.5')
+  await credit.click()
+  // 成功后清空输入框
+  await expect(drawer.locator('#amt')).toHaveValue('')
   expect(posts.filter((p) => p.path.endsWith('/credit')).map((p) => p.body)).toEqual([
     { amount_micro: 12_340_000, reason: 'refund ticket 42' },
     { amount_micro: 290_000, reason: 'refund ticket 42' },
+    { amount_micro: -2_500_000, reason: 'refund ticket 42' },
   ])
 
   creditFail = true

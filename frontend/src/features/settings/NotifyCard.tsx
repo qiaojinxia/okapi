@@ -16,7 +16,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { TagInput } from '@/components/ui/tag-input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { invalidateSettingViews } from '@/lib/invalidate'
+import { commitSetting, invalidateSettingViews } from '@/lib/invalidate'
 import { qk } from '@/lib/query-keys'
 
 export interface NotifyChannel {
@@ -100,8 +100,7 @@ export function NotifyCard() {
     mutationFn: (value: NotifyChannel[]) => apiFetch('/admin/settings', { method: 'POST', body: { key: 'notify_channels', value } }),
     onSuccess: async (_response, value) => {
       // 保存结果先进入缓存，再清理草稿；旧的后台读取不能把已保存的新值改回去。
-      await queryClient.cancelQueries({ queryKey: qk.setting('notify_channels'), exact: true })
-      queryClient.setQueryData(qk.setting('notify_channels'), { value })
+      await commitSetting(queryClient, 'notify_channels', value)
       cancel()
       toast.success(t('admin:saved'))
       void invalidateSettingViews(queryClient, 'notify_channels')

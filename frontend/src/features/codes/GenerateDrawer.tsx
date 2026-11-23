@@ -12,7 +12,7 @@ import { apiFetch } from '@/lib/api'
 import { loadAll } from '@/lib/load-all'
 import { describeError } from '@/lib/i18n'
 import { parseInt32, parseNonNegativeInt } from '@/lib/int32'
-import { formatMoney } from '@/lib/money'
+import { formatMoney, usdToMicro } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
 /// 生成批次抽屉。生成后码明文只此一次可见，故结果留在抽屉里直到用户主动关闭。
@@ -34,7 +34,8 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
     queryFn: async () => ({ data: await loadAll<{ plan_code: string }>('/admin/plans', (p) => p.plan_code) }),
   })
 
-  const amountMicro = Math.round((Number(form.amount_usd) || 0) * 1_000_000)
+  // 写不成金额的（`1e3`、`abc`）记 0，生成按钮随之禁用
+  const amountMicro = usdToMicro(form.amount_usd) ?? 0
   // 写错的限制拦下提交（null）：以前 NaN 变 undefined、字段从请求体消失，后端按"不限"生成——
   // 以为绑定到人的码实际谁都能核销
   const count = parseNonNegativeInt(form.count, 4_294_967_295)

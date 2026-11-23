@@ -7,7 +7,7 @@ import { Input, Label } from '@/components/ui/input'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatMoney } from '@/lib/money'
+import { formatMoney, usdToMicro } from '@/lib/money'
 
 /// 余额分区：充值/扣减 + 余额有效期。
 ///
@@ -35,12 +35,13 @@ export function BalanceSection({
   // 金额或备注改了就是另一笔操作，换新键；成功后也换
   const [operationKey, setOperationKey] = useState(newOperationKey)
 
+  // 界面按 USD 填，提交前换成 micro（后端一律 micro-USD 整数）；写不成金额的（`1e3`、`abc`）不放行
+  const amountMicro = usdToMicro(amount, { signed: true })
   const credit = useMutation({
     mutationFn: () =>
       apiFetch<{ balance_after_micro: number }>(`/admin/users/${userId}/credit`, {
         method: 'POST',
-        // 界面按 USD 填，提交前换成 micro（后端一律 micro-USD 整数）
-        body: { amount_micro: Math.round((Number(amount) || 0) * 1_000_000), reason },
+        body: { amount_micro: amountMicro, reason },
         headers: { 'Idempotency-Key': operationKey },
       }),
     onSuccess: (r) => {
@@ -84,7 +85,7 @@ export function BalanceSection({
           <Label htmlFor="reason">{t('admin:creditReason')}</Label>
           <Input id="reason" value={reason} onChange={(e) => { setReason(e.target.value); setOperationKey(newOperationKey()) }} />
         </div>
-        <Button size="sm" disabled={credit.isPending || amount.trim() === ''} onClick={() => credit.mutate()}>
+        <Button size="sm" disabled={credit.isPending || amountMicro === null || amountMicro === 0} onClick={() => credit.mutate()}>
           {t('admin:credit')}
         </Button>
       </div>
