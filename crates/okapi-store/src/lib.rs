@@ -35,7 +35,9 @@ pub mod pricing;
 pub mod provision;
 pub mod redis;
 pub mod subscriptions;
-#[cfg(feature = "test-support")]
+/// 集成测试的资源闸（只校验环境变量，不连任何服务）。不放在 feature 后面：dev-dependency 打开的 feature
+/// 会让 `cargo build` 与 `cargo test` 各编一份 store 及其全部下游。
+#[doc(hidden)]
 pub mod test_support;
 pub mod timezone;
 pub mod vendor;

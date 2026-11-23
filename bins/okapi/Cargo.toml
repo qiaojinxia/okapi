@@ -36,7 +36,6 @@ chrono.workspace = true
 embed-web = ["okapi-console/embed-web"]
 
 [dev-dependencies]
-okapi-store = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["process"] }
 reqwest = { workspace = true }
 bcrypt = { workspace = true }

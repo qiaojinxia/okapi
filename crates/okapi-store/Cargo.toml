@@ -7,9 +7,6 @@ license.workspace = true
 publish = false
 description = "Okapi 存储薄封装：sqlx / fred（M1）；clickhouse / async-nats（M2）"
 
-[features]
-test-support = []
-
 [dependencies]
 okapi-domain = { workspace = true }
 
@@ -37,6 +34,3 @@ tracing = { workspace = true }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-okapi-store = { path = ".", features = ["test-support"] }

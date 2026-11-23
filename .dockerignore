@@ -12,3 +12,8 @@ frontend/dist
 **/*.log
 **/*.pem
 **/*.key
+# 编译用不到、却会让 `COPY . .` 这一层失效的东西
+.claude
+.verify
+docs
+IMPLEMENTATION.md

@@ -31,7 +31,6 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 okapi-gateway = { workspace = true }
-okapi-store = { workspace = true, features = ["test-support"] }
 base64 = { workspace = true }
 okapi-pricing = { workspace = true }
 axum = { workspace = true }

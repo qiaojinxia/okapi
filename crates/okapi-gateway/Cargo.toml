@@ -43,7 +43,6 @@ tokio-tungstenite = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
-okapi-store = { workspace = true, features = ["test-support"] }
 async_zip = { workspace = true }
 aws-lc-rs = { workspace = true }
 

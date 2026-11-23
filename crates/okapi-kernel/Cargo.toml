@@ -35,7 +35,6 @@ lettre = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
-okapi-store = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -2496,7 +2496,6 @@ dependencies = [
  "hex",
  "hmac",
  "okapi-domain",
- "okapi-store",
  "rand 0.10.2",
  "reqwest",
  "serde",
