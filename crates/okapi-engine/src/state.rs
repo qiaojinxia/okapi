@@ -497,6 +497,16 @@ impl AppState {
         }
     }
 
+    /// 同一进程里共用 `self` 这份 PG 池的另一个角色（`okapi all` 的控制台与 worker）：连同结算 / 准入流控
+    /// 一起共用——两份流控各把闸开到池的一半，合起来就占满整个池，鉴权回源、维护任务取不到连接；
+    /// 在途结算计数各自一份，各角色下线时只等自己的。
+    #[must_use]
+    pub fn sharing_pg(&self) -> Self {
+        let mut sibling = self.clone();
+        sibling.core.settlements = okapi_kernel::shutdown::Pending::default();
+        sibling
+    }
+
     /// Attach the in-process data-plane bridge used by control-plane relay endpoints.
     #[must_use]
     pub fn with_data_plane(mut self, bridge: Arc<dyn crate::bridge::DataPlaneBridge>) -> Self {
@@ -710,6 +720,9 @@ mod tests {
         ));
         assert_eq!(gw.flow.settle_gate.available_permits(), 8);
         assert_eq!(bg.flow.settle_gate.available_permits(), 2);
+        // 同一后台池上的第二个角色：同一道闸（合起来仍是池的一半），在途结算各算各的
+        let sibling = bg.sharing_pg();
+        assert!(Arc::ptr_eq(&bg.flow.settle_gate, &sibling.flow.settle_gate));
 
         gw.routing
             .model_cache
@@ -733,6 +746,9 @@ mod tests {
         });
         started_rx.await.expect("settlement task started");
         assert_eq!(gw.core.settlements.in_flight(), 1);
+        assert_eq!(bg.core.settlements.in_flight(), 0);
+        sibling.core.settlements.spawn(std::future::pending::<()>());
+        assert_eq!(sibling.core.settlements.in_flight(), 1);
         assert_eq!(bg.core.settlements.in_flight(), 0);
         let _ = release_tx.send(());
         gw.core

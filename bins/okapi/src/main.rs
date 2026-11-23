@@ -236,8 +236,8 @@ async fn run_all(cfg: Config) -> anyhow::Result<()> {
     gateway::spawn_state_sync(&gateway_state);
     gateway_state.spawn_metrics_publisher("all");
 
-    let console_state = gateway_state.with_isolated_pg(background_pg.clone(), bg_max);
-    let worker_state = gateway_state.with_isolated_pg(background_pg, bg_max);
+    let console_state = gateway_state.with_isolated_pg(background_pg, bg_max);
+    let worker_state = console_state.sharing_pg();
 
     let (stop_tx, _) = tokio::sync::watch::channel(false);
     let _stop_guard = StopOnDrop(stop_tx.clone());
