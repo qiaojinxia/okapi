@@ -156,7 +156,7 @@ pub(super) async fn spawn_stream_pump(
         }
         let mut saw_done = false;
         while !client_gone && !saw_done {
-            let next = tokio::time::timeout_at(policy.deadline(tokio::time::Instant::from_std(bill.started + Duration::from_mins(8))), handle.events.next()).await
+            let next = tokio::time::timeout_at(policy.deadline(bill.deadline()), handle.events.next()).await
                 .unwrap_or(Some(Err(UpstreamError::Timeout)));
             match next {
                 Some(Ok(event)) => {

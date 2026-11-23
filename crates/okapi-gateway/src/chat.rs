@@ -100,6 +100,8 @@ const STARTED_IDLE_WINDOW: Duration = Duration::from_mins(5);
 fn max_attempts() -> usize {
     super::request_policy::max_attempts()
 }
+/// 单请求的总时限（从进网关算起）：选渠道、换渠道、刷新凭据、读流都在这一个截止时间之内。
+const REQUEST_DEADLINE: Duration = Duration::from_mins(8);
 /// 预扣补全上限的兜底值与硬顶。
 const DEFAULT_COMPLETION_CAP: u32 = 2048;
 const MAX_COMPLETION_CAP: u32 = 32_768;
@@ -216,6 +218,27 @@ struct RequestBilling {
     settlement: SettlementHandoff,
     /// 对话存档上下文（仅当 `settings.conversation_archive.enabled == true` 且非通道测试探针时非空）。
     archive: Option<Arc<okapi_engine::conversation_archive::ArchiveCapture>>,
+}
+
+impl RequestBilling {
+    /// 这次请求的截止时间（[`REQUEST_DEADLINE`]）。
+    fn deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::from_std(self.started + REQUEST_DEADLINE)
+    }
+
+    /// 最多试几个候选：池策略配了 `max_attempts` 就用它，否则用请求策略。HTTP 与 WebSocket 同一口径。
+    fn attempt_cap(&self) -> usize {
+        self.effective_policy
+            .max_attempts
+            .map_or_else(max_attempts, usize::from)
+    }
+
+    /// 池策略对单个候选的覆盖：首字超时（`first_output_timeout_secs`）。
+    fn apply_pool_policy(&self, cand: &mut ChannelCandidate) {
+        if let Some(timeout_secs) = self.effective_policy.first_output_timeout_secs {
+            cand.first_output_timeout_secs = timeout_secs;
+        }
+    }
 }
 
 /// 预扣的收口责任。handler 在等上游时可能被丢弃（客户端断开），此时必须有人退款；

@@ -193,7 +193,7 @@ async fn count_authorized(
     for candidate in candidates.iter().filter(|c| {
         c.responses_native && c.capabilities.get("input_tokens") != Some(&Value::Bool(false))
     }) {
-        if attempts == 3 {
+        if attempts >= super::request_policy::max_attempts() {
             break;
         }
         if let Some(error) = unavailable(state, candidate).await {

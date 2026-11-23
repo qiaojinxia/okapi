@@ -2,7 +2,7 @@ use super::super::{
     AppError, AttemptError, Bytes, CandInfo, ChannelCandidate, ForwardFailure, Ingress, ProbeInfo,
     RequestBilling, ResponseBinding, ResponseWriter, StatusCode, StreamHandle, UpstreamError,
     build_upstream_body, cand_info, classify_fatal, codes, eligible_candidates,
-    first_output_window, max_attempts, retriable, shape_upstream_body,
+    first_output_window, retriable, shape_upstream_body,
 };
 use super::{
     Session, Work, bridge, history,
@@ -158,10 +158,12 @@ pub(super) async fn route(
     }
     let mut last = unavailable("responses_websocket");
     let mut attempted: i16 = 0;
+    let attempt_cap = bill.attempt_cap();
     for mut cand in candidates {
-        if usize::try_from(attempted).unwrap_or(max_attempts()) >= max_attempts() {
+        if usize::try_from(attempted).unwrap_or(attempt_cap) >= attempt_cap {
             break;
         }
+        bill.apply_pool_policy(&mut cand);
         if session.output.is_closed() {
             return Err(unavailable("client_disconnected"));
         }

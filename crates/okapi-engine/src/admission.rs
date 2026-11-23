@@ -67,8 +67,9 @@ pub fn limit_caps(key: &AuthedKey) -> LimitCaps {
 }
 
 /// 用户×模型 RPM（`settings.model_rpm_limits`，全局按用户；§11.1）：没配或配了 0 就不限。
-/// 对话、count_tokens、各媒体端点与图片批量记在同一个计数上（同一用户、同一模型、每分钟），
-/// 放在预扣之前查，被拒的请求什么都不预扣。
+/// 对话、Responses 的 `input_tokens`、各媒体端点与图片批量记在同一个计数上（同一用户、同一模型、
+/// 每分钟），放在预扣之前查，被拒的请求什么都不预扣。Anthropic 的 `count_tokens` 不记：Claude Code
+/// 几乎每轮都先数一次，记进去等于把用户的模型 RPM 减半；它另有分组窗限速与 `CountPermit`。
 pub async fn check_model_rpm(
     state: &AppState,
     key: &AuthedKey,

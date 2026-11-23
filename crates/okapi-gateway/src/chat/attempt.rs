@@ -3,8 +3,8 @@ use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
 use super::{
     AttemptError, FailureReply, ForwardFailure, ProbeInfo, RequestBilling, attempt_json,
-    attempt_stream, build_upstream_body, eligible_candidates, failure_kind_of,
-    lost_tools, max_attempts, recovery_secs, retriable, upstream_endpoint,
+    attempt_stream, build_upstream_body, eligible_candidates, failure_kind_of, lost_tools,
+    recovery_secs, retriable, upstream_endpoint,
 };
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -14,7 +14,6 @@ use okapi_kernel::error::AppError;
 use okapi_providers::UpstreamError;
 use okapi_providers::convert::tool_loss::ToolLossPolicy;
 use okapi_store::channels::KeyFailure;
-use std::time::Duration;
 
 // failover 主循环：候选过滤/粘性/信号量/状态机联动的完整语义在同一视野内更可读
 #[allow(clippy::too_many_lines)]
@@ -36,18 +35,13 @@ pub(super) async fn try_model(
     // 次数用尽或请求不许改投：候选里可能还有好的，与「整个池都试过了」是两回事（见 `exhausted_reply`）
     let mut stopped_early = false;
 
-    let effective_max_attempts = bill
-        .effective_policy
-        .max_attempts
-        .map_or_else(max_attempts, usize::from);
+    let attempt_cap = bill.attempt_cap();
     for mut cand in candidates {
-        if attempted >= effective_max_attempts {
+        if attempted >= attempt_cap {
             stopped_early = true;
             break;
         }
-        if let Some(timeout_secs) = bill.effective_policy.first_output_timeout_secs {
-            cand.first_output_timeout_secs = timeout_secs;
-        }
+        bill.apply_pool_policy(&mut cand);
         // key 级 RPM / 当日消费闸：挡下的候选不算一次尝试
         if let Err(closed) = super::super::key_gate::check(&bill.state, &cand).await {
             tracing::debug!(
@@ -110,7 +104,7 @@ pub(super) async fn try_model(
             // then distinguish a rejected token from one another request just rotated.
             if oauth {
                 match tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
+                    bill.deadline(),
                     super::super::oauth_cred::fresh_credential(&bill.state, &cand),
                 )
                 .await
@@ -157,19 +151,16 @@ pub(super) async fn try_model(
                     .await
                 }
             };
-            let mut result = tokio::time::timeout_at(
-                tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
-                attempt,
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(AttemptError::Retriable {
-                    code: codes::UPSTREAM_TIMEOUT,
-                    upstream_status: None,
-                    failure_kind: KeyFailure::Request,
-                    model_fault: None,
-                })
-            });
+            let mut result = tokio::time::timeout_at(bill.deadline(), attempt)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(AttemptError::Retriable {
+                        code: codes::UPSTREAM_TIMEOUT,
+                        upstream_status: None,
+                        failure_kind: KeyFailure::Request,
+                        model_fault: None,
+                    })
+                });
             if oauth
                 && matches!(
                     &result,
@@ -182,7 +173,7 @@ pub(super) async fn try_model(
                 if !refreshed_401 {
                     refreshed_401 = true;
                     let refreshed = tokio::time::timeout_at(
-                        tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
+                        bill.deadline(),
                         super::super::oauth_cred::refresh_rejected_credential(&bill.state, &cand),
                     )
                     .await
