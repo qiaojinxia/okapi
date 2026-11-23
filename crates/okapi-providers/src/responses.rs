@@ -20,8 +20,7 @@ use okapi_api::UsageProbe;
 use serde_json::Value;
 use std::time::Duration;
 
-/// 非流式请求总超时（与 chat 一致；流式由 gateway 首字窗口控制）。
-const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
+use crate::http::NON_STREAM_TIMEOUT;
 
 /// 只信任经过验证的计数；中转明确标注的估算标记也必须保留。
 pub struct InputTokenCount {

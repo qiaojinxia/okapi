@@ -15,9 +15,8 @@ use base64::Engine as _;
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
-use std::time::Duration;
 
-const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
+use crate::http::NON_STREAM_TIMEOUT;
 /// InvokeModel 的 Anthropic 请求体版本字段（Bedrock 固定值）。
 pub const ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 const SIGV4_SERVICE: &str = "bedrock";

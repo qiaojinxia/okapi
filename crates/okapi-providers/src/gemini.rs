@@ -9,9 +9,8 @@ use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
-use std::time::Duration;
 
-const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
+use crate::http::NON_STREAM_TIMEOUT;
 
 /// 模型名作为 URL 路径段：unreserved 字符和 `@`（Vertex 的 Claude 版本号 `…@20250929`）原样，
 /// 其余字节逐个 `%XX`。直接拼进 URL 的话，`?` `#` `/` `%` 空格之类会改写路径或查询串，

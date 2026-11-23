@@ -9,10 +9,8 @@ use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use okapi_api::{ChunkProbe, UsageProbe};
 use std::pin::Pin;
-use std::time::Duration;
 
-/// 非流式请求总超时（流式不设总超时，首字窗口由 gateway 控制）。
-const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
+use crate::http::NON_STREAM_TIMEOUT;
 
 /// Bounded buffered image output, shared by JSON/multipart and OpenAI/Azure.
 pub(crate) const MAX_IMAGE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;

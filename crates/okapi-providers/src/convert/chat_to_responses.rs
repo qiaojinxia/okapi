@@ -14,19 +14,6 @@ use serde_json::{Map, Value, json};
 
 // ---- 请求转换 ----
 
-/// Chat Completions 请求字节 → Responses 请求字节。
-pub fn request_chat_to_responses(
-    body: &Bytes,
-    upstream_model: &str,
-) -> Result<Bytes, UpstreamError> {
-    let src: Value =
-        serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
-    let out = request_chat_to_responses_value(&src, upstream_model)?;
-    serde_json::to_vec(&out)
-        .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
-}
-
 /// 在已解析 `Value` 上完成 Chat Completions → Responses 请求转换（供单次解析管道直接复用）。
 pub fn request_chat_to_responses_value(
     src: &Value,

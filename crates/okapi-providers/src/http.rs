@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 非流式请求的总超时（各适配器共用）。流式不设总超时：首字窗口与空闲窗口由网关控制。
+pub(crate) const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
 /// 代理 client 闲置这么久就淘汰（连接池随之关闭）。
 const PROXIED_IDLE: Duration = Duration::from_mins(15);
 

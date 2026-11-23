@@ -6,7 +6,7 @@
 //! `prompt_tokens` 含缓存 —— 故 prompt = input + cache_read + cache_creation，
 //! `cached_tokens` = cache_read，`cache_write_tokens` = cache_creation（支持 5m / 1h TTL 拆分计价）。
 
-use crate::anthropic::{AnthropicEvent, AnthropicUpstream, MessagesResponse};
+use crate::anthropic::{AnthropicEvent, MessagesResponse};
 use crate::error::UpstreamError;
 use crate::openai::{ChatResponse, StreamHandle};
 use crate::types::ChatEvent;
@@ -806,26 +806,6 @@ impl StreamState {
             usage,
         }
     }
-}
-
-// ---- 组合入口（gateway 用） ----
-
-/// OpenAI 协议入口 + Anthropic 上游 的完整一跳：
-/// `body_anthropic` 已由 `request_openai_to_anthropic` 转换（forward 循环按候选构造）。
-/// 返回 OpenAI 形状的 `ChatResponse`，gateway 泵送与结算零改动。
-pub async fn chat(
-    upstream: &AnthropicUpstream,
-    api_base: &str,
-    credential: &str,
-    body_anthropic: Bytes,
-    upstream_model: &str,
-    stream: bool,
-    outbound: &crate::http::Outbound,
-) -> Result<ChatResponse, UpstreamError> {
-    let resp = upstream
-        .messages(api_base, credential, body_anthropic, stream, outbound)
-        .await?;
-    wrap_messages(resp, upstream_model)
 }
 
 /// 已取到的 Anthropic 响应 → OpenAI 形状（纯转换半跳）。Bedrock / Vertex 这类只换传输的

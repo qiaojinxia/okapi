@@ -7,7 +7,7 @@
 //! reasoning = thoughtsTokenCount。
 
 use crate::error::UpstreamError;
-use crate::gemini::{GeminiResponse, GeminiUpstream};
+use crate::gemini::GeminiResponse;
 use crate::openai::{ChatResponse, StreamHandle};
 use crate::types::ChatEvent;
 use bytes::Bytes;
@@ -569,31 +569,6 @@ impl GeminiStreamState {
             usage,
         }
     }
-}
-
-// ---- 组合入口（gateway 用） ----
-
-/// OpenAI 协议入口 + Gemini 上游 的完整一跳（返回 OpenAI 形状）。
-pub async fn chat(
-    upstream: &GeminiUpstream,
-    api_base: &str,
-    credential: &str,
-    body_gemini: Bytes,
-    upstream_model: &str,
-    stream: bool,
-    outbound: &crate::http::Outbound,
-) -> Result<ChatResponse, UpstreamError> {
-    let resp = upstream
-        .generate(
-            api_base,
-            credential,
-            upstream_model,
-            body_gemini,
-            stream,
-            outbound,
-        )
-        .await?;
-    wrap_generate(resp, upstream_model)
 }
 
 /// 已取到的 Gemini 响应 → OpenAI 形状（纯转换半跳；Vertex 取到响应后走这里，§11.35）。

@@ -11,9 +11,8 @@ use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
-use std::time::Duration;
 
-const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
+use crate::http::NON_STREAM_TIMEOUT;
 /// `anthropic-version` 头的值：真实请求与管理面的测活 / 拉模型共用，探测才和流量走同一种协议。
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
