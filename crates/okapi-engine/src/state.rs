@@ -11,6 +11,61 @@ use std::sync::Arc;
 /// 路由/配置缓存失效广播主题（与 `pricing.epoch` 同一条 NATS 通道）。
 pub const ROUTING_INVALIDATE_SUBJECT: &str = "routing.invalidate";
 
+/// `routing.invalidate` 广播的作用域：按变更域定向失效，避免改一条无关设置（如公告、存档策略）
+/// 或单次毛利熔断把全集群所有网关的 `cand_cache` / `model_cache` / `settings_cache` 一锅端。
+///
+/// 线协议兼容旧副本：旧版本发 `"1"` 或空串一律解析为 [`Self::All`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheInvalidation {
+    /// 全量失效（兼容旧协议 `"1"` / `""`、运维手动清缓存、NATS 断流重连补刷）。
+    All,
+    /// 渠道 / 渠道 key / 出口代理 / OAuth 凭据 / 冷却或余额状态变更。
+    Channels,
+    /// 模型 / 别名变更。
+    Models,
+    /// 渠道池 / 分组绑定 / 池策略变更。
+    Pools,
+    /// 负毛利熔断状态变更。
+    Margin,
+    /// 单条 `settings` 键变更（定向失效该键，并在命中 `request_policy` 时同步清策略缓存）。
+    Setting(String),
+}
+
+impl CacheInvalidation {
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        match self {
+            Self::All => "all".to_owned(),
+            Self::Channels => "channels".to_owned(),
+            Self::Models => "models".to_owned(),
+            Self::Pools => "pools".to_owned(),
+            Self::Margin => "margin".to_owned(),
+            Self::Setting(key) => format!("setting:{key}"),
+        }
+    }
+
+    #[must_use]
+    pub fn into_wire(self) -> String {
+        self.to_wire()
+    }
+
+    #[must_use]
+    pub fn from_wire(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        match trimmed {
+            "" | "1" | "all" => Self::All,
+            "channels" => Self::Channels,
+            "models" => Self::Models,
+            "pools" => Self::Pools,
+            "margin" => Self::Margin,
+            other => other
+                .strip_prefix("setting:")
+                .filter(|k| !k.is_empty())
+                .map_or(Self::All, |k| Self::Setting(k.to_owned())),
+        }
+    }
+}
+
 /// 候选筛空时的错误码：被负毛利熔断筛空回 `margin_blocked`——回 `no_available_channel`
 /// 会让人以为渠道全挂了（§11.34）。
 #[must_use]
@@ -343,64 +398,66 @@ impl AppState {
         }
     }
 
-    /// 渠道相对成本系数（60s 进程缓存；缺省 1000）。None = 渠道不存在或 PG 读失败
-    /// （不猜成本：记录留 None，毛利口径里按"成本未知"处理）。
+    /// 渠道相对成本系数（60s 进程缓存，同键 singleflight 防击穿；缺省 1000）。
+    /// None = 渠道不存在或 PG 读失败（不缓存，不猜成本：记录留 None，毛利口径里按"成本未知"处理）。
     pub async fn channel_cost_milli(&self, channel_id: i64) -> Option<i64> {
         if let Some(hit) = self.routing.channel_cost_cache.get(&channel_id).await {
             return Some(hit);
         }
-        let value = okapi_store::admin::channel_cost_milli(&self.pg, channel_id)
-            .await
-            .ok()
-            .flatten()?;
-        self.routing
-            .channel_cost_cache
-            .insert(channel_id, value)
-            .await;
-        Some(value)
+        Box::pin(
+            self.routing
+                .channel_cost_cache
+                .optionally_get_with(channel_id, async {
+                    okapi_store::admin::channel_cost_milli(&self.pg, channel_id)
+                        .await
+                        .ok()
+                        .flatten()
+                }),
+        )
+        .await
     }
 
-    /// 此刻生效的请求策略（10s 进程缓存）：没配 = 缺省（现行行为）；配坏了 = 缺省并留日志，不让一个写坏的值把重试行为悄悄变掉。
+    /// 此刻生效的请求策略（10s 进程缓存，同键 singleflight）：没配 = 缺省（现行行为）；
+    /// 配坏了 = 缺省并留日志，不让一个写坏的值把重试行为悄悄变掉。
     pub async fn request_policy(&self) -> Arc<okapi_kernel::policies::RequestPolicy> {
         use okapi_kernel::policies::{REQUEST_POLICY_SETTING, RequestPolicy};
         if let Some(hit) = self.routing.request_policy.get(&0).await {
             return hit;
         }
-        let setting = self.setting_cached(REQUEST_POLICY_SETTING).await;
-        let policy = match setting.as_ref() {
-            None => RequestPolicy::default(),
-            Some(value) => RequestPolicy::parse(value).unwrap_or_else(|| {
-                tracing::warn!("invalid request_policy setting; defaults in effect");
-                RequestPolicy::default()
-            }),
-        };
-        let policy = Arc::new(policy);
-        self.routing
-            .request_policy
-            .insert(0, Arc::clone(&policy))
-            .await;
-        policy
+        Box::pin(self.routing.request_policy.get_with(0, async {
+            let setting = self.setting_cached(REQUEST_POLICY_SETTING).await;
+            let policy = match setting.as_ref() {
+                None => RequestPolicy::default(),
+                Some(value) => RequestPolicy::parse(value).unwrap_or_else(|| {
+                    tracing::warn!("invalid request_policy setting; defaults in effect");
+                    RequestPolicy::default()
+                }),
+            };
+            Arc::new(policy)
+        }))
+        .await
     }
 
-    /// 此刻生效的负毛利熔断对（`<group>|<channel_id>`，10s 进程缓存；§11.34）。
+    /// 此刻生效的负毛利熔断对（`<group>|<channel_id>`，10s 进程缓存，同键 singleflight；§11.34）。
     /// Redis 故障按空集处理（fail-open：熔断是止损手段，不该因缓存抖动把请求拒掉）。
     pub async fn margin_blocked_fields(&self) -> Arc<std::collections::HashSet<String>> {
         if let Some(hit) = self.routing.margin_cache.get(&0).await {
             return hit;
         }
-        let now = chrono::Utc::now().timestamp();
-        let set: std::collections::HashSet<String> = self
-            .sched
-            .margin_blocks()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(_, e)| e.blocks_at(now))
-            .map(|(k, _)| k)
-            .collect();
-        let set = Arc::new(set);
-        self.routing.margin_cache.insert(0, Arc::clone(&set)).await;
-        set
+        Box::pin(self.routing.margin_cache.get_with(0, async {
+            let now = chrono::Utc::now().timestamp();
+            let set: std::collections::HashSet<String> = self
+                .sched
+                .margin_blocks()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, e)| e.blocks_at(now))
+                .map(|(k, _)| k)
+                .collect();
+            Arc::new(set)
+        }))
+        .await
     }
 
     /// 把该分组当前被熔断的渠道从候选里摘掉；返回摘掉的条数，供调用方区分
@@ -446,23 +503,38 @@ impl AppState {
         }
     }
 
-    /// 路由类缓存失效（渠道/模型/别名/分组绑定/settings 变更后调用）。
-    /// 失效本进程的路由缓存，并广播给其它实例。
-    ///
-    /// 只失效本地是不够的：管理面有多个副本、数据面更多，管理员在 console-A 上禁掉一条
-    /// 出问题的渠道，页面显示已生效，而其余 pod 还会照着各自缓存往那条渠道打——候选集 5s、
-    /// 模型 60s、settings 60s。应急操作等一分钟不可接受。定价早就有 `pricing.epoch` 广播，
-    /// 这里复用同一条 NATS 通道加一个主题；没有 NATS 的单机部署行为不变（本地失效 + TTL 兜底）。
-    ///
-    /// 发布是 spawn 出去的：调用点有近二十处且都在同步上下文里，为一次 fire-and-forget
-    /// 的通知把它们全改成 async 不值当。丢广播由各自 TTL 兜底，与 epoch 同一套容错口径。
+    /// 按作用域广播路由/配置缓存失效。
+    /// 非 `Setting` 作用域均只需同步清理本地缓存并 fire-and-forget 广播给其它副本；
+    /// 单条 `settings` 键请调用 [`Self::invalidate_setting_cache`]。
+    pub fn invalidate_cache(&self, scope: CacheInvalidation) {
+        self.invalidate_cache_local_sync(&scope);
+        self.publish_invalidation(scope);
+    }
+
+    /// 定向失效单条 `settings` 键缓存（命中 `request_policy` 时一并清策略缓存），
+    /// 并经 `routing.invalidate` 广播 `"setting:<key>"` 到集群内其它副本。
+    pub async fn invalidate_setting_cache(&self, key: &str) {
+        let scope = CacheInvalidation::Setting(key.to_owned());
+        self.invalidate_cache_local(&scope).await;
+        self.publish_invalidation(scope);
+    }
+
+    /// 全量路由缓存失效（兼容旧调用点、运维手动清缓存、回滚定价等跨域变更）。
+    /// 失效本进程全部路由/设置缓存，并广播给其它实例。
     pub fn invalidate_routing_caches(&self) {
-        self.invalidate_routing_caches_local();
+        self.invalidate_cache(CacheInvalidation::All);
+    }
+
+    fn publish_invalidation(&self, scope: CacheInvalidation) {
         if let Some(nats) = self.nats.clone() {
             okapi_kernel::metrics::global().record_routing_invalidation(true);
+            let payload = scope.into_wire();
             // detach 说明：fire-and-forget 广播，失败由 TTL 兜底
             tokio::spawn(async move {
-                if let Err(err) = nats.publish(ROUTING_INVALIDATE_SUBJECT, "1".into()).await {
+                if let Err(err) = nats
+                    .publish(ROUTING_INVALIDATE_SUBJECT, payload.into())
+                    .await
+                {
                     tracing::debug!(error = %err, "路由缓存失效广播发送失败（TTL 兜底）");
                 }
             });
@@ -527,8 +599,8 @@ impl AppState {
         })
     }
 
-    /// 读取渠道池生效策略快照（5s 进程缓存，由 `routing.invalidate` 跨副本即时失效；
-    /// 查不到行或瞬态 DB 异常时安全回退默认策略，不阻断热路径）。
+    /// 读取渠道池生效策略快照（5s 进程缓存，同键 singleflight 防击穿，由 `routing.invalidate` 跨副本即时失效；
+    /// 查不到行或瞬态 DB 异常时安全回退默认策略且不缓存错误，不阻断热路径）。
     pub async fn load_pool_policy(
         &self,
         pool_code: &str,
@@ -536,39 +608,93 @@ impl AppState {
         if let Some(hit) = self.routing.pool_policies.get(pool_code).await {
             return hit;
         }
-        let loaded = match okapi_store::pool_policy::load_pool_policy(&self.pg, pool_code).await {
-            Ok(Some(policy)) => policy,
-            Ok(None) => okapi_store::pool_policy::StoredPoolPolicy::fallback_default(pool_code),
+        match Box::pin(
+            self.routing
+                .pool_policies
+                .try_get_with(pool_code.to_owned(), async {
+                    let loaded =
+                        match okapi_store::pool_policy::load_pool_policy(&self.pg, pool_code)
+                            .await?
+                        {
+                            Some(policy) => policy,
+                            None => okapi_store::pool_policy::StoredPoolPolicy::fallback_default(
+                                pool_code,
+                            ),
+                        };
+                    Ok::<_, okapi_store::StoreError>(Arc::new(loaded))
+                }),
+        )
+        .await
+        {
+            Ok(policy) => policy,
             Err(error) => {
                 tracing::warn!(
                     pool_code,
                     %error,
                     "load_pool_policy failed; falling back to default policy"
                 );
-                return Arc::new(
+                Arc::new(
                     okapi_store::pool_policy::StoredPoolPolicy::fallback_default(pool_code),
-                );
+                )
             }
-        };
-        let arc = Arc::new(loaded);
-        self.routing
-            .pool_policies
-            .insert(pool_code.to_owned(), Arc::clone(&arc))
-            .await;
-        arc
+        }
     }
 
-    /// 只失效本进程（广播的接收端用；避免收到自己的广播再转发出去打环）。
-    pub fn invalidate_routing_caches_local(&self) {
+    /// 按作用域只失效本进程缓存（广播接收端调用，避免收到自己的广播再转发打环）。
+    pub async fn invalidate_cache_local(&self, scope: &CacheInvalidation) {
+        match scope {
+            CacheInvalidation::Setting(key) => {
+                okapi_kernel::metrics::global().record_routing_invalidation(false);
+                self.settings_cache.invalidate(key).await;
+                if key == okapi_kernel::policies::REQUEST_POLICY_SETTING {
+                    self.routing.request_policy.invalidate_all();
+                }
+            }
+            other => self.invalidate_cache_local_sync(other),
+        }
+    }
+
+    fn invalidate_cache_local_sync(&self, scope: &CacheInvalidation) {
         okapi_kernel::metrics::global().record_routing_invalidation(false);
-        self.routing.model_cache.invalidate_all();
-        self.routing.cand_cache.invalidate_all();
-        self.routing.channel_cost_cache.invalidate_all();
-        self.routing.channel_control_cache.invalidate_all();
-        self.routing.margin_cache.invalidate_all();
-        self.routing.request_policy.invalidate_all();
-        self.routing.pool_policies.invalidate_all();
-        self.settings_cache.invalidate_all();
+        match scope {
+            CacheInvalidation::All => {
+                self.routing.model_cache.invalidate_all();
+                self.routing.cand_cache.invalidate_all();
+                self.routing.channel_cost_cache.invalidate_all();
+                self.routing.channel_control_cache.invalidate_all();
+                self.routing.margin_cache.invalidate_all();
+                self.routing.request_policy.invalidate_all();
+                self.routing.pool_policies.invalidate_all();
+                self.settings_cache.invalidate_all();
+            }
+            CacheInvalidation::Channels => {
+                self.routing.cand_cache.invalidate_all();
+                self.routing.channel_cost_cache.invalidate_all();
+                self.routing.channel_control_cache.invalidate_all();
+            }
+            CacheInvalidation::Models => {
+                self.routing.model_cache.invalidate_all();
+                self.routing.cand_cache.invalidate_all();
+            }
+            CacheInvalidation::Pools => {
+                self.routing.cand_cache.invalidate_all();
+                self.routing.pool_policies.invalidate_all();
+            }
+            CacheInvalidation::Margin => {
+                self.routing.margin_cache.invalidate_all();
+            }
+            CacheInvalidation::Setting(key) => {
+                self.settings_cache.invalidate_all();
+                if key == okapi_kernel::policies::REQUEST_POLICY_SETTING {
+                    self.routing.request_policy.invalidate_all();
+                }
+            }
+        }
+    }
+
+    /// 只失效本进程全部路由缓存（兼容测试与 NATS 断流重连补刷）。
+    pub fn invalidate_routing_caches_local(&self) {
+        self.invalidate_cache_local_sync(&CacheInvalidation::All);
     }
 
     /// 采集当前角色的实时运行时水位，供 Prometheus `/metrics` 端点导出。
@@ -633,12 +759,8 @@ impl AppState {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn isolated_pg_shares_runtime_caches_and_isolates_pool_flow() {
-        let gw_pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_gw")
-            .expect("lazy pool parses");
-        let bg_pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_bg")
+    fn test_app_state() -> AppState {
+        let pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_gw")
             .expect("lazy pool parses");
         let redis = fred::prelude::Builder::from_config(fred::prelude::Config::default())
             .build()
@@ -651,9 +773,9 @@ mod tests {
             okapi_providers::inference::Registry::builtin(&resources).expect("inference registry");
         let openai = resources.openai.clone();
 
-        let gw = AppState {
+        AppState {
             core: CoreState {
-                pg: gw_pg,
+                pg,
                 ledger,
                 sched,
                 pricebook: Arc::new(okapi_pricing::PriceBookHandle::new(
@@ -710,7 +832,14 @@ mod tests {
                 ),
             },
             data_plane: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_pg_shares_runtime_caches_and_isolates_pool_flow() {
+        let bg_pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_bg")
+            .expect("lazy pool parses");
+        let gw = test_app_state();
 
         let bg = gw.with_isolated_pg(bg_pg, 4);
         assert!(Arc::ptr_eq(&gw.core.pricebook, &bg.core.pricebook));
@@ -755,5 +884,188 @@ mod tests {
             .settlements
             .wait_idle(std::time::Duration::from_secs(2))
             .await;
+    }
+
+    #[test]
+    fn cache_invalidation_wire_roundtrip_and_legacy_compat() {
+        for scope in [
+            CacheInvalidation::All,
+            CacheInvalidation::Channels,
+            CacheInvalidation::Models,
+            CacheInvalidation::Pools,
+            CacheInvalidation::Margin,
+            CacheInvalidation::Setting("site_notices".to_owned()),
+            CacheInvalidation::Setting("request_policy".to_owned()),
+        ] {
+            let wire = scope.to_wire();
+            assert_eq!(CacheInvalidation::from_wire(&wire), scope);
+        }
+        assert_eq!(CacheInvalidation::from_wire("1"), CacheInvalidation::All);
+        assert_eq!(CacheInvalidation::from_wire(""), CacheInvalidation::All);
+        assert_eq!(
+            CacheInvalidation::from_wire("setting:"),
+            CacheInvalidation::All
+        );
+        assert_eq!(
+            CacheInvalidation::from_wire("unknown_future_scope"),
+            CacheInvalidation::All
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_cache_invalidation_preserves_unrelated_caches() {
+        let state = test_app_state();
+
+        let seed_all = || async {
+            state
+                .routing
+                .model_cache
+                .insert("gpt-5".into(), Arc::new(None))
+                .await;
+            state
+                .routing
+                .cand_cache
+                .insert("gpt-5|default".into(), Arc::new(Vec::new()))
+                .await;
+            state.routing.channel_cost_cache.insert(1, 1000).await;
+            state
+                .routing
+                .margin_cache
+                .insert(0, Arc::new(["default|1".to_owned()].into()))
+                .await;
+            state
+                .routing
+                .request_policy
+                .insert(0, Arc::new(okapi_kernel::policies::RequestPolicy::default()))
+                .await;
+            state
+                .routing
+                .pool_policies
+                .insert(
+                    "default".into(),
+                    Arc::new(okapi_store::pool_policy::StoredPoolPolicy::fallback_default("default")),
+                )
+                .await;
+            state
+                .settings_cache
+                .insert("site_notices".into(), Arc::new(None))
+                .await;
+            state
+                .settings_cache
+                .insert("request_policy".into(), Arc::new(None))
+                .await;
+        };
+
+        // 1. Margin scope only clears margin_cache
+        seed_all().await;
+        state.invalidate_cache_local(&CacheInvalidation::Margin).await;
+        assert!(state.routing.margin_cache.get(&0).await.is_none());
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_some());
+        assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.settings_cache.get("site_notices").await.is_some());
+
+        // 2. Setting("site_notices") only clears that single settings key
+        seed_all().await;
+        state
+            .invalidate_cache_local(&CacheInvalidation::Setting("site_notices".to_owned()))
+            .await;
+        assert!(state.settings_cache.get("site_notices").await.is_none());
+        assert!(state.settings_cache.get("request_policy").await.is_some());
+        assert!(state.routing.request_policy.get(&0).await.is_some());
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_some());
+
+        // 3. Setting("request_policy") clears that key + request_policy cache only
+        seed_all().await;
+        state
+            .invalidate_cache_local(&CacheInvalidation::Setting("request_policy".to_owned()))
+            .await;
+        assert!(state.settings_cache.get("request_policy").await.is_none());
+        assert!(state.routing.request_policy.get(&0).await.is_none());
+        assert!(state.settings_cache.get("site_notices").await.is_some());
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_some());
+
+        // 4. Channels scope preserves model_cache / pool_policies / settings_cache
+        seed_all().await;
+        state
+            .invalidate_cache_local(&CacheInvalidation::Channels)
+            .await;
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
+        assert!(state.routing.channel_cost_cache.get(&1).await.is_none());
+        assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.routing.pool_policies.get("default").await.is_some());
+        assert!(state.settings_cache.get("site_notices").await.is_some());
+
+        // 5. Models scope clears model_cache + cand_cache, preserves channel_cost + pool_policies
+        seed_all().await;
+        state
+            .invalidate_cache_local(&CacheInvalidation::Models)
+            .await;
+        assert!(state.routing.model_cache.get("gpt-5").await.is_none());
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
+        assert!(state.routing.channel_cost_cache.get(&1).await.is_some());
+        assert!(state.routing.pool_policies.get("default").await.is_some());
+
+        // 6. Pools scope clears cand_cache + pool_policies, preserves model_cache + channel_cost
+        seed_all().await;
+        state
+            .invalidate_cache_local(&CacheInvalidation::Pools)
+            .await;
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
+        assert!(state.routing.pool_policies.get("default").await.is_none());
+        assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.routing.channel_cost_cache.get(&1).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn moka_try_get_with_coalesces_concurrent_misses_and_never_caches_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache: Cache<String, Arc<usize>> = Cache::builder().max_capacity(8).build();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+
+        // First wave: 8 concurrent callers fail — error is coalesced and NOT cached.
+        let mut failing = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let loads = Arc::clone(&loads);
+            let barrier = Arc::clone(&barrier);
+            failing.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache
+                    .try_get_with("k".to_owned(), async {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        Err::<Arc<usize>, &'static str>("db_down")
+                    })
+                    .await
+            }));
+        }
+        for handle in failing {
+            assert!(handle.await.expect("join").is_err());
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        // Second wave: 8 concurrent callers succeed — singleflight executes loader once.
+        let mut succeeding = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let loads = Arc::clone(&loads);
+            let barrier = Arc::clone(&barrier);
+            succeeding.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache
+                    .try_get_with("k".to_owned(), async {
+                        let n = loads.fetch_add(1, Ordering::SeqCst) + 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        Ok::<Arc<usize>, &'static str>(Arc::new(n))
+                    })
+                    .await
+            }));
+        }
+        for handle in succeeding {
+            assert_eq!(*handle.await.expect("join").expect("ok"), 2);
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 }

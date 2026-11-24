@@ -237,7 +237,7 @@ pub async fn update_proxy(
     )
     .await?
     .ok_or_else(not_found)?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -267,7 +267,7 @@ pub async fn delete_proxy(
     if !egress::delete_proxy(&state.pg, id).await? {
         return Err(not_found());
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,

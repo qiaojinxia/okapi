@@ -19,21 +19,25 @@ pub async fn policy(state: &AppState, channel: i64) -> Result<Arc<Policy>, Upstr
     if let Some(value) = state.routing.channel_control_cache.get(&channel).await {
         return Ok(value);
     }
-    let settings: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT settings FROM channels WHERE id=$1 AND deleted_at IS NULL AND status=1",
+    Box::pin(
+        state
+            .routing
+            .channel_control_cache
+            .try_get_with(channel, async {
+                let settings: Option<serde_json::Value> = sqlx::query_scalar(
+                    "SELECT settings FROM channels WHERE id=$1 AND deleted_at IS NULL AND status=1",
+                )
+                .bind(channel)
+                .fetch_optional(&state.pg)
+                .await
+                .map_err(|_| "unavailable")?;
+                let settings = settings.ok_or("channel_disabled")?;
+                let policy = Policy::parse(&settings).map_err(|_| "invalid_policy")?;
+                Ok::<_, &'static str>(Arc::new(policy))
+            }),
     )
-    .bind(channel)
-    .fetch_optional(&state.pg)
     .await
-    .map_err(|_| blocked("unavailable"))?;
-    let settings = settings.ok_or_else(|| blocked("channel_disabled"))?;
-    let policy = Arc::new(Policy::parse(&settings).map_err(|_| blocked("invalid_policy"))?);
-    state
-        .routing
-        .channel_control_cache
-        .insert(channel, policy.clone())
-        .await;
-    Ok(policy)
+    .map_err(|reason| blocked(*reason))
 }
 
 /// 诊断里最多记这么多条被排除的 key。

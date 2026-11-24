@@ -372,7 +372,7 @@ pub async fn simulate(
     state: &AppState,
     stored: &StoredPoolPolicy,
     features: &RequestFeatures<'_>,
-) -> Result<DecisionTrace, okapi_store::StoreError> {
+) -> Result<DecisionTrace, okapi_kernel::error::AppError> {
     let effective_policy = stored.resolve(features);
     let chain: Vec<&str> = effective_policy
         .pool_chain

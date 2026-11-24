@@ -183,7 +183,7 @@ pub async fn import_proxies(
             json!({"line": line, "id": id, "name": name, "url_masked": endpoint.masked()})
         })
         .collect();
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,

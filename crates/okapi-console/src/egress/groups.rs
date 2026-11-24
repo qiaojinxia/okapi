@@ -90,7 +90,7 @@ pub async fn upsert_group(
         },
     )
     .await?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -114,7 +114,7 @@ pub async fn delete_group(
     if !egress::delete_group(&state.pg, &code).await? {
         return Err(not_found());
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -177,7 +177,7 @@ pub async fn assign_key(
         .ok_or_else(not_found)?;
     ensure_channel_owner(&state, channel_id, &actor, scope).await?;
     egress::assign_key(&state.pg, req.key_id, req.proxy_id).await?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -219,7 +219,7 @@ pub async fn set_default(
     }
     validate_binding(&state, &binding, &actor, scope).await?;
     let report = egress::set_default_binding(&state.pg, &binding, actor.actor_user_id()).await?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -246,7 +246,7 @@ pub async fn set_channel_egress(
     let report = egress::set_channel_binding(&state.pg, id, &binding)
         .await?
         .ok_or_else(not_found)?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,

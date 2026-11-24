@@ -448,7 +448,8 @@ impl Reading<'_> {
             .await
         {
             Ok(true) => {
-                self.state.invalidate_routing_caches();
+                self.state
+                    .invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
                 self.audit("channel.low_balance_stop").await;
                 tracing::warn!(
                     channel_id,
@@ -474,7 +475,8 @@ impl Reading<'_> {
             .await
         {
             Ok(true) => {
-                self.state.invalidate_routing_caches();
+                self.state
+                    .invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
                 self.audit("channel.low_balance_resume").await;
                 tracing::info!(
                     channel_id,

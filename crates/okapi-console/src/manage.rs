@@ -330,7 +330,7 @@ pub async fn batch_channels(
         }
         _ => return Err(AppError::bad_request().with_param("action")),
     };
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -384,7 +384,7 @@ pub async fn delete_model(
     if !mutate::delete_model(&state.pg, &model).await? {
         return Err(not_found());
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Models);
     audit(
         &state,
         &actor,
@@ -731,7 +731,7 @@ pub async fn delete_pool(
     if !mutate::delete_channel_pool(&state.pg, &code).await? {
         return Err(not_found());
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Pools);
     audit(
         &state,
         &actor,
@@ -753,7 +753,7 @@ pub async fn delete_group(
     if !mutate::delete_price_group(&state.pg, &code).await? {
         return Err(not_found());
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Pools);
     audit(
         &state,
         &actor,

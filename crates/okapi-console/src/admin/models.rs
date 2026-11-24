@@ -188,7 +188,7 @@ pub async fn upsert_model(
         okapi_store::StoreError::InvalidData(param) => AppError::bad_request().with_param(param),
         e => e.into(),
     })?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Models);
     audit(
         &state,
         &actor,

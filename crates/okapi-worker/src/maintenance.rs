@@ -7,13 +7,12 @@ use super::{
     prune_conversation_archives, reconcile_and_notify, recover_cooled_keys, subscriptions_tick,
     sweep_expired_reservations, transport_tick,
 };
-use okapi_kernel::sched_redis::{MaintenanceLease, SchedulerRedis};
+use okapi_kernel::sched_redis::{MaintenanceLease, ReconcileCheckpoint, SchedulerRedis};
 use okapi_ledger::BalanceLedger;
 use sqlx::PgPool;
 use std::time::Duration;
 
-const MAINT_LOCK_TTL_SECS: i64 = 120;
-const MAINT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(40);
+pub(crate) const MAINT_LOCK_TTL_SECS: i64 = 120;
 pub(super) const JS_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(super) struct MaintenanceContext {
@@ -27,7 +26,7 @@ pub(super) struct MaintenanceContext {
     pub(super) js: Option<JsSink>,
     pub(super) ch: Option<ChSink>,
     pub(super) reconcile: std::sync::Mutex<ReconcileClock>,
-    pub(super) last_archive_cleanup: std::sync::Mutex<Option<std::time::Instant>>,
+    pub(super) last_archive_cleanup: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 /// 启动时 NATS JetStream 可能尚未就绪；与 [`ChSink`] 同口径，首次失败后按周期自动补建拓扑，
@@ -130,26 +129,65 @@ impl ChSink {
     }
 }
 
-/// 对账节奏：进程启动后第一轮与之后每 [`RECONCILE_FULL_INTERVAL`] 一轮做全量，其余增量。
+/// 对账节奏：首次与之后每 [`RECONCILE_FULL_INTERVAL`] 一轮做全量，其余增量。
+/// 多副本间通过 Redis `maint:clock:{reconcile}` 同步进度，本机字段作为 Redis 暂不可用时的兜底。
 #[derive(Default)]
 pub(super) struct ReconcileClock {
-    pub(super) last_full: Option<std::time::Instant>,
+    pub(super) last_full: Option<chrono::DateTime<chrono::Utc>>,
     /// 上一轮（无论全量增量）成功时的起点。
     pub(super) last_pass: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ReconcileClock {
+    fn hydrate(&mut self, remote: Option<ReconcileCheckpoint>) {
+        let Some(cp) = remote else {
+            return;
+        };
+        self.last_full = merge_latest_utc(self.last_full, cp.last_full_unix);
+        self.last_pass = merge_latest_utc(self.last_pass, cp.last_pass_unix);
+    }
+
     /// None = 这一轮做全量；Some(t) = 只查 t 之后有事件的用户。
-    fn plan(&self, now: std::time::Instant) -> Option<chrono::DateTime<chrono::Utc>> {
+    fn plan(&self, now: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
+        let full_interval =
+            chrono::Duration::from_std(RECONCILE_FULL_INTERVAL).unwrap_or_default();
         let full_due = self
             .last_full
-            .is_none_or(|at| now.duration_since(at) >= RECONCILE_FULL_INTERVAL);
+            .is_none_or(|at| now.signed_duration_since(at) >= full_interval);
         if full_due {
             return None;
         }
         let overlap = chrono::Duration::from_std(RECONCILE_OVERLAP).unwrap_or_default();
         self.last_pass.map(|at| at - overlap)
     }
+
+    fn record(&mut self, started: chrono::DateTime<chrono::Utc>, is_full: bool) {
+        self.last_pass = Some(self.last_pass.map_or(started, |prev| prev.max(started)));
+        if is_full {
+            self.last_full = Some(self.last_full.map_or(started, |prev| prev.max(started)));
+        }
+    }
+}
+
+fn merge_latest_utc(
+    local: Option<chrono::DateTime<chrono::Utc>>,
+    remote_unix: Option<i64>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let remote = remote_unix.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+    match (local, remote) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+fn archive_cleanup_due(
+    last_run: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    interval_hours: u32,
+) -> bool {
+    let min_gap = chrono::Duration::hours(i64::from(interval_hours));
+    last_run.is_none_or(|prev| now.signed_duration_since(prev) >= min_gap)
 }
 
 #[allow(non_camel_case_types)]
@@ -191,7 +229,7 @@ impl MaintenanceJob {
 }
 
 /// 周期占位 TTL：取间隔的 80%（夹在 2s..=3600s），避免刚跑完几百毫秒就被另一副本重复触发。
-pub(super) fn maintenance_round_ttl_secs(interval: Duration) -> i64 {
+pub(crate) fn maintenance_round_ttl_secs(interval: Duration) -> i64 {
     let secs = interval.as_secs().saturating_mul(4) / 5;
     i64::try_from(secs.clamp(2, 3600)).unwrap_or(3600)
 }
@@ -201,6 +239,66 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// 在 Redis 分布式维护租约保护下执行一轮后台任务（含自动心跳续租与 CAS 释放）。
+/// 返回 `true` 表示收到了停机信号，调用方应立即退出循环。
+pub(crate) fn run_leased<'a, F>(
+    sched: &'a SchedulerRedis,
+    node: &'a str,
+    job: &'static str,
+    lock_ttl_secs: i64,
+    round_ttl_secs: i64,
+    stop: &'a mut tokio::sync::watch::Receiver<bool>,
+    work: F,
+) -> impl std::future::Future<Output = bool> + Send + 'a
+where
+    F: std::future::Future<Output = ()> + Send + 'a,
+{
+    let mut work = Box::pin(work);
+    async move {
+        if *stop.borrow() {
+            return true;
+        }
+        let (token, outcome) = match sched
+            .maintenance_claim(job, node, lock_ttl_secs, round_ttl_secs)
+            .await
+        {
+            MaintenanceLease::Acquired(token) => (Some(token), "ran"),
+            MaintenanceLease::RedisUnavailable => (None, "redis_unavailable"),
+            MaintenanceLease::Skipped => {
+                okapi_kernel::metrics::global().record_worker_maintenance(job, "skipped");
+                tracing::trace!(job, "maintenance skipped; held by another replica");
+                return false;
+            }
+        };
+        okapi_kernel::metrics::global().record_worker_maintenance(job, outcome);
+        let heartbeat_secs = u64::try_from((lock_ttl_secs / 3).max(5)).unwrap_or(5);
+        let heartbeat = token.as_ref().map(|token| {
+            let sched = sched.clone();
+            let token = token.clone();
+            AbortOnDrop(tokio::spawn(async move {
+                let mut renew = tokio::time::interval(Duration::from_secs(heartbeat_secs));
+                renew.tick().await;
+                loop {
+                    renew.tick().await;
+                    if !sched.maintenance_extend(job, &token, lock_ttl_secs).await {
+                        tracing::warn!(job, "maintenance lease heartbeat lost");
+                        return;
+                    }
+                }
+            }))
+        });
+        let stopped = tokio::select! {
+            _ = stop.changed() => true,
+            () = &mut work => false,
+        };
+        drop(heartbeat);
+        if let Some(token) = token {
+            sched.maintenance_release(job, &token).await;
+        }
+        stopped
     }
 }
 
@@ -228,51 +326,17 @@ pub(super) async fn run_maintenance(
             continue;
         }
         let round_ttl = maintenance_round_ttl_secs(interval);
-        let (token, outcome) = match ctx
-            .sched
-            .maintenance_claim(job.name(), &ctx.node, MAINT_LOCK_TTL_SECS, round_ttl)
-            .await
+        if run_leased(
+            &ctx.sched,
+            &ctx.node,
+            job.name(),
+            MAINT_LOCK_TTL_SECS,
+            round_ttl,
+            &mut stop,
+            maintenance_once(&ctx, job),
+        )
+        .await
         {
-            MaintenanceLease::Acquired(token) => (Some(token), "ran"),
-            MaintenanceLease::RedisUnavailable => (None, "redis_unavailable"),
-            MaintenanceLease::Skipped => {
-                okapi_kernel::metrics::global().record_worker_maintenance(job.name(), "skipped");
-                tracing::trace!(
-                    job = job.name(),
-                    "maintenance skipped; held by another replica"
-                );
-                continue;
-            }
-        };
-        okapi_kernel::metrics::global().record_worker_maintenance(job.name(), outcome);
-        let heartbeat = token.as_ref().map(|token| {
-            let sched = ctx.sched.clone();
-            let job_name = job.name();
-            let token = token.clone();
-            AbortOnDrop(tokio::spawn(async move {
-                let mut renew = tokio::time::interval(MAINT_HEARTBEAT_INTERVAL);
-                renew.tick().await;
-                loop {
-                    renew.tick().await;
-                    if !sched
-                        .maintenance_extend(job_name, &token, MAINT_LOCK_TTL_SECS)
-                        .await
-                    {
-                        tracing::warn!(job = job_name, "maintenance lease heartbeat lost");
-                        return;
-                    }
-                }
-            }))
-        });
-        let stopped = tokio::select! {
-            _ = stop.changed() => true,
-            () = maintenance_once(&ctx, job) => false,
-        };
-        drop(heartbeat);
-        if let Some(token) = token {
-            ctx.sched.maintenance_release(job.name(), &token).await;
-        }
-        if stopped {
             return;
         }
     }
@@ -284,7 +348,7 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
         pg,
         ledger,
         redis,
-        sched: _,
+        sched,
         node: _,
         nats,
         notifier,
@@ -349,20 +413,24 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
         }
         MaintenanceJob::reconcile => {
             let started = chrono::Utc::now();
-            let now = std::time::Instant::now();
-            let since = reconcile
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .plan(now);
+            let remote = sched.maint_reconcile_clock_get().await;
+            let since = {
+                let mut clock = reconcile
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                clock.hydrate(remote);
+                clock.plan(started)
+            };
             match reconcile_and_notify(pg, ledger, RECONCILE_BATCH, since, notifier).await {
                 Ok(_) => {
-                    let mut clock = reconcile
+                    let is_full = since.is_none();
+                    reconcile
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    clock.last_pass = Some(started);
-                    if since.is_none() {
-                        clock.last_full = Some(now);
-                    }
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record(started, is_full);
+                    sched
+                        .maint_reconcile_clock_set(started.timestamp(), is_full)
+                        .await;
                 }
                 Err(err) => tracing::error!(error = %err, "对账失败"),
             }
@@ -403,7 +471,12 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
                 Ok(report) if !report.tripped.is_empty() || report.pruned > 0 => {
                     if let Some(client) = nats
                         && let Err(err) = client
-                            .publish(okapi_engine::state::ROUTING_INVALIDATE_SUBJECT, "1".into())
+                            .publish(
+                                okapi_engine::state::ROUTING_INVALIDATE_SUBJECT,
+                                okapi_engine::state::CacheInvalidation::Margin
+                                    .to_wire()
+                                    .into(),
+                            )
                             .await
                     {
                         tracing::debug!(error = %err, "margin 变更广播失败（依赖 10s TTL 兜底）");
@@ -448,20 +521,29 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
             if policy.retention_days == 0 {
                 return;
             }
-            let min_gap = Duration::from_hours(u64::from(policy.cleanup_interval_hours));
-            let due = last_archive_cleanup
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none_or(|prev| prev.elapsed() >= min_gap);
+            let now = chrono::Utc::now();
+            let remote_ts = sched.maint_timestamp_get("conversation_archive").await;
+            let due = {
+                let mut local = last_archive_cleanup
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *local = merge_latest_utc(*local, remote_ts);
+                archive_cleanup_due(*local, now, policy.cleanup_interval_hours)
+            };
             if !due {
                 return;
             }
-            match prune_conversation_archives(pg, ch, chrono::Utc::now()).await {
+            match prune_conversation_archives(pg, ch, now).await {
                 Ok(report) => {
                     *last_archive_cleanup
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(std::time::Instant::now());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
+                    let ttl_secs = i64::from(policy.cleanup_interval_hours)
+                        .saturating_mul(7200)
+                        .max(7 * 24 * 3600);
+                    sched
+                        .maint_timestamp_set("conversation_archive", now.timestamp(), ttl_secs)
+                        .await;
                     if report.pg_deleted > 0 || report.ch_deleted_requested {
                         tracing::info!(
                             pg_deleted = report.pg_deleted,
@@ -519,5 +601,43 @@ mod tests {
         assert_eq!(maintenance_round_ttl_secs(Duration::from_secs(30)), 24);
         assert_eq!(maintenance_round_ttl_secs(Duration::from_mins(5)), 240);
         assert_eq!(maintenance_round_ttl_secs(Duration::from_hours(6)), 3600);
+    }
+
+    #[test]
+    fn reconcile_clock_hydrates_remote_checkpoint_across_replicas() {
+        let base = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid ts");
+        let mut replica_b = ReconcileClock::default();
+        assert!(
+            replica_b.plan(base).is_none(),
+            "fresh clock with no remote checkpoint runs full reconcile"
+        );
+
+        // Replica A finished a full pass 1h ago and an incremental pass 5m ago.
+        let full_at = base - chrono::Duration::hours(1);
+        let pass_at = base - chrono::Duration::minutes(5);
+        replica_b.hydrate(Some(ReconcileCheckpoint {
+            last_full_unix: Some(full_at.timestamp()),
+            last_pass_unix: Some(pass_at.timestamp()),
+        }));
+        let since = replica_b
+            .plan(base)
+            .expect("replica B should inherit incremental window instead of repeating full pass");
+        assert_eq!(
+            since,
+            pass_at - chrono::Duration::from_std(RECONCILE_OVERLAP).unwrap_or_default()
+        );
+
+        // Once 24h have elapsed since the remote full pass, a full pass is due again.
+        let next_day = full_at + chrono::Duration::hours(24);
+        assert!(replica_b.plan(next_day).is_none());
+    }
+
+    #[test]
+    fn archive_cleanup_throttle_respects_remote_timestamp() {
+        let now = chrono::DateTime::from_timestamp(1_700_010_000, 0).expect("valid ts");
+        let two_hours_ago = (now - chrono::Duration::hours(2)).timestamp();
+        let merged = merge_latest_utc(None, Some(two_hours_ago));
+        assert!(!archive_cleanup_due(merged, now, 6));
+        assert!(archive_cleanup_due(merged, now, 2));
     }
 }

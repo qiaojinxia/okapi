@@ -85,6 +85,8 @@ impl CoreState {
     }
 
     /// Typed settings read: absence is cacheable; database failure is not absence.
+    /// 命中热路径零分配返回；未命中走 `Box::pin(try_get_with)` 同键 singleflight 去重，
+    /// 既防止缓存失效瞬间并发穿透 PG，又避免在所有调用方状态机里内联展开大 Future。
     pub async fn try_setting_cached(
         &self,
         key: &str,
@@ -92,11 +94,11 @@ impl CoreState {
         if let Some(hit) = self.settings_cache.get(key).await {
             return Ok(hit);
         }
-        let value = Arc::new(self.setting_fresh(key).await?);
-        self.settings_cache
-            .insert(key.to_owned(), Arc::clone(&value))
-            .await;
-        Ok(value)
+        Box::pin(self.settings_cache.try_get_with(key.to_owned(), async {
+            self.setting_fresh(key).await.map(Arc::new)
+        }))
+        .await
+        .map_err(|err| (*err).clone())
     }
 
     /// Best-effort reads are reserved for non-security display/telemetry defaults.

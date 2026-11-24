@@ -58,6 +58,39 @@ async fn maintenance_lease_coordinates_multi_replica_workers() {
         panic!("worker-b must take over immediately after release");
     };
     sched.maintenance_release(&job2, &t2).await;
+
+    // 3. 跨副本共享的维护时间戳、对账检查点与扫描游标
+    let ts_job = format!("archive_test_{}", Uuid::new_v4().simple());
+    assert_eq!(sched.maint_timestamp_get(&ts_job).await, None);
+    sched.maint_timestamp_set(&ts_job, 1_700_001_000, 300).await;
+    assert_eq!(
+        sched.maint_timestamp_get(&ts_job).await,
+        Some(1_700_001_000)
+    );
+    // 较旧时钟不能回退较新时间戳
+    sched.maint_timestamp_set(&ts_job, 1_700_000_500, 300).await;
+    assert_eq!(
+        sched.maint_timestamp_get(&ts_job).await,
+        Some(1_700_001_000)
+    );
+
+    let cursor_job = format!("oauth_cursor_{}", Uuid::new_v4().simple());
+    sched.maint_cursor_set(&cursor_job, 42, 300).await;
+    assert_eq!(sched.maint_cursor_get(&cursor_job).await, Some(42));
+    // 扫描游标允许回绕归零
+    sched.maint_cursor_set(&cursor_job, 0, 300).await;
+    assert_eq!(sched.maint_cursor_get(&cursor_job).await, Some(0));
+
+    // 对账检查点：全量推进 last_full + last_pass；后续增量只推进 last_pass 保留 last_full
+    let now_ts = chrono::Utc::now().timestamp();
+    sched.maint_reconcile_clock_set(now_ts, true).await;
+    sched.maint_reconcile_clock_set(now_ts + 300, false).await;
+    let cp = sched
+        .maint_reconcile_clock_get()
+        .await
+        .expect("reconcile checkpoint written");
+    assert!(cp.last_full_unix.is_some_and(|v| v >= now_ts));
+    assert!(cp.last_pass_unix.is_some_and(|v| v >= now_ts + 300));
 }
 
 #[tokio::test]
@@ -207,21 +240,71 @@ async fn routing_invalidate_broadcast_clears_margin_cache_across_replicas() {
         .margin_cache
         .insert(0, Arc::new(HashSet::from(["default|99".to_owned()])))
         .await;
-    assert!(replica_b.routing.margin_cache.get(&0).await.is_some());
+    replica_b
+        .routing
+        .cand_cache
+        .insert("gpt-5|default".to_owned(), Arc::new(Vec::new()))
+        .await;
+    replica_b
+        .routing
+        .model_cache
+        .insert("gpt-5".to_owned(), Arc::new(None))
+        .await;
+    replica_b
+        .settings_cache
+        .insert("site_notices".to_owned(), Arc::new(None))
+        .await;
 
-    replica_a.invalidate_routing_caches();
-
-    let mut cleared = false;
+    // 1. Margin 作用域广播仅失效 margin_cache，保留 cand_cache / model_cache / settings_cache
+    replica_a.invalidate_cache(engine::state::CacheInvalidation::Margin);
+    let mut margin_cleared = false;
     for _ in 0..40 {
         if replica_b.routing.margin_cache.get(&0).await.is_none() {
-            cleared = true;
+            margin_cleared = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
-        cleared,
-        "routing.invalidate 广播必须即时失效其它副本的 margin_cache"
+        margin_cleared,
+        "Margin 作用域广播必须即时失效其它副本的 margin_cache"
+    );
+    assert!(replica_b.routing.cand_cache.get("gpt-5|default").await.is_some());
+    assert!(replica_b.routing.model_cache.get("gpt-5").await.is_some());
+    assert!(replica_b.settings_cache.get("site_notices").await.is_some());
+
+    // 2. Setting 作用域广播仅失效目标 settings 键，保留路由缓存
+    replica_a.invalidate_setting_cache("site_notices").await;
+    let mut setting_cleared = false;
+    for _ in 0..40 {
+        if replica_b.settings_cache.get("site_notices").await.is_none() {
+            setting_cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        setting_cleared,
+        "Setting 作用域广播必须即时失效其它副本的对应设置键"
+    );
+    assert!(replica_b.routing.cand_cache.get("gpt-5|default").await.is_some());
+    assert!(replica_b.routing.model_cache.get("gpt-5").await.is_some());
+
+    // 3. 全量广播（All）仍清除全部路由缓存
+    replica_a.invalidate_routing_caches();
+    let mut all_cleared = false;
+    for _ in 0..40 {
+        if replica_b.routing.cand_cache.get("gpt-5|default").await.is_none()
+            && replica_b.routing.model_cache.get("gpt-5").await.is_none()
+        {
+            all_cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        all_cleared,
+        "全量 routing.invalidate 广播必须失效其它副本的路由缓存"
     );
 }
 

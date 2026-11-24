@@ -1,9 +1,9 @@
 //! 跨副本的后台租约：OAuth 凭证刷新锁、出口探测轮次、维护任务互斥与轮次占位、跨副本健康脏标记。
 use super::SchedulerRedis;
-use fred::interfaces::{KeysInterface, SetsInterface};
+use fred::interfaces::{HashesInterface, KeysInterface, SetsInterface};
 use fred::types::{Expiration, SetOptions};
 use okapi_store::CachedScript;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// 维护任务跨副本认领结果（执行互斥锁 + 周期轮次占位）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,9 +16,26 @@ pub enum MaintenanceLease {
     RedisUnavailable,
 }
 
+/// 跨副本共享的对账进度检查点（Unix 秒时间戳）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileCheckpoint {
+    pub last_full_unix: Option<i64>,
+    pub last_pass_unix: Option<i64>,
+}
+
+impl ReconcileCheckpoint {
+    fn from_hash(fields: &HashMap<String, String>) -> Self {
+        Self {
+            last_full_unix: fields.get("last_full").and_then(|s| s.parse::<i64>().ok()),
+            last_pass_unix: fields.get("last_pass").and_then(|s| s.parse::<i64>().ok()),
+        }
+    }
+}
+
 const DIRTY_KEY_SET: &str = "health:dirty:ck";
 const DIRTY_EGRESS_SET: &str = "health:dirty:egress";
 const DIRTY_SET_TTL_SECS: i64 = 24 * 3600;
+const MAINT_STATE_TTL_SECS: i64 = 30 * 24 * 3600;
 
 /// 维护任务 Redis 键：使用 `{job}` hash tag 保证 Redis Cluster 下同槽，可供双键 Lua 脚本原子执行。
 fn maint_lock_key(job: &str) -> String {
@@ -27,6 +44,14 @@ fn maint_lock_key(job: &str) -> String {
 
 fn maint_round_key(job: &str) -> String {
     format!("maint:round:{{{job}}}")
+}
+
+fn maint_clock_key(job: &str) -> String {
+    format!("maint:clock:{{{job}}}")
+}
+
+fn maint_cursor_key(job: &str) -> String {
+    format!("maint:cursor:{{{job}}}")
 }
 
 impl SchedulerRedis {
@@ -208,6 +233,116 @@ impl SchedulerRedis {
             .await;
     }
 
+    /// 读取跨副本共享的对账进度检查点；Redis 不可用时返回 `None`（调用方回退本机时钟）。
+    pub async fn maint_reconcile_clock_get(&self) -> Option<ReconcileCheckpoint> {
+        let fields: HashMap<String, String> = self
+            .client
+            .hgetall(maint_clock_key("reconcile"))
+            .await
+            .ok()?;
+        if fields.is_empty() {
+            return None;
+        }
+        Some(ReconcileCheckpoint::from_hash(&fields))
+    }
+
+    /// 单调推进对账进度检查点（多副本下避免回退；仅 `is_full == true` 时刷新 `last_full`）。
+    pub async fn maint_reconcile_clock_set(&self, last_pass_unix: i64, is_full: bool) {
+        static SCRIPT: CachedScript = CachedScript::new(
+            "local cur_pass = tonumber(redis.call('HGET', KEYS[1], 'last_pass')) \
+             local next_ts = tonumber(ARGV[1]) \
+             if not cur_pass or next_ts > cur_pass then \
+                 redis.call('HSET', KEYS[1], 'last_pass', ARGV[1]) \
+             end \
+             if ARGV[2] == '1' then \
+                 local cur_full = tonumber(redis.call('HGET', KEYS[1], 'last_full')) \
+                 if not cur_full or next_ts > cur_full then \
+                     redis.call('HSET', KEYS[1], 'last_full', ARGV[1]) \
+                 end \
+             end \
+             redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) \
+             return 1",
+        );
+        let full_flag = if is_full { "1" } else { "0" };
+        if let Err(error) = SCRIPT
+            .eval::<i64, _, _>(
+                &self.client,
+                vec![maint_clock_key("reconcile")],
+                vec![
+                    last_pass_unix.to_string(),
+                    full_flag.to_owned(),
+                    MAINT_STATE_TTL_SECS.to_string(),
+                ],
+            )
+            .await
+        {
+            tracing::debug!(%error, "maint_reconcile_clock_set 失败（退回本机时钟）");
+        }
+    }
+
+    /// 读取维护任务最近一次成功执行的 Unix 秒时间戳（供多副本共享节流时钟，如对话存档清理）。
+    pub async fn maint_timestamp_get(&self, job: &str) -> Option<i64> {
+        let raw: Option<String> = self
+            .client
+            .get(maint_clock_key(job))
+            .await
+            .ok()
+            .flatten();
+        raw.and_then(|s| s.parse::<i64>().ok())
+    }
+
+    /// 单调写入维护任务最近一次成功执行的 Unix 秒时间戳。
+    pub async fn maint_timestamp_set(&self, job: &str, unix_secs: i64, ttl_secs: i64) {
+        static SCRIPT: CachedScript = CachedScript::new(
+            "local cur = tonumber(redis.call('GET', KEYS[1])) \
+             local next_ts = tonumber(ARGV[1]) \
+             if not cur or next_ts > cur then \
+                 redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2])) \
+             else \
+                 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) \
+             end \
+             return 1",
+        );
+        if let Err(error) = SCRIPT
+            .eval::<i64, _, _>(
+                &self.client,
+                vec![maint_clock_key(job)],
+                vec![unix_secs.to_string(), ttl_secs.max(60).to_string()],
+            )
+            .await
+        {
+            tracing::debug!(job, %error, "maint_timestamp_set 失败（退回本机时钟）");
+        }
+    }
+
+    /// 读取维护任务的扫描分页游标（允许回绕为 0，如 OAuth 预刷新游标）。
+    pub async fn maint_cursor_get(&self, job: &str) -> Option<i64> {
+        let raw: Option<String> = self
+            .client
+            .get(maint_cursor_key(job))
+            .await
+            .ok()
+            .flatten();
+        raw.and_then(|s| s.parse::<i64>().ok())
+    }
+
+    /// 写入维护任务的扫描分页游标。
+    pub async fn maint_cursor_set(&self, job: &str, cursor: i64, ttl_secs: i64) {
+        if let Err(error) = self
+            .client
+            .set::<(), _, _>(
+                maint_cursor_key(job),
+                cursor.to_string(),
+                Some(Expiration::EX(ttl_secs.max(60))),
+                None,
+                false,
+            )
+            .await
+        {
+            tracing::debug!(job, %error, "maint_cursor_set 失败（退回本机游标）");
+        }
+    }
+
     /// 跨副本渠道 key 失败脏标记：任一副本登记瞬态失败后写入，其它副本成功时可感知并清零 PG 计数。
     pub async fn health_mark_key_dirty(&self, channel_key_id: i64) {
         self.mark_dirty_member(DIRTY_KEY_SET, channel_key_id).await;
@@ -265,8 +400,37 @@ mod tests {
         }
         let lock = maint_lock_key("reconcile");
         let round = maint_round_key("reconcile");
+        let clock = maint_clock_key("reconcile");
+        let cursor = maint_cursor_key("reconcile");
         assert_eq!(lock, "lock:maint:{reconcile}");
         assert_eq!(round, "maint:round:{reconcile}");
+        assert_eq!(clock, "maint:clock:{reconcile}");
+        assert_eq!(cursor, "maint:cursor:{reconcile}");
         assert_eq!(tag(&lock), tag(&round));
+        assert_eq!(tag(&lock), tag(&clock));
+        assert_eq!(tag(&lock), tag(&cursor));
+    }
+
+    #[test]
+    fn reconcile_checkpoint_parses_valid_and_partial_hash_fields() {
+        let mut fields = HashMap::new();
+        fields.insert("last_full".to_owned(), "1700000000".to_owned());
+        fields.insert("last_pass".to_owned(), "1700000300".to_owned());
+        assert_eq!(
+            ReconcileCheckpoint::from_hash(&fields),
+            ReconcileCheckpoint {
+                last_full_unix: Some(1_700_000_000),
+                last_pass_unix: Some(1_700_000_300),
+            }
+        );
+
+        fields.insert("last_full".to_owned(), "corrupted".to_owned());
+        assert_eq!(
+            ReconcileCheckpoint::from_hash(&fields),
+            ReconcileCheckpoint {
+                last_full_unix: None,
+                last_pass_unix: Some(1_700_000_300),
+            }
+        );
     }
 }

@@ -15,7 +15,7 @@ use okapi_providers::registry::{self, MediaSurface};
 use okapi_store::{AuthedKey, ChannelCandidate};
 use std::sync::Arc;
 
-/// 模型解析（60s 进程缓存；miss 回源 PG）。
+/// 模型解析（60s 进程缓存；miss 回源 PG，同键 singleflight 合并并发请求）。
 pub async fn resolve_model_cached(
     state: &AppState,
     requested: &str,
@@ -23,42 +23,64 @@ pub async fn resolve_model_cached(
     if let Some(hit) = state.routing.model_cache.get(requested).await {
         return Ok(hit);
     }
-    let resolved = Arc::new(okapi_store::channels::resolve_model(&state.pg, requested).await?);
-    state
-        .routing
-        .model_cache
-        .insert(requested.to_owned(), Arc::clone(&resolved))
-        .await;
-    Ok(resolved)
+    Box::pin(
+        state
+            .routing
+            .model_cache
+            .try_get_with(requested.to_owned(), async {
+                okapi_store::channels::resolve_model(&state.pg, requested)
+                    .await
+                    .map(Arc::new)
+                    .map_err(AppError::from)
+            }),
+    )
+    .await
+    .map_err(|err| (*err).clone())
 }
 
-/// 模型在池链上的候选渠道。5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL
-/// 收敛）；缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户。
+/// 模型在池链上的候选渠道。5s 进程缓存（热路径零 PG 读，同键 singleflight 防击穿；
+/// console 写路径主动失效，多副本靠广播 + TTL 收敛）；缓存键含池链：不同池的候选集合不同，
+/// 混用会把别的池的渠道发给用户。
 pub async fn cached_candidates(
     state: &AppState,
     model: &str,
     pool_chain: &[&str],
     fresh: bool,
-) -> Result<Arc<Vec<ChannelCandidate>>, okapi_store::StoreError> {
+) -> Result<Arc<Vec<ChannelCandidate>>, AppError> {
     let cache_key = format!("{model}|{}", pool_chain.join(">"));
     if !fresh && let Some(hit) = state.routing.cand_cache.get(&cache_key).await {
         return Ok(hit);
     }
-    let rows = Arc::new(
+    if fresh {
+        let rows = Arc::new(
+            okapi_store::channels::candidates_for_model(
+                &state.pg,
+                model,
+                pool_chain,
+                state.master_key.as_deref(),
+            )
+            .await?,
+        );
+        state
+            .routing
+            .cand_cache
+            .insert(cache_key, Arc::clone(&rows))
+            .await;
+        return Ok(rows);
+    }
+    Box::pin(state.routing.cand_cache.try_get_with(cache_key, async {
         okapi_store::channels::candidates_for_model(
             &state.pg,
             model,
             pool_chain,
             state.master_key.as_deref(),
         )
-        .await?,
-    );
-    state
-        .routing
-        .cand_cache
-        .insert(cache_key, Arc::clone(&rows))
-        .await;
-    Ok(rows)
+        .await
+        .map(Arc::new)
+        .map_err(AppError::from)
+    }))
+    .await
+    .map_err(|err| (*err).clone())
 }
 
 /// 按池的选路策略排出 failover 序（只在同一优先级层内排）：时延 / 用量 / 在途数从 Redis 读，

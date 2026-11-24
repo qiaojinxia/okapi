@@ -41,16 +41,7 @@ pub async fn resolve_model_cached(
     state: &AppState,
     name: &str,
 ) -> Result<Arc<Option<okapi_store::channels::ResolvedModel>>, AppError> {
-    if let Some(hit) = state.routing.model_cache.get(name).await {
-        return Ok(hit);
-    }
-    let resolved = Arc::new(okapi_store::channels::resolve_model(&state.pg, name).await?);
-    state
-        .routing
-        .model_cache
-        .insert(name.to_owned(), Arc::clone(&resolved))
-        .await;
-    Ok(resolved)
+    crate::candidates::resolve_model_cached(state, name).await
 }
 
 /// 模型解析 + 修饰符（§4.4 / §11.25）：全名（含别名）直命中优先，未命中再按修饰符语法剥基名重试。

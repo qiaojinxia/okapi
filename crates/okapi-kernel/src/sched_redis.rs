@@ -33,7 +33,7 @@ mod user_limits;
 mod verification;
 mod web_sessions;
 
-pub use self::background_leases::MaintenanceLease;
+pub use self::background_leases::{MaintenanceLease, ReconcileCheckpoint};
 pub use self::channel_keys::{KeyQualitySample, channel_lease_key};
 use self::kpi::KPI_TTL_SECS;
 pub use self::kpi::{KPI_WINDOW_MAX, KpiSecond};

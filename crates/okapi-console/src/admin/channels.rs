@@ -231,7 +231,7 @@ pub async fn create_channel(
         .iter()
         .map(|member| member.pool_code.as_str())
         .collect();
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -396,7 +396,7 @@ pub async fn set_channel_status(
     if !hit {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -465,7 +465,7 @@ pub async fn set_channel_pools(
     let members = normalize_members(&state, req.pools).await?;
     let prev_pools = super::super::audit_snapshots::channel_pools_snapshot(&state.pg, id).await;
     okapi_store::admin::set_channel_pools(&state.pg, id, &members).await?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -729,7 +729,7 @@ pub async fn update_channel(
     if !okapi_store::admin::patch_channel(&state.pg, id, patch).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit_channel_update(
         &state,
         &actor,
@@ -822,7 +822,7 @@ pub async fn delete_channel(
     if !okapi_store::mutate::delete_channel(&state.pg, id).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     let deleted = prev.map(|v| {
         json!({
             "name": v["name"],
@@ -891,7 +891,7 @@ pub async fn rotate_channel_credential(
             return Err(AppError::bad_request().with_param("channel_key_id"));
         }
     };
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,

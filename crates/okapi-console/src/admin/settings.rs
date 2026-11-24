@@ -97,13 +97,13 @@ pub async fn set_setting(
         validate_reporting_timezone(&state, &req.value).await?;
     }
     okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.actor_user_id()).await?;
-    state.invalidate_routing_caches();
-    // settings 热路径缓存按键失效：同进程立即生效（公告发布、限流阈值调整不必等 60s TTL），
-    // 多副本靠 TTL 收敛——与鉴权缓存"本机即时、跨副本 TTL"同一取舍
-    state.settings_cache.invalidate(&req.key).await;
+    // 定向失效该 settings 键（命中 request_policy 时同步清策略缓存），并广播 `"setting:<key>"` 到全集群
+    state.invalidate_setting_cache(&req.key).await;
     if is_timezone && okapi_store::timezone::apply_setting(Some(&req.value)) {
         // 本进程立即生效；别的副本由 routing.invalidate 广播 / 15s 轮询跟上
         state.stats_query_cache.invalidate_all();
+    } else {
+        okapi_engine::sync_setting_runtime(&state, &req.key).await;
     }
     audit(
         &state,

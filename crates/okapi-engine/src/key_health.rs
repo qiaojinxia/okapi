@@ -147,7 +147,7 @@ async fn record_proxy_failure(state: &AppState, proxy: i64, reason: &str, confir
     };
     if tripped {
         // 刚熔断：别让 5s 的候选缓存继续把请求送进这个代理
-        state.invalidate_routing_caches();
+        state.invalidate_cache(crate::state::CacheInvalidation::Channels);
     }
 }
 

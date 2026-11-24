@@ -107,7 +107,7 @@ pub async fn upsert_model_alias(
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Models);
     audit(
         &state,
         &actor,
@@ -136,7 +136,7 @@ pub async fn delete_model_alias(
     let Some(pattern) = pattern else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     };
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Models);
     audit(
         &state,
         &actor,

@@ -30,7 +30,7 @@ pub(super) async fn eligible_candidates(
         fresh || bill.response_parent.is_some(),
     )
     .await
-    .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
+    .map_err(|e| ForwardFailure::app(e, 0, None))?;
     let strategy = Strategy::parse(bill.pool_strategy.as_deref());
     let mut candidates = if bill.pin.is_some() {
         super::super::candidates::queue(&bill.state, Arc::clone(&raw), strategy).await

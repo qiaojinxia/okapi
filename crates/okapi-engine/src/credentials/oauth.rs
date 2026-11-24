@@ -544,7 +544,7 @@ async fn save_refreshed(
     if !saved {
         return replaced_credential(state, key.channel_key_id, expected).await;
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(crate::state::CacheInvalidation::Channels);
     super::health::record(state, key.channel_key_id, None).await;
     Ok(next)
 }
@@ -574,7 +574,7 @@ async fn invalidate_current(
         return replaced_credential(state, key.channel_key_id, expected).await;
     }
     super::pending::clear(state, key.channel_key_id).await;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(crate::state::CacheInvalidation::Channels);
     super::health::record(state, key.channel_key_id, Some(code)).await;
     Err(UpstreamError::Status {
         status: 401,

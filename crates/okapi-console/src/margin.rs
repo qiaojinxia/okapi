@@ -112,8 +112,8 @@ pub async fn lift(
             tracing::error!(error = %err, "margin lift 写入失败");
             AppError::internal()
         })?;
-    // 广播失效本进程与集群内所有数据面副本的 margin_cache
-    state.invalidate_routing_caches();
+    // 定向广播失效本进程与集群内所有数据面副本的 margin_cache
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Margin);
     audit(
         &state,
         &actor,

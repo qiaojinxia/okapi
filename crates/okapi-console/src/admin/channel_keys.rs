@@ -137,7 +137,7 @@ pub async fn add_channel_key(
     else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     };
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -172,7 +172,7 @@ pub async fn delete_channel_key(
             return Err(AppError::new(StatusCode::CONFLICT, "channel_last_key"));
         }
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,
@@ -262,7 +262,7 @@ pub async fn update_channel_key(
             .unwrap_or_default();
         state.sched.clear_channel_key_cooldowns(key_id, &list).await;
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     audit(
         &state,
         &actor,

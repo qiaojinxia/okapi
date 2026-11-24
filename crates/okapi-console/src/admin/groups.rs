@@ -82,7 +82,7 @@ pub async fn upsert_group(
     .await?;
     // 分组的池 / 限额变了，绑定该组的 key 鉴权缓存里还是旧值——与改角色同一动作，全量失效
     state.sched.auth_flush().await;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Pools);
     audit(
         &state,
         &actor,
@@ -259,7 +259,7 @@ pub async fn upsert_pool(
     if legacy_columns_changed {
         state.sched.auth_flush().await;
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Pools);
     audit(
         &state,
         &actor,

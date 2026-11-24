@@ -387,7 +387,7 @@ pub async fn exchange(
         )
         .await?
     };
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     okapi_engine::credentials::health::record(&state, channel_key_id, None).await;
     audit(
         &state,

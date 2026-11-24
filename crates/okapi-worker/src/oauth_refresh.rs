@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
+const CURSOR_TTL_SECS: i64 = 24 * 3600;
+
 pub async fn run(state: AppState, mut stop: tokio::sync::watch::Receiver<bool>) {
     let mut after = 0;
     loop {
@@ -25,17 +27,39 @@ pub async fn run(state: AppState, mut stop: tokio::sync::watch::Receiver<bool>) 
                 ..RefreshPolicy::default()
             }
         });
-        tokio::select! {
-            _ = stop.changed() => return,
-            result = refresh_once(&state, policy, &mut after) => {
-                if let Err(error) = result {
-                    tracing::warn!(error = %error, "OAuth pre-refresh scan failed");
+        let interval = Duration::from_secs(policy.interval_secs.max(1));
+        let round_ttl = crate::maintenance::maintenance_round_ttl_secs(interval);
+        let stopped = crate::maintenance::run_leased(
+            &state.sched,
+            &state.node,
+            "oauth_refresh",
+            crate::maintenance::MAINT_LOCK_TTL_SECS,
+            round_ttl,
+            &mut stop,
+            async {
+                if let Some(remote_after) = state.sched.maint_cursor_get("oauth_refresh").await {
+                    after = remote_after;
                 }
-            }
+                match refresh_once(&state, policy, &mut after).await {
+                    Ok(()) => {
+                        state
+                            .sched
+                            .maint_cursor_set("oauth_refresh", after, CURSOR_TTL_SECS)
+                            .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "OAuth pre-refresh scan failed");
+                    }
+                }
+            },
+        )
+        .await;
+        if stopped {
+            return;
         }
         tokio::select! {
             _ = stop.changed() => return,
-            () = tokio::time::sleep(Duration::from_secs(policy.interval_secs)) => {}
+            () = tokio::time::sleep(interval) => {}
         }
     }
 }

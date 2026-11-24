@@ -125,7 +125,7 @@ pub async fn test_proxy(
     }
     if matches!(outcome, ProbeOutcome::Ok(_)) {
         // 恢复了：让缓存里被熔断滤掉的候选立刻回来
-        state.invalidate_routing_caches();
+        state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     }
     audit(
         &state,

@@ -264,6 +264,16 @@ pub async fn build_state_with_clients(
 /// 把 `settings.ssrf_policy.allow_private` 及扩展运行时设置同步给出站连接（`okapi_providers` 进程级配置）。
 /// 读不到（PG 暂不可用）就沿用上一次的值，不往宽松或严格任一边猜。
 pub async fn sync_ssrf_policy(state: &AppState) {
+    sync_ssrf_only(state).await;
+    for &key in okapi_providers::profiles::RUNTIME_SETTING_KEYS {
+        if let Ok(value) = state.try_setting_cached(key).await {
+            okapi_providers::profiles::apply_runtime_setting(key, value.as_ref().as_ref());
+        }
+    }
+    sync_reporting_timezone(state).await;
+}
+
+async fn sync_ssrf_only(state: &AppState) {
     match state.try_setting_cached("ssrf_policy").await {
         Ok(policy) => {
             let allow = policy
@@ -281,12 +291,19 @@ pub async fn sync_ssrf_policy(state: &AppState) {
             );
         }
     }
-    for &key in okapi_providers::profiles::RUNTIME_SETTING_KEYS {
+}
+
+/// 仅同步单条运行时设置（收到 `setting:<key>` 广播时调用，避免无关设置触发多余 PG 查询）。
+pub async fn sync_setting_runtime(state: &AppState, key: &str) {
+    if key == "ssrf_policy" {
+        sync_ssrf_only(state).await;
+    } else if okapi_providers::profiles::RUNTIME_SETTING_KEYS.contains(&key) {
         if let Ok(value) = state.try_setting_cached(key).await {
             okapi_providers::profiles::apply_runtime_setting(key, value.as_ref().as_ref());
         }
+    } else if key == okapi_store::timezone::SETTING {
+        sync_reporting_timezone(state).await;
     }
-    sync_reporting_timezone(state).await;
 }
 
 /// 后台「统计时区」同步到本进程（CH 查询与 PG 会话时区都读它）。读不到就沿用当前值；
@@ -403,13 +420,28 @@ pub fn spawn_routing_invalidate_subscriber(state: AppState) {
                                     _ = stop.changed() => return,
                                     item = sub.next() => item,
                                 };
-                                if msg.is_none() {
+                                let Some(msg) = msg else {
                                     break;
-                                }
+                                };
+                                let scope = std::str::from_utf8(&msg.payload).map_or(
+                                    state::CacheInvalidation::All,
+                                    state::CacheInvalidation::from_wire,
+                                );
                                 // 只清本地：清完再广播会打环
-                                state.invalidate_routing_caches_local();
-                                sync_ssrf_policy(&state).await;
-                                tracing::debug!("路由缓存已按广播失效");
+                                state.invalidate_cache_local(&scope).await;
+                                match &scope {
+                                    state::CacheInvalidation::All => {
+                                        sync_ssrf_policy(&state).await;
+                                    }
+                                    state::CacheInvalidation::Setting(key) => {
+                                        sync_setting_runtime(&state, key).await;
+                                    }
+                                    state::CacheInvalidation::Channels
+                                    | state::CacheInvalidation::Models
+                                    | state::CacheInvalidation::Pools
+                                    | state::CacheInvalidation::Margin => {}
+                                }
+                                tracing::debug!(?scope, "路由缓存已按作用域失效");
                             }
                             let ran_for = started.elapsed();
                             backoff = next_nats_backoff(backoff, ran_for);

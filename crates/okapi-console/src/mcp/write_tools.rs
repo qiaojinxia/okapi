@@ -79,7 +79,7 @@ pub(super) async fn channel_create(
         state.master_key.as_deref(),
     )
     .await?;
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     mcp_audit(
         state,
         key,
@@ -116,7 +116,7 @@ pub(super) async fn channel_toggle(
             okapi_api::codes::NOT_FOUND,
         ));
     }
-    state.invalidate_routing_caches();
+    state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
     mcp_audit(
         state,
         key,

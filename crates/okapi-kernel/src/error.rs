@@ -7,7 +7,7 @@ use okapi_store::StoreError;
 use uuid::Uuid;
 
 /// gateway 统一错误：只携带 error_code（i18n 红线），状态码映射集中于此。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AppError {
     pub status: StatusCode,
     pub code: String,
