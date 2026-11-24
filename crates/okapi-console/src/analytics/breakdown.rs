@@ -352,7 +352,7 @@ pub async fn breakdown(
         async {
             match &prev_sql {
                 Some(sql) => super::super::stats_cache::query(&state, sql, &params, q.cached).await,
-                None => Ok(Vec::new()),
+                None => Ok(std::sync::Arc::new(Vec::new())),
             }
         },
     )?;

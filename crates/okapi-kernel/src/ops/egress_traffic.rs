@@ -14,14 +14,21 @@ const FLUSH_EVERY: Duration = Duration::from_mins(1);
 const INDEX_REFRESH: Duration = Duration::from_mins(1);
 
 pub fn spawn(cfg: &Config) {
-    let Some(url) = &cfg.clickhouse_url else {
-        return;
-    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let _ = spawn_with_stop(cfg, rx);
+}
+
+/// 启动支持优雅停机末次刷盘的出口代理流量落库任务（收到 `stop` 信号后立刻刷出最后一分钟缓冲）。
+pub fn spawn_with_stop(
+    cfg: &Config,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let url = cfg.clickhouse_url.as_ref()?;
     let ch = match okapi_store::ChClient::new(url, "okapi") {
         Ok(ch) => ch,
         Err(e) => {
             tracing::warn!(error = %e, "egress traffic flusher disabled");
-            return;
+            return None;
         }
     };
     // 独立的小连接池：一分钟读一次代理表，不占业务池
@@ -32,18 +39,24 @@ pub fn spawn(cfg: &Config) {
         Ok(pg) => pg,
         Err(e) => {
             tracing::warn!(error = %e, "egress traffic flusher disabled");
-            return;
+            return None;
         }
     };
     let mut flusher = Flusher::new(pg, ch, cfg.master_key.clone(), cfg.node.clone());
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut tick = tokio::time::interval(FLUSH_EVERY);
         tick.tick().await;
         loop {
-            tick.tick().await;
+            let shutting_down = tokio::select! {
+                _ = stop.changed() => true,
+                _ = tick.tick() => false,
+            };
             super::guarded("egress_traffic", flusher.flush()).await;
+            if shutting_down || *stop.borrow() {
+                return;
+            }
         }
-    });
+    }))
 }
 
 pub struct Flusher {
@@ -103,6 +116,9 @@ impl Flusher {
             .filter_map(|(url, sample)| self.index.get(url).map(|id| (url.as_str(), *sample, *id)))
             .collect();
         let rows = rows(&known, minute, &self.node);
+        if rows.is_empty() {
+            return;
+        }
         let token = uuid::Uuid::new_v4().to_string();
         if let Err(e) = egress_traffic::insert(&self.ch, &rows, &token).await {
             tracing::warn!(error = %e, "egress traffic flush failed; retrying next minute");

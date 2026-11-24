@@ -254,9 +254,9 @@ impl CubeQuery {
         state: &AppState,
         agg: &str,
         scope: &Scope,
-    ) -> Result<Vec<Value>, AppError> {
+    ) -> Result<std::sync::Arc<Vec<Value>>, AppError> {
         if !self.compares() {
-            return Ok(Vec::new());
+            return Ok(std::sync::Arc::new(Vec::new()));
         }
         let sql = format!(
             "SELECT {agg} FROM {} WHERE {}{}",

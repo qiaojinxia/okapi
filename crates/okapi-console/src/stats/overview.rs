@@ -38,10 +38,11 @@ pub(super) async fn overview_sources(
         format!("SELECT {OVERVIEW_COLS} FROM (SELECT * FROM mv_user_day WHERE {predicate}) AS u");
     let source = super::super::token_details::with_provenance("", "mv_user_day", predicate);
     let sources_sql = format!("SELECT * FROM {source}");
-    let (mut rows, sources) = tokio::try_join!(
+    let (rows, sources) = tokio::try_join!(
         super::super::stats_cache::query(state, &totals_sql, &[], cached),
         super::super::stats_cache::query(state, &sources_sql, &[], cached),
     )?;
+    let mut rows = std::sync::Arc::unwrap_or_clone(rows);
     let empty = json!({});
     if let Some(row) = rows.first_mut() {
         let source = sources.first().unwrap_or(&empty);

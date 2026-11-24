@@ -50,37 +50,77 @@ impl Role {
     }
 }
 
+const OPS_TELEMETRY_FLUSH_CAP: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 进程级运维遥测（告警日志与出口代理流量）后台任务句柄：优雅停机时触发最后一次刷盘并限时等待。
+struct OpsTelemetry {
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl OpsTelemetry {
+    async fn shutdown(self) {
+        self.stop_tx.send_replace(true);
+        let mut handles = self.handles;
+        let deadline = tokio::time::Instant::now() + OPS_TELEMETRY_FLUSH_CAP;
+        for handle in &mut handles {
+            if tokio::time::timeout_at(deadline, &mut *handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+            }
+        }
+    }
+}
+
 /// 服务角色把告警日志汇总到 Redis（§11.43），并启动出口代理流量的落库。独立连接：
 /// 日志汇总不该和业务共用一条连接排队；连不上就只留本进程缓冲。迁移等一次性命令不启动。
-fn start_ops_log(role: &Role, cfg: &Config) {
+fn start_ops_log(role: &Role, cfg: &Config) -> Option<OpsTelemetry> {
     let role = match role {
         Role::Gateway => "gateway",
         Role::Console => "console",
         Role::Worker => "worker",
         Role::All => "all",
-        Role::Migrate { .. } | Role::SealCredentials => return,
+        Role::Migrate { .. } | Role::SealCredentials => return None,
     };
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let mut handles = Vec::new();
     // 出口代理流量同样每个服务进程各自落库
-    okapi::ops::egress_traffic::spawn(cfg);
+    if let Some(handle) = okapi::ops::egress_traffic::spawn_with_stop(cfg, stop_rx.clone()) {
+        handles.push(handle);
+    }
     // 整机重启时 Redis 可能还在加载数据集（LOADING）：连不上就退避重试，不能一次失败就停到下次重启。
-    // 等待期间告警照常进本进程缓冲，接上后补写。
+    // 等待期间告警照常进本进程缓冲，接上后补写；收到停机信号立即终止等待或触发末次刷盘。
     let (redis_url, node) = (cfg.redis_url.clone(), cfg.node.clone());
-    tokio::spawn(async move {
+    let mut log_stop = stop_rx;
+    handles.push(tokio::spawn(async move {
         let mut backoff = std::time::Duration::from_secs(2);
         loop {
+            if *log_stop.borrow() {
+                return;
+            }
             match okapi_store::connect_redis(&redis_url).await {
                 Ok(redis) => {
-                    okapi::ops::logbuf::spawn_flusher(redis, &node, role);
+                    if let Some(flusher) =
+                        okapi::ops::logbuf::spawn_flusher_with_stop(redis, &node, role, log_stop)
+                    {
+                        let _ = flusher.await;
+                    }
                     return;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, retry_in_secs = backoff.as_secs(), "ops log flusher waiting for Redis");
                 }
             }
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = log_stop.changed() => return,
+                () = tokio::time::sleep(backoff) => {}
+            }
             backoff = (backoff * 2).min(std::time::Duration::from_mins(1));
         }
-    });
+    }));
+    Some(OpsTelemetry { stop_tx, handles })
 }
 
 #[tokio::main]
@@ -98,9 +138,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let cfg = Config::from_env(cli.role.needs_redis())?;
-    start_ops_log(&cli.role, &cfg);
+    let ops_telemetry = start_ops_log(&cli.role, &cfg);
 
-    match cli.role {
+    let outcome = match cli.role {
         Role::SealCredentials => seal_credentials(&cfg).await,
         Role::Gateway => gateway::run(cfg).await,
         Role::Worker => worker::run(cfg).await,
@@ -155,30 +195,35 @@ async fn main() -> anyhow::Result<()> {
                 for w in &stats.skipped {
                     tracing::warn!("{w}");
                 }
-                return Ok(());
+                Ok(())
+            } else {
+                let stats = migrate::run_newapi(
+                    &pg,
+                    ledger.as_ref(),
+                    &dir,
+                    dry_run,
+                    cfg.master_key.as_deref(),
+                )
+                .await?;
+                tracing::info!(
+                    users = stats.users,
+                    users_credited = stats.users_credited,
+                    keys = stats.keys,
+                    channels = stats.channels,
+                    dry_run,
+                    "迁移完成"
+                );
+                for w in &stats.skipped {
+                    tracing::warn!("{w}");
+                }
+                Ok(())
             }
-            let stats = migrate::run_newapi(
-                &pg,
-                ledger.as_ref(),
-                &dir,
-                dry_run,
-                cfg.master_key.as_deref(),
-            )
-            .await?;
-            tracing::info!(
-                users = stats.users,
-                users_credited = stats.users_credited,
-                keys = stats.keys,
-                channels = stats.channels,
-                dry_run,
-                "迁移完成"
-            );
-            for w in &stats.skipped {
-                tracing::warn!("{w}");
-            }
-            Ok(())
         }
+    };
+    if let Some(telemetry) = ops_telemetry {
+        telemetry.shutdown().await;
     }
+    outcome
 }
 
 async fn run_console(cfg: Config) -> anyhow::Result<()> {

@@ -33,17 +33,11 @@ async fn load(
     cache: &QueryCache,
     key: String,
     fetch: impl Future<Output = Result<Vec<Value>, AppError>>,
-) -> Result<Vec<Value>, AppError> {
+) -> Result<Arc<Vec<Value>>, AppError> {
     cache
         .try_get_with(key, async { fetch.await.map(Arc::new) })
         .await
-        .map(|rows| (*rows).clone())
-        .map_err(|err| AppError {
-            status: err.status,
-            code: err.code.clone(),
-            param: err.param.clone(),
-            retry_after_secs: err.retry_after_secs,
-        })
+        .map_err(|err| (*err).clone())
 }
 
 /// 规划成本高的大 SQL（完整分析源、测量覆盖）：ClickHouse 24.8 光分析规划就要单核 ~2s，
@@ -57,7 +51,7 @@ pub(super) async fn query(
     sql: &str,
     params: &[(&str, &str)],
     cached: bool,
-) -> Result<Vec<Value>, AppError> {
+) -> Result<Arc<Vec<Value>>, AppError> {
     let ch = state.ch.as_ref().ok_or_else(|| {
         AppError::new(
             axum::http::StatusCode::NOT_IMPLEMENTED,
@@ -80,7 +74,7 @@ pub(super) async fn query(
         // Explicit refresh must also discard an older dashboard entry so navigating
         // back immediately cannot resurrect data that the user just refreshed.
         state.stats_query_cache.invalidate(&key(sql, params)).await;
-        fetch.await
+        fetch.await.map(Arc::new)
     }
 }
 
@@ -102,8 +96,10 @@ mod tests {
             })
         };
         let (a, b, c) = tokio::join!(request(), request(), request());
-        assert_eq!(a.unwrap(), b.unwrap());
-        assert_eq!(c.unwrap(), vec![json!({"requests": 12})]);
+        let (a, b, c) = (a.unwrap(), b.unwrap(), c.unwrap());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &c));
+        assert_eq!(c.as_slice(), &[json!({"requests": 12})]);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
@@ -120,8 +116,9 @@ mod tests {
         assert_eq!(
             load(&cache, "failed".to_owned(), async { Ok(vec![json!(1)]) })
                 .await
-                .unwrap(),
-            vec![json!(1)]
+                .unwrap()
+                .as_slice(),
+            &[json!(1)]
         );
     }
 

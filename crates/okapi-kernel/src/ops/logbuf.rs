@@ -224,44 +224,62 @@ impl<S: Subscriber> Layer<S> for OpsLogLayer {
 
 /// 启动写 Redis 的后台任务（每进程一次；`all` 模式三个角色共用）。
 pub fn spawn_flusher(redis: fred::clients::Client, node: &str, role: &str) {
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let _ = spawn_flusher_with_stop(redis, node, role, rx);
+}
+
+/// 启动支持优雅停机末次刷盘的告警日志写入任务（收到 `stop` 信号后立即把剩余缓冲刷入 Redis 再退出）。
+pub fn spawn_flusher_with_stop(
+    redis: fred::clients::Client,
+    node: &str,
+    role: &str,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
     if ORIGIN.set((node.to_owned(), role.to_owned())).is_err() {
-        return;
+        return None;
     }
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut failures = 0u32;
         loop {
-            tick.tick().await;
-            super::guarded("ops_logbuf", async {
-                let batch = take_pending();
-                if batch.is_empty() {
-                    return;
-                }
-                if let Err(e) = write(&redis, &batch).await {
-                    // Redis 故障正是最需要告警的时候：整批放回待写队列，恢复后补写，不随这一次失败丢掉
-                    tracing::debug!(error = %e, requeued = batch.len(), "ops log flush failed");
-                    requeue(batch);
-                    failures = failures.saturating_add(1);
-                    if failures == FLUSH_FAILURES_BEFORE_STDERR {
-                        eprintln!(
-                            "{} WARN okapi::ops::logbuf: ops log flush to Redis failing ({failures} attempts); alerts are buffered locally only: {e}",
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                        );
-                    }
-                } else {
-                    if failures >= FLUSH_FAILURES_BEFORE_STDERR {
-                        eprintln!(
-                            "{} INFO okapi::ops::logbuf: ops log flush to Redis recovered after {failures} failed attempts",
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                        );
-                    }
-                    failures = 0;
-                }
-            })
-            .await;
+            let shutting_down = tokio::select! {
+                _ = stop.changed() => true,
+                _ = tick.tick() => false,
+            };
+            super::guarded("ops_logbuf", flush_pending(&redis, &mut failures)).await;
+            if shutting_down || *stop.borrow() {
+                return;
+            }
         }
-    });
+    }))
+}
+
+async fn flush_pending(redis: &fred::clients::Client, failures: &mut u32) {
+    let batch = take_pending();
+    if batch.is_empty() {
+        return;
+    }
+    if let Err(e) = write(redis, &batch).await {
+        // Redis 故障正是最需要告警的时候：整批放回待写队列，恢复后补写，不随这一次失败丢掉
+        tracing::debug!(error = %e, requeued = batch.len(), "ops log flush failed");
+        requeue(batch);
+        *failures = failures.saturating_add(1);
+        if *failures == FLUSH_FAILURES_BEFORE_STDERR {
+            eprintln!(
+                "{} WARN okapi::ops::logbuf: ops log flush to Redis failing ({failures} attempts); alerts are buffered locally only: {e}",
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            );
+        }
+    } else {
+        if *failures >= FLUSH_FAILURES_BEFORE_STDERR {
+            eprintln!(
+                "{} INFO okapi::ops::logbuf: ops log flush to Redis recovered after {failures} failed attempts",
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            );
+        }
+        *failures = 0;
+    }
 }
 
 async fn write(redis: &fred::clients::Client, batch: &[Entry]) -> anyhow::Result<()> {

@@ -12,13 +12,17 @@
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
 use fred::types::{Expiration, SetOptions};
+use futures::StreamExt as _;
 use okapi_store::CachedScript;
 use serde_json::Value;
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const DEFAULT_MIN_INTERVAL_SECS: i64 = 300;
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const DISPATCH_CONCURRENCY: usize = 8;
+const EMAIL_RECIPIENT_CONCURRENCY: usize = 4;
 
 #[derive(Clone)]
 pub struct Notifier {
@@ -57,87 +61,94 @@ impl Notifier {
         let Some(Value::Array(channels)) = channels else {
             return;
         };
-        for (idx, ch) in channels.iter().enumerate() {
-            let kind = ch.get("type").and_then(Value::as_str).unwrap_or("");
-            if kind != "webhook" && kind != "email" {
-                continue;
-            }
-            let subscribed = ch
-                .get("events")
-                .and_then(Value::as_array)
-                .is_some_and(|evs| evs.iter().any(|e| e.as_str() == Some(event)));
-            if !subscribed {
-                continue;
-            }
-            let interval = ch
-                .get("min_interval_secs")
-                .and_then(Value::as_i64)
-                .filter(|v| *v > 0)
-                .unwrap_or(DEFAULT_MIN_INTERVAL_SECS);
-            let claim = uuid::Uuid::new_v4().to_string();
-            if !self.claim(idx, event, &claim).await {
-                continue;
-            }
-            let payload = notification_payload(ch, event, payload);
-            let at = chrono::Utc::now().to_rfc3339();
-            if kind == "email" {
-                let success = tokio::time::timeout(
-                    Duration::from_mins(1),
-                    self.send_email(ch, event, &at, &payload),
-                )
-                .await
-                .unwrap_or(false);
-                self.finish_claim(idx, event, &claim, interval, success)
-                    .await;
-                continue;
-            }
-            let Some(url) = ch.get("url").and_then(Value::as_str) else {
-                self.finish_claim(idx, event, &claim, interval, false).await;
-                continue;
-            };
-            if let Err(error) = okapi_kernel::ssrf::validate_url(&self.pg, url).await {
-                tracing::error!(event, channel=idx, code = %error.code, "notification URL rejected; configure ssrf_policy for private deployments");
-                if self.mute_acquire(idx, "ssrf_rejected_audit", 86400).await {
-                    let detail = serde_json::json!({"channel_index":idx,"event":event,"error_code":error.code,"reason":error.param});
-                    if let Err(error) = okapi_store::admin::record_audit(
-                        &self.pg,
-                        "worker",
-                        "notification.url_rejected",
-                        &idx.to_string(),
-                        detail,
-                    )
-                    .await
-                    {
-                        tracing::error!(%error,"blocked notification audit could not be persisted");
-                    }
-                }
-                self.finish_claim(idx, event, &claim, interval, false).await;
-                continue;
-            }
-            let body = serde_json::json!({"event":event,"at":at,"payload":payload}).to_string();
-            let mut request = self
-                .http
-                .post(url)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .timeout(SEND_TIMEOUT);
-            request = signed_webhook(request, ch, &at, &body);
-            let success = match request.body(body).send().await {
-                Ok(resp) if resp.status().is_success() => true,
-                Ok(resp) => {
-                    tracing::warn!(event,channel=idx,status=%resp.status(),"notification webhook rejected");
-                    false
-                }
-                Err(_) => {
-                    tracing::warn!(event, channel = idx, "notification webhook failed");
-                    false
-                }
-            };
-            self.finish_claim(idx, event, &claim, interval, success)
-                .await;
-        }
+        // 并发扇出各订阅通道，避免单个超时 SMTP（60s）或失联 Webhook 阻塞其他告警通道。
+        futures::stream::iter(channels.into_iter().enumerate())
+            .for_each_concurrent(DISPATCH_CONCURRENCY, |(idx, ch)| async move {
+                self.dispatch_channel(idx, &ch, event, payload).await;
+            })
+            .await;
     }
 
-    /// email 通道：`to` 数组逐个投递（一封一收件人，收件人互不可见）；
+    async fn dispatch_channel(&self, idx: usize, ch: &Value, event: &str, payload: &Value) {
+        let kind = ch.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind != "webhook" && kind != "email" {
+            return;
+        }
+        let subscribed = ch
+            .get("events")
+            .and_then(Value::as_array)
+            .is_some_and(|evs| evs.iter().any(|e| e.as_str() == Some(event)));
+        if !subscribed {
+            return;
+        }
+        let interval = ch
+            .get("min_interval_secs")
+            .and_then(Value::as_i64)
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MIN_INTERVAL_SECS);
+        let claim = uuid::Uuid::new_v4().to_string();
+        if !self.claim(idx, event, &claim).await {
+            return;
+        }
+        let payload = notification_payload(ch, event, payload);
+        let at = chrono::Utc::now().to_rfc3339();
+        if kind == "email" {
+            let success = tokio::time::timeout(
+                Duration::from_mins(1),
+                self.send_email(ch, event, &at, &payload),
+            )
+            .await
+            .unwrap_or(false);
+            self.finish_claim(idx, event, &claim, interval, success)
+                .await;
+            return;
+        }
+        let Some(url) = ch.get("url").and_then(Value::as_str) else {
+            self.finish_claim(idx, event, &claim, interval, false).await;
+            return;
+        };
+        if let Err(error) = okapi_kernel::ssrf::validate_url(&self.pg, url).await {
+            tracing::error!(event, channel=idx, code = %error.code, "notification URL rejected; configure ssrf_policy for private deployments");
+            if self.mute_acquire(idx, "ssrf_rejected_audit", 86400).await {
+                let detail = serde_json::json!({"channel_index":idx,"event":event,"error_code":error.code,"reason":error.param});
+                if let Err(error) = okapi_store::admin::record_audit(
+                    &self.pg,
+                    "worker",
+                    "notification.url_rejected",
+                    &idx.to_string(),
+                    detail,
+                )
+                .await
+                {
+                    tracing::error!(%error,"blocked notification audit could not be persisted");
+                }
+            }
+            self.finish_claim(idx, event, &claim, interval, false).await;
+            return;
+        }
+        let body = serde_json::json!({"event":event,"at":at,"payload":payload}).to_string();
+        let mut request = self
+            .http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .timeout(SEND_TIMEOUT);
+        request = signed_webhook(request, ch, &at, &body);
+        let success = match request.body(body).send().await {
+            Ok(resp) if resp.status().is_success() => true,
+            Ok(resp) => {
+                tracing::warn!(event,channel=idx,status=%resp.status(),"notification webhook rejected");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(event, channel = idx, "notification webhook failed");
+                false
+            }
+        };
+        self.finish_claim(idx, event, &claim, interval, success)
+            .await;
+    }
+
+    /// email 通道：`to` 数组逐个投递（一封一收件人，收件人互不可见，有界并发）；
     /// `lang` 选模板语言（缺省 en）；SMTP 未配置只打一条日志。
     async fn send_email(&self, ch: &Value, event: &str, at: &str, payload: &Value) -> bool {
         let recipients: Vec<&str> = ch
@@ -177,16 +188,21 @@ impl Notifier {
         }
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "Okapi".to_owned());
-        let mut success = true;
-        for to in recipients {
-            let mail =
-                okapi_kernel::mail::templates::event_notice(lang, &site, to, event, at, payload);
-            if let Err(err) = mailer.send(mail).await {
-                success = false;
-                tracing::warn!(event, to, error = %err, "通知邮件发送失败");
-            }
-        }
-        success
+        let all_ok = AtomicBool::new(true);
+        let mailer = &mailer;
+        let site = &site;
+        let all_ok_ref = &all_ok;
+        futures::stream::iter(recipients)
+            .for_each_concurrent(EMAIL_RECIPIENT_CONCURRENCY, |to| async move {
+                let mail =
+                    okapi_kernel::mail::templates::event_notice(lang, site, to, event, at, payload);
+                if let Err(err) = mailer.send(mail).await {
+                    all_ok_ref.store(false, Ordering::Relaxed);
+                    tracing::warn!(event, to, error = %err, "通知邮件发送失败");
+                }
+            })
+            .await;
+        all_ok.load(Ordering::Relaxed)
     }
 
     async fn claim(&self, idx: usize, event: &str, owner: &str) -> bool {

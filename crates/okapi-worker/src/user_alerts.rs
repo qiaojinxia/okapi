@@ -7,12 +7,53 @@ use chrono::{DateTime, Utc};
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
 use fred::types::{Expiration, SetOptions};
+use futures::StreamExt as _;
+use okapi_kernel::mail::Mailer;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const EMAIL_SEND_TIMEOUT: Duration = Duration::from_secs(25);
+const USER_ALERT_CONCURRENCY: usize = 16;
+
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+/// 轮次内复用的邮件发送上下文，避免对最多 300 个用户重复查 PG `settings.smtp` 与 `site_name`。
+struct EmailContext {
+    mailer: Option<Mailer>,
+    site_name: String,
+}
+
+impl EmailContext {
+    async fn load(pg: &PgPool) -> Self {
+        let mailer = Mailer::from_pg(pg).await.ok();
+        let site_name = if mailer.is_some() {
+            sqlx::query_scalar::<_, String>(
+                "SELECT value #>> '{}' FROM settings WHERE key = 'site_name'",
+            )
+            .fetch_optional(pg)
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Okapi".to_owned())
+        } else {
+            "Okapi".to_owned()
+        };
+        Self { mailer, site_name }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct UserAlertReport {
@@ -59,14 +100,12 @@ struct Target<'a> {
     min_interval_secs: i32,
 }
 
-/// 扫描一轮用户低余额与即将到期的 API key，并按用户偏好派发通知。
+/// 扫描一轮用户低余额与即将到期的 API key，并按用户偏好有界并发派发通知。
 pub async fn evaluate_and_notify(pg: &PgPool, redis: &Client) -> anyhow::Result<UserAlertReport> {
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default();
-    let low_balance_sent = eval_low_balance(pg, redis, &http).await?;
-    let key_expiry_sent = eval_expiring_keys(pg, redis, &http).await?;
+    let http = shared_http_client();
+    let email_ctx = tokio::sync::OnceCell::new();
+    let low_balance_sent = eval_low_balance(pg, redis, http, &email_ctx).await?;
+    let key_expiry_sent = eval_expiring_keys(pg, redis, http, &email_ctx).await?;
     Ok(UserAlertReport {
         low_balance_sent,
         key_expiry_sent,
@@ -77,6 +116,7 @@ async fn eval_low_balance(
     pg: &PgPool,
     redis: &Client,
     http: &reqwest::Client,
+    email_ctx: &tokio::sync::OnceCell<EmailContext>,
 ) -> anyhow::Result<usize> {
     let rows = sqlx::query_as::<_, LowBalanceRow>(
         r"SELECT u.id AS user_id,
@@ -100,26 +140,38 @@ async fn eval_low_balance(
     .fetch_all(pg)
     .await?;
 
-    let mut sent = 0;
-    for r in rows {
-        let target = Target {
-            user_id: r.user_id,
-            email: r.email.as_deref(),
-            language: &r.language,
-            email_enabled: r.email_enabled,
-            webhook_url: r.webhook_url.as_deref(),
-            webhook_secret: r.webhook_secret.as_deref(),
-            min_interval_secs: r.min_interval_secs,
-        };
-        let payload = json!({
-            "user_id": r.user_id,
-            "balance_micro": r.balance_micro,
-            "threshold_micro": r.threshold_micro,
-        });
-        if deliver_once(pg, redis, http, &target, "user_balance_low", &payload).await {
-            sent += 1;
-        }
-    }
+    let sent = futures::stream::iter(rows)
+        .map(|r| async move {
+            let target = Target {
+                user_id: r.user_id,
+                email: r.email.as_deref(),
+                language: &r.language,
+                email_enabled: r.email_enabled,
+                webhook_url: r.webhook_url.as_deref(),
+                webhook_secret: r.webhook_secret.as_deref(),
+                min_interval_secs: r.min_interval_secs,
+            };
+            let payload = json!({
+                "user_id": r.user_id,
+                "balance_micro": r.balance_micro,
+                "threshold_micro": r.threshold_micro,
+            });
+            usize::from(
+                deliver_once(
+                    pg,
+                    redis,
+                    http,
+                    email_ctx,
+                    &target,
+                    "user_balance_low",
+                    &payload,
+                )
+                .await,
+            )
+        })
+        .buffer_unordered(USER_ALERT_CONCURRENCY)
+        .fold(0usize, |acc, n| async move { acc + n })
+        .await;
     Ok(sent)
 }
 
@@ -127,6 +179,7 @@ async fn eval_expiring_keys(
     pg: &PgPool,
     redis: &Client,
     http: &reqwest::Client,
+    email_ctx: &tokio::sync::OnceCell<EmailContext>,
 ) -> anyhow::Result<usize> {
     let rows = sqlx::query_as::<_, ExpiringKeyRow>(
         r"SELECT k.user_id,
@@ -162,40 +215,52 @@ async fn eval_expiring_keys(
         grouped.entry(row.user_id).or_default().push(row);
     }
 
-    let mut sent = 0;
-    for (user_id, items) in grouped {
-        let Some(first) = items.first() else {
-            continue;
-        };
-        let target = Target {
-            user_id,
-            email: first.email.as_deref(),
-            language: &first.language,
-            email_enabled: first.email_enabled,
-            webhook_url: first.webhook_url.as_deref(),
-            webhook_secret: first.webhook_secret.as_deref(),
-            min_interval_secs: first.min_interval_secs,
-        };
-        let keys: Vec<Value> = items
-            .iter()
-            .map(|k| {
-                json!({
-                    "key_id": k.key_id,
-                    "name": k.key_name,
-                    "key_prefix": k.key_prefix,
-                    "expires_at": k.expires_at.to_rfc3339(),
+    let sent = futures::stream::iter(grouped)
+        .map(|(user_id, items)| async move {
+            let Some(first) = items.first() else {
+                return 0usize;
+            };
+            let target = Target {
+                user_id,
+                email: first.email.as_deref(),
+                language: &first.language,
+                email_enabled: first.email_enabled,
+                webhook_url: first.webhook_url.as_deref(),
+                webhook_secret: first.webhook_secret.as_deref(),
+                min_interval_secs: first.min_interval_secs,
+            };
+            let keys: Vec<Value> = items
+                .iter()
+                .map(|k| {
+                    json!({
+                        "key_id": k.key_id,
+                        "name": k.key_name,
+                        "key_prefix": k.key_prefix,
+                        "expires_at": k.expires_at.to_rfc3339(),
+                    })
                 })
-            })
-            .collect();
-        let payload = json!({
-            "user_id": user_id,
-            "warn_days": first.warn_days,
-            "keys": keys,
-        });
-        if deliver_once(pg, redis, http, &target, "user_key_expiring", &payload).await {
-            sent += 1;
-        }
-    }
+                .collect();
+            let payload = json!({
+                "user_id": user_id,
+                "warn_days": first.warn_days,
+                "keys": keys,
+            });
+            usize::from(
+                deliver_once(
+                    pg,
+                    redis,
+                    http,
+                    email_ctx,
+                    &target,
+                    "user_key_expiring",
+                    &payload,
+                )
+                .await,
+            )
+        })
+        .buffer_unordered(USER_ALERT_CONCURRENCY)
+        .fold(0usize, |acc, n| async move { acc + n })
+        .await;
     Ok(sent)
 }
 
@@ -203,6 +268,7 @@ async fn deliver_once(
     pg: &PgPool,
     redis: &Client,
     http: &reqwest::Client,
+    email_ctx: &tokio::sync::OnceCell<EmailContext>,
     target: &Target<'_>,
     event: &str,
     payload: &Value,
@@ -225,18 +291,26 @@ async fn deliver_once(
     }
 
     let at = Utc::now().to_rfc3339();
-    let mut delivered = false;
-    if let Some(url) = target.webhook_url.filter(|u| !u.is_empty())
-        && send_webhook(pg, http, url, target.webhook_secret, event, &at, payload).await
-    {
-        delivered = true;
-    }
-    if target.email_enabled
-        && let Some(email) = target.email.filter(|e| !e.trim().is_empty())
-        && send_email(pg, email, target.language, event, &at, payload).await
-    {
-        delivered = true;
-    }
+    let webhook_fut = async {
+        match target.webhook_url.filter(|u| !u.is_empty()) {
+            Some(url) => {
+                send_webhook(pg, http, url, target.webhook_secret, event, &at, payload).await
+            }
+            None => false,
+        }
+    };
+    let email_fut = async {
+        if target.email_enabled
+            && let Some(email) = target.email.filter(|e| !e.trim().is_empty())
+        {
+            let ctx = email_ctx.get_or_init(|| EmailContext::load(pg)).await;
+            send_email(ctx, email, target.language, event, &at, payload).await
+        } else {
+            false
+        }
+    };
+    let (webhook_ok, email_ok) = tokio::join!(webhook_fut, email_fut);
+    let delivered = webhook_ok || email_ok;
 
     if !delivered {
         let _: Result<i64, _> = redis.del(&mute_key).await;
@@ -288,31 +362,33 @@ async fn send_webhook(
 }
 
 async fn send_email(
-    pg: &PgPool,
+    ctx: &EmailContext,
     to: &str,
     language: &str,
     event: &str,
     at: &str,
     payload: &Value,
 ) -> bool {
-    let Ok(mailer) = okapi_kernel::mail::Mailer::from_pg(pg).await else {
+    let Some(mailer) = ctx.mailer.as_ref() else {
         return false;
     };
-    let site = sqlx::query_scalar::<_, String>(
-        "SELECT value #>> '{}' FROM settings WHERE key = 'site_name'",
-    )
-    .fetch_optional(pg)
-    .await
-    .ok()
-    .flatten()
-    .filter(|s| !s.trim().is_empty())
-    .unwrap_or_else(|| "Okapi".to_owned());
     let lang = okapi_kernel::mail::templates::Lang::resolve(Some(language), None);
-    let mail = okapi_kernel::mail::templates::event_notice(lang, &site, to, event, at, payload);
-    match mailer.send(mail).await {
-        Ok(()) => true,
-        Err(err) => {
+    let mail = okapi_kernel::mail::templates::event_notice(
+        lang,
+        &ctx.site_name,
+        to,
+        event,
+        at,
+        payload,
+    );
+    match tokio::time::timeout(EMAIL_SEND_TIMEOUT, mailer.send(mail)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(err)) => {
             tracing::warn!(event, to, error = %err, "user alert email failed");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(event, to, "user alert email timed out");
             false
         }
     }
