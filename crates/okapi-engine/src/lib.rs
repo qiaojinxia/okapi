@@ -225,6 +225,10 @@ pub async fn build_state_with_clients(
                 .max_capacity(256)
                 .time_to_live(Duration::from_secs(5))
                 .build(),
+            active_models_cache: moka::future::Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_mins(1))
+                .build(),
         },
         health: state::HealthMarks {
             key_failures: moka::future::Cache::builder()

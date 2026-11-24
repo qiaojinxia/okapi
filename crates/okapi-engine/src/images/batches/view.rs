@@ -225,23 +225,20 @@ pub async fn models(State(state): State<AppState>, headers: HeaderMap) -> Respon
         if !enabled(&state).await {
             return Err(not_found());
         }
-        let names = okapi_store::pricing::list_active_models(&state.pg).await?;
+        let cards = state.active_model_cards().await?;
+        let pool_chain = key.pool_chain();
         let mut data = Vec::new();
-        for name in names {
-            if !key.allows_model(&name)
-                || super::super::prepare_model(&state, &key, &name, 1)
+        for card in cards.iter() {
+            let name = card.model_name.as_str();
+            if !key.allows_model(name)
+                || super::super::prepare_model(&state, &key, name, 1)
                     .await
                     .is_err()
             {
                 continue;
             }
-            let rows = okapi_store::channels::candidates_for_model(
-                &state.pg,
-                &name,
-                &key.pool_chain(),
-                state.master_key.as_deref(),
-            )
-            .await?;
+            let rows =
+                crate::candidates::cached_candidates(&state, name, &pool_chain, false).await?;
             let providers: std::collections::BTreeSet<_> = rows
                 .iter()
                 .filter(|c| super::binding::eligible(c, None))

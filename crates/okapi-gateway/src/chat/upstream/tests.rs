@@ -63,6 +63,7 @@ fn test_state() -> crate::state::AppState {
             margin_cache: moka::future::Cache::builder().max_capacity(1).build(),
             request_policy: moka::future::Cache::builder().max_capacity(1).build(),
             pool_policies: moka::future::Cache::builder().max_capacity(4).build(),
+            active_models_cache: moka::future::Cache::builder().max_capacity(1).build(),
         },
         health: crate::state::HealthMarks {
             key_failures: moka::future::Cache::builder().max_capacity(4).build(),

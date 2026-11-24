@@ -56,7 +56,7 @@ pub(crate) async fn authenticate(
         okapi_kernel::metrics::global().record_auth_cache(false);
         let mut resolved = None;
         for _ in 0..3 {
-            let version = state.sched.auth_version().await;
+            let version = state.sched.auth_version(&cache_key).await;
             let found =
                 okapi_store::auth::find_user_session_actor(&state.pg, user_id, hash.clone())
                     .await?;
@@ -64,7 +64,7 @@ pub(crate) async fn authenticate(
                 return Err(AppError::unauthorized(codes::SESSION_EXPIRED));
             };
             if let Some(version) = version {
-                if state.sched.auth_version().await != Some(version) {
+                if state.sched.auth_version(&cache_key).await != Some(version) {
                     continue;
                 }
                 state.sched.auth_set(&cache_key, &found, version).await;

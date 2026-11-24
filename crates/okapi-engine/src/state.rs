@@ -153,6 +153,8 @@ pub struct RoutingCaches {
     pub request_policy: Cache<u8, Arc<okapi_kernel::policies::RequestPolicy>>,
     /// 渠道池策略文档缓存（pool_code → StoredPoolPolicy，5s；改池策略走 `routing.invalidate`，不再全站 auth_flush）。
     pub pool_policies: Cache<String, Arc<okapi_store::pool_policy::StoredPoolPolicy>>,
+    /// 启用中模型目录缓存（`GET /v1/models`、`GET /v1beta/models` 与批量模型清单共用，60s；由 `Models` 作用域即时失效）。
+    pub active_models_cache: Cache<u8, Arc<Vec<okapi_store::pricing::ActiveModelCard>>>,
 }
 
 /// 渠道 key 与出口代理的健康标记：本地标记加 5s 集群脏集缓存，成功时才回 PG 清零。
@@ -396,6 +398,23 @@ impl AppState {
                 }
             });
         }
+    }
+
+    /// 启用中模型目录卡片（60s 进程缓存，同键 singleflight 防击穿，由 `CacheInvalidation::Models` 跨副本即时失效）。
+    pub async fn active_model_cards(
+        &self,
+    ) -> Result<Arc<Vec<okapi_store::pricing::ActiveModelCard>>, okapi_kernel::error::AppError> {
+        if let Some(hit) = self.routing.active_models_cache.get(&0).await {
+            return Ok(hit);
+        }
+        Box::pin(self.routing.active_models_cache.try_get_with(0, async {
+            okapi_store::pricing::list_active_model_cards(&self.pg)
+                .await
+                .map(Arc::new)
+                .map_err(okapi_kernel::error::AppError::from)
+        }))
+        .await
+        .map_err(|err| (*err).clone())
     }
 
     /// 渠道相对成本系数（60s 进程缓存，同键 singleflight 防击穿；缺省 1000）。
@@ -659,6 +678,7 @@ impl AppState {
         match scope {
             CacheInvalidation::All => {
                 self.routing.model_cache.invalidate_all();
+                self.routing.active_models_cache.invalidate_all();
                 self.routing.cand_cache.invalidate_all();
                 self.routing.channel_cost_cache.invalidate_all();
                 self.routing.channel_control_cache.invalidate_all();
@@ -674,6 +694,7 @@ impl AppState {
             }
             CacheInvalidation::Models => {
                 self.routing.model_cache.invalidate_all();
+                self.routing.active_models_cache.invalidate_all();
                 self.routing.cand_cache.invalidate_all();
             }
             CacheInvalidation::Pools => {
@@ -815,6 +836,7 @@ mod tests {
                 margin_cache: Cache::builder().max_capacity(1).build(),
                 request_policy: Cache::builder().max_capacity(1).build(),
                 pool_policies: Cache::builder().max_capacity(16).build(),
+                active_models_cache: Cache::builder().max_capacity(1).build(),
             },
             health: HealthMarks {
                 key_failures: Cache::builder().max_capacity(16).build(),
@@ -924,6 +946,11 @@ mod tests {
                 .await;
             state
                 .routing
+                .active_models_cache
+                .insert(0, Arc::new(Vec::new()))
+                .await;
+            state
+                .routing
                 .cand_cache
                 .insert("gpt-5|default".into(), Arc::new(Vec::new()))
                 .await;
@@ -992,20 +1019,22 @@ mod tests {
         assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
         assert!(state.routing.channel_cost_cache.get(&1).await.is_none());
         assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.routing.active_models_cache.get(&0).await.is_some());
         assert!(state.routing.pool_policies.get("default").await.is_some());
         assert!(state.settings_cache.get("site_notices").await.is_some());
 
-        // 5. Models scope clears model_cache + cand_cache, preserves channel_cost + pool_policies
+        // 5. Models scope clears model_cache + active_models_cache + cand_cache, preserves channel_cost + pool_policies
         seed_all().await;
         state
             .invalidate_cache_local(&CacheInvalidation::Models)
             .await;
         assert!(state.routing.model_cache.get("gpt-5").await.is_none());
+        assert!(state.routing.active_models_cache.get(&0).await.is_none());
         assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
         assert!(state.routing.channel_cost_cache.get(&1).await.is_some());
         assert!(state.routing.pool_policies.get("default").await.is_some());
 
-        // 6. Pools scope clears cand_cache + pool_policies, preserves model_cache + channel_cost
+        // 6. Pools scope clears cand_cache + pool_policies, preserves model_cache + active_models_cache + channel_cost
         seed_all().await;
         state
             .invalidate_cache_local(&CacheInvalidation::Pools)
@@ -1013,6 +1042,7 @@ mod tests {
         assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
         assert!(state.routing.pool_policies.get("default").await.is_none());
         assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.routing.active_models_cache.get(&0).await.is_some());
         assert!(state.routing.channel_cost_cache.get(&1).await.is_some());
     }
 

@@ -125,7 +125,8 @@ async fn late_auth_snapshot_cannot_restore_revoked_key() -> Result {
     let state = state().await?;
     let uid = user(&state.pg).await?;
     let (id, _, hash) = token(&state.pg, uid).await?;
-    let version = state.sched.auth_version().await.unwrap_or(0);
+    let (_, _, other_hash) = token(&state.pg, uid).await?;
+    let version = state.sched.auth_version(&hash).await.unwrap_or_default();
     let snapshot = okapi_store::auth::find_key_by_hash(&state.pg, &hash)
         .await?
         .unwrap();
@@ -136,6 +137,28 @@ async fn late_auth_snapshot_cannot_restore_revoked_key() -> Result {
     state.sched.auth_flush().await;
     state.sched.auth_set(&hash, &snapshot, version).await;
     assert!(state.sched.auth_get(&hash).await.is_none());
+
+    // 单 key 精确失效（auth_del）：同样阻断旧快照回写，且不冲掉其他用户的缓存条目
+    let other_ver = state
+        .sched
+        .auth_version(&other_hash)
+        .await
+        .unwrap_or_default();
+    let other_snapshot = okapi_store::auth::find_key_by_hash(&state.pg, &other_hash)
+        .await?
+        .unwrap();
+    state
+        .sched
+        .auth_set(&other_hash, &other_snapshot, other_ver)
+        .await;
+    let ver2 = state.sched.auth_version(&hash).await.unwrap_or_default();
+    state.sched.auth_del(&hash).await;
+    state.sched.auth_set(&hash, &snapshot, ver2).await;
+    assert!(state.sched.auth_get(&hash).await.is_none());
+    assert!(
+        state.sched.auth_get(&other_hash).await.is_some(),
+        "per-key auth_del must preserve unrelated cached keys"
+    );
     Ok(())
 }
 #[tokio::test]

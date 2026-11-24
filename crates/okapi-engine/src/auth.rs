@@ -39,19 +39,29 @@ pub async fn authenticate_data_plane(
 }
 
 /// 团成员月度限额 + 令牌日/月周期消费上限检查（软实时：结算后计数、预扣前比较）。
-/// 各计费端点在 reserve 前调用；未配对应限额时零 Redis 往返。
+/// 各计费端点在 reserve 前调用；仅对已配上限的维度合并为单次管道 Redis 读，未配限额时零往返。
 pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(), AppError> {
-    if let (Some(member), Some(limit)) = (key.member_user_id, key.member_monthly_limit_micro) {
-        let spent = state.sched.member_spend_get(key.user_id, member).await;
-        if spent >= limit {
-            return Err(AppError::new(
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                codes::MEMBER_LIMIT_EXCEEDED,
-            ));
-        }
+    let member_limit = key.member_user_id.zip(key.member_monthly_limit_micro);
+    let member = member_limit.map(|(m, _)| m);
+    let need_day = key.daily_quota_micro.is_some();
+    let need_month = key.monthly_quota_micro.is_some();
+    if member.is_none() && !need_day && !need_month {
+        return Ok(());
+    }
+    let (member_spent, day_spent, month_spent) = state
+        .sched
+        .key_limits_spend_get(key.user_id, key.key_id, member, need_day, need_month)
+        .await;
+    if let Some((_, limit)) = member_limit
+        && member_spent >= limit
+    {
+        return Err(AppError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            codes::MEMBER_LIMIT_EXCEEDED,
+        ));
     }
     if let Some(daily_cap) = key.daily_quota_micro
-        && state.sched.key_spend_day_get(key.user_id, key.key_id).await >= daily_cap
+        && day_spent >= daily_cap
     {
         return Err(AppError::new(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
@@ -60,11 +70,7 @@ pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(),
         .with_param("daily_quota"));
     }
     if let Some(monthly_cap) = key.monthly_quota_micro
-        && state
-            .sched
-            .key_spend_month_get(key.user_id, key.key_id)
-            .await
-            >= monthly_cap
+        && month_spent >= monthly_cap
     {
         return Err(AppError::new(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
@@ -107,19 +113,28 @@ pub async fn record_settlement_counters(
     amount_micro: i64,
     tokens: u64,
 ) {
-    if let Some(member) = member {
-        state
-            .sched
-            .member_spend_add(key_user_id, member, amount_micro)
-            .await;
-    }
-    if api_key_id > 0 && amount_micro > 0 {
-        state
-            .sched
-            .key_spend_add(key_user_id, api_key_id, amount_micro)
-            .await;
-    }
-    super::rule_inputs::record_tokens(state, key_user_id, tokens, amount_micro).await;
+    // Box::pin 防止 tokio::join! 把三个 fred Future 并排展开进每个上游调用方的状态机栈帧（>16KB）。
+    Box::pin(async move {
+        let member_fut = async {
+            if let Some(member) = member {
+                state
+                    .sched
+                    .member_spend_add(key_user_id, member, amount_micro)
+                    .await;
+            }
+        };
+        let key_fut = async {
+            if api_key_id > 0 && amount_micro > 0 {
+                state
+                    .sched
+                    .key_spend_add(key_user_id, api_key_id, amount_micro)
+                    .await;
+            }
+        };
+        let volume_fut = super::rule_inputs::record_tokens(state, key_user_id, tokens, amount_micro);
+        tokio::join!(member_fut, key_fut, volume_fut);
+    })
+    .await;
 }
 
 /// 渠道 key 的时延反馈（least_latency 池排序输入）。

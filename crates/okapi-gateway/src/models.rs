@@ -16,7 +16,7 @@ pub async fn list_models(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let key = super::auth::authenticate_data_plane(&state, &headers).await?;
-    let cards = okapi_store::pricing::list_active_model_cards(&state.pg).await?;
+    let cards = state.active_model_cards().await?;
     let data: Vec<serde_json::Value> = cards
         .iter()
         .filter(|card| key.allows_model(&card.model_name))
@@ -140,9 +140,10 @@ async fn gemini_models(
         );
     }
     let key = super::auth::authenticate_data_plane(state, &headers).await?;
-    let names = okapi_store::pricing::list_active_models(&state.pg).await?;
-    let models: Vec<serde_json::Value> = names
-        .into_iter()
+    let cards = state.active_model_cards().await?;
+    let models: Vec<serde_json::Value> = cards
+        .iter()
+        .map(|card| card.model_name.as_str())
         .filter(|name| key.allows_model(name))
         .map(|name| {
             json!({

@@ -42,13 +42,13 @@ pub async fn authenticate(
         crate::metrics::global().record_auth_cache(false);
         let mut resolved = None;
         for _ in 0..3 {
-            let version = state.sched.auth_version().await;
+            let version = state.sched.auth_version(&key_hash).await;
             let found = okapi_store::auth::find_key_by_hash(&state.pg, &key_hash).await?;
             let Some(found) = found else {
                 return Err(reject_invalid_key(state, headers).await);
             };
             if let Some(version) = version {
-                if state.sched.auth_version().await != Some(version) {
+                if state.sched.auth_version(&key_hash).await != Some(version) {
                     continue;
                 }
                 state.sched.auth_set(&key_hash, &found, version).await;
