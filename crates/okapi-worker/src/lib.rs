@@ -65,35 +65,114 @@ const RECONCILE_FULL_INTERVAL: Duration = Duration::from_hours(24);
 const RECONCILE_OVERLAP: Duration = Duration::from_mins(10);
 /// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
 const SUBSCRIPTION_BATCH: i64 = 500;
+/// 传输层单拍有界追赶轮数上限（满批 500 行时最多连跑 16 轮 = 单 worker 8000 行/秒，空闲时 1 轮即止）。
+const TRANSPORT_MAX_DRAIN_ROUNDS: usize = 16;
+/// 追赶轮次的 JetStream 拉取等待上限：尾批不满时不必再空等满 1 秒。
+const JS_CATCHUP_FETCH_EXPIRES: Duration = Duration::from_millis(50);
 
-/// 事件传输一拍：NATS 形态走 relay + JS 消费者，单机形态直连 outbox → CH。
+fn should_continue_drain(rows: usize, round: usize) -> bool {
+    rows >= nats_relay::BATCH_LIMIT && round + 1 < TRANSPORT_MAX_DRAIN_ROUNDS
+}
+
+/// 事件传输一拍：NATS 形态走 relay + JS 消费者（复用缓存 PullConsumer），单机形态直连 outbox → CH；
+/// 积压满批时自动做有界追赶排空，无积压时单轮退出。
 async fn transport_tick(
     pg: &sqlx::PgPool,
-    js: Option<&async_nats::jetstream::Context>,
+    js: Option<&JsSink>,
     ch: Option<&okapi_store::ChClient>,
 ) {
-    match (js, ch) {
+    let ready_js = match js {
+        Some(sink) => sink.ready().await.map(|ctx| (sink, ctx)),
+        None => None,
+    };
+    match (ready_js, ch) {
         // 多机形态：relay → JetStream → chsink 消费者
-        (Some(ctx), maybe_ch) => {
-            match nats_relay::relay_once(pg, ctx).await {
-                Ok(0) => {}
-                Ok(rows) => tracing::debug!(rows, "relay 批次完成"),
-                Err(err) => tracing::error!(error = %err, "relay 失败"),
+        (Some((sink, ctx)), maybe_ch) => {
+            let (mut relay_total, mut relay_rounds) = (0usize, 0usize);
+            for round in 0..TRANSPORT_MAX_DRAIN_ROUNDS {
+                match nats_relay::relay_once(pg, &ctx).await {
+                    Ok(rows) => {
+                        relay_total += rows;
+                        relay_rounds += 1;
+                        if !should_continue_drain(rows, round) {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "relay 失败");
+                        break;
+                    }
+                }
+            }
+            if relay_total > 0 {
+                tracing::debug!(rows = relay_total, rounds = relay_rounds, "relay 批次完成");
             }
             if let Some(client) = maybe_ch {
-                match nats_relay::chsink_js_once(pg, ctx, client).await {
-                    Ok(0) => {}
-                    Ok(rows) => tracing::debug!(rows, "chsink(JS) 批次完成"),
-                    Err(err) => tracing::error!(error = %err, "chsink(JS) 失败"),
+                let cached = match sink.consumer(&ctx).await {
+                    Ok(c) => c,
+                    Err(err) => {
+                        tracing::error!(error = %err, "chsink(JS) 消费者初始化失败");
+                        return;
+                    }
+                };
+                let (mut js_total, mut js_rounds) = (0usize, 0usize);
+                for round in 0..TRANSPORT_MAX_DRAIN_ROUNDS {
+                    let fetch_expires = if round == 0 {
+                        Duration::from_secs(1)
+                    } else {
+                        JS_CATCHUP_FETCH_EXPIRES
+                    };
+                    match nats_relay::chsink_js_with_consumer(
+                        pg,
+                        &cached,
+                        client,
+                        fetch_expires,
+                        round == 0,
+                    )
+                    .await
+                    {
+                        Ok(report) => {
+                            js_total += report.fetched.max(report.delivered);
+                            js_rounds += 1;
+                            if !should_continue_drain(report.fetched, round) {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            // 消费者可能被删或 NATS 重建：清空缓存以便下一拍自动重建自愈
+                            sink.invalidate_consumer().await;
+                            tracing::error!(error = %err, "chsink(JS) 失败");
+                            break;
+                        }
+                    }
+                }
+                if js_total > 0 {
+                    tracing::debug!(rows = js_total, rounds = js_rounds, "chsink(JS) 批次完成");
                 }
             }
         }
         // 单机直连形态（docs/database.md §4.2）
-        (None, Some(client)) => match chsink::process_once(pg, client).await {
-            Ok(0) => {}
-            Ok(rows) => tracing::debug!(rows, "chsink 批次完成"),
-            Err(err) => tracing::error!(error = %err, "chsink 处理失败"),
-        },
+        (None, Some(client)) => {
+            let (mut total, mut rounds) = (0usize, 0usize);
+            for round in 0..TRANSPORT_MAX_DRAIN_ROUNDS {
+                match chsink::process_once(pg, client).await {
+                    Ok(rows) => {
+                        total += rows;
+                        rounds += 1;
+                        if !should_continue_drain(rows, round) {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "chsink 处理失败");
+                        break;
+                    }
+                }
+            }
+            if total > 0 {
+                tracing::debug!(rows = total, rounds, "chsink 批次完成");
+            }
+        }
         (None, None) => {}
     }
 }
@@ -320,4 +399,24 @@ where
         .await;
     tracing::info!("worker 已下线");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TRANSPORT_MAX_DRAIN_ROUNDS, nats_relay, should_continue_drain};
+
+    #[test]
+    fn bounded_drain_continues_only_on_full_batches_within_round_cap() {
+        assert!(!should_continue_drain(0, 0));
+        assert!(!should_continue_drain(nats_relay::BATCH_LIMIT - 1, 0));
+        assert!(should_continue_drain(nats_relay::BATCH_LIMIT, 0));
+        assert!(should_continue_drain(
+            nats_relay::BATCH_LIMIT,
+            TRANSPORT_MAX_DRAIN_ROUNDS - 2
+        ));
+        assert!(!should_continue_drain(
+            nats_relay::BATCH_LIMIT,
+            TRANSPORT_MAX_DRAIN_ROUNDS - 1
+        ));
+    }
 }

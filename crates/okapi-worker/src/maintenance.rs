@@ -30,10 +30,11 @@ pub(super) struct MaintenanceContext {
 }
 
 /// 启动时 NATS JetStream 可能尚未就绪；与 [`ChSink`] 同口径，首次失败后按周期自动补建拓扑，
-/// 避免永久困在单机直连模式。
+/// 避免永久困在单机直连模式。同时缓存 `PullConsumer` 句柄，避免每秒重复调用 `get_stream` / `create_consumer`。
 pub(super) struct JsSink {
     client: async_nats::Client,
     ctx: tokio::sync::RwLock<Option<async_nats::jetstream::Context>>,
+    consumer: tokio::sync::RwLock<Option<nats_relay::CachedConsumer>>,
     next_try: std::sync::Mutex<std::time::Instant>,
 }
 
@@ -42,6 +43,7 @@ impl JsSink {
         Self {
             client,
             ctx: tokio::sync::RwLock::new(None),
+            consumer: tokio::sync::RwLock::new(None),
             next_try: std::sync::Mutex::new(std::time::Instant::now()),
         }
     }
@@ -76,6 +78,22 @@ impl JsSink {
                 None
             }
         }
+    }
+
+    pub(super) async fn consumer(
+        &self,
+        ctx: &async_nats::jetstream::Context,
+    ) -> anyhow::Result<nats_relay::CachedConsumer> {
+        if let Some(cached) = self.consumer.read().await.as_ref() {
+            return Ok(cached.clone());
+        }
+        let fresh = nats_relay::ensure_consumer(ctx).await?;
+        *self.consumer.write().await = Some(fresh.clone());
+        Ok(fresh)
+    }
+
+    pub(super) async fn invalidate_consumer(&self) {
+        *self.consumer.write().await = None;
     }
 }
 
@@ -363,10 +381,6 @@ pub(super) async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJ
     };
     match job {
         MaintenanceJob::chsink_tick => {
-            let js = match js {
-                Some(sink) => sink.ready().await,
-                None => None,
-            };
             transport_tick(pg, js.as_ref(), ch).await;
         }
         MaintenanceJob::unit_calibration => {

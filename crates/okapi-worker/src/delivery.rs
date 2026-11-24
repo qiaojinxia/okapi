@@ -93,20 +93,41 @@ pub(super) async fn admit(tx: &mut PgConnection, mut events: Vec<Event>) -> anyh
     Ok(())
 }
 
+#[derive(sqlx::FromRow)]
+struct ClaimedBatch {
+    id: Uuid,
+    event_count: i32,
+    rows: Value,
+    next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Deliver exactly the saved rows, even when fresh events arrive or a prior PG commit failed.
+///
+/// 采用两阶段短租约（与 `nats_relay::relay_once` 同口径）：先在 <1ms 事务里写入 5 分钟租约并立即释放
+/// PG 连接与行锁，再执行 ClickHouse HTTP 写入，最后用短事务按 CAS 落盘结果；避免 CH 慢请求期间把
+/// PG 连接钉死在 `idle in transaction` 并阻塞 `VACUUM`。
 pub(super) async fn deliver_once(pg: &PgPool, ch: &ChClient) -> anyhow::Result<usize> {
-    let mut tx = pg.begin().await?;
-    let batch = sqlx::query!(
-        r#"SELECT id,event_count,rows FROM billing_ch_batches
-           WHERE status=0 AND (next_retry_at IS NULL OR next_retry_at<=now())
-           ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"#
+    let claimed = sqlx::query_as::<_, ClaimedBatch>(
+        "UPDATE billing_ch_batches b
+         SET next_retry_at = now() + interval '5 minutes'
+         FROM (
+             SELECT id FROM billing_ch_batches
+             WHERE status = 0 AND (next_retry_at IS NULL OR next_retry_at <= now())
+             ORDER BY created_at, id
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED
+         ) c
+         WHERE b.id = c.id
+         RETURNING b.id, b.event_count, b.rows, b.next_retry_at",
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pg)
     .await?;
-    let Some(batch) = batch else {
-        tx.commit().await?;
+    let Some(batch) = claimed else {
         return Ok(0);
     };
+    let lease_at = batch
+        .next_retry_at
+        .context("claimed delivery batch must carry a lease timestamp")?;
     let rows = batch
         .rows
         .as_array()
@@ -116,70 +137,113 @@ pub(super) async fn deliver_once(pg: &PgPool, ch: &ChClient) -> anyhow::Result<u
         "stored delivery size mismatch"
     );
     let token = format!("billing-batch-v1-{}", batch.id);
-    match ch
+    // ClickHouse HTTP I/O runs with zero PostgreSQL transaction/connection held.
+    let insert_result = ch
         .insert_json_each_row("request_log_raw", rows, &token)
-        .await
-    {
-        Ok(()) => {
-            // Compaction is atomic with completion; rollback restores the exact frozen rows.
-            sqlx::query!(
-                r#"UPDATE billing_ch_batches SET status=1,completed_at=now(),next_retry_at=NULL,
-                   rows='[]',payloads='[]' WHERE id=$1"#,
-                batch.id
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!(
-                r#"UPDATE billing_outbox o SET status=1,published_at=COALESCE(o.published_at,now()),
-                   ch_batch_id=$1,next_retry_at=NULL
-                   FROM billing_ch_events e
-                   WHERE e.batch_id=$1 AND o.event_id=CASE WHEN e.event_key LIKE 'outbox:%'
-                       THEN substring(e.event_key FROM 8)::uuid END"#,
-                batch.id
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-        Err(err) => {
-            record_failure(&mut tx, batch.id, &err.to_string()).await?;
-        }
+        .await;
+    let finalize = match insert_result {
+        Ok(()) => complete_batch(pg, batch.id).await,
+        Err(err) => record_failure(pg, batch.id, lease_at, &err.to_string()).await,
+    };
+    if let Err(err) = finalize {
+        // 进程仍存活但回写 PG 失败（如瞬态冲突/故障注入）：主动释放租约以便下一拍立即重试，不必空等 5 分钟。
+        let _ = sqlx::query(
+            "UPDATE billing_ch_batches
+             SET next_retry_at = NULL
+             WHERE id = $1 AND status = 0 AND next_retry_at = $2",
+        )
+        .bind(batch.id)
+        .bind(lease_at)
+        .execute(pg)
+        .await;
+        return Err(err);
     }
-    tx.commit().await?;
     Ok(usize::try_from(batch.event_count)?)
 }
 
-async fn record_failure(tx: &mut PgConnection, id: Uuid, error: &str) -> anyhow::Result<()> {
+async fn complete_batch(pg: &PgPool, id: Uuid) -> anyhow::Result<()> {
+    let mut tx = pg.begin().await?;
+    // Compaction is atomic with completion; rollback restores the exact frozen rows.
+    let completed = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE billing_ch_batches
+         SET status = 1, completed_at = now(), next_retry_at = NULL, rows = '[]', payloads = '[]'
+         WHERE id = $1 AND status = 0
+         RETURNING id",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if completed.is_some() {
+        sqlx::query(
+            "UPDATE billing_outbox o
+             SET status = 1, published_at = COALESCE(o.published_at, now()),
+                 ch_batch_id = $1, next_retry_at = NULL
+             FROM billing_ch_events e
+             WHERE e.batch_id = $1
+               AND o.event_id = CASE WHEN e.event_key LIKE 'outbox:%'
+                   THEN substring(e.event_key FROM 8)::uuid END",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn record_failure(
+    pg: &PgPool,
+    id: Uuid,
+    lease_at: chrono::DateTime<chrono::Utc>,
+    error: &str,
+) -> anyhow::Result<()> {
     tracing::warn!(batch_id=%id, error, "CH frozen batch failed; retry original batch");
-    sqlx::query!(
-        r#"UPDATE billing_ch_batches
-           SET retry_count=retry_count+1,
-               next_retry_at=now()+make_interval(secs=>least(300,5*power(2,retry_count))),
-               status=CASE WHEN retry_count+1 >= $2 THEN 2 ELSE 0 END WHERE id=$1"#,
-        id,
-        MAX_RETRY
+    let mut tx = pg.begin().await?;
+    // CAS 校验租约归属：若租约已过期并被其他副本接管或完成，放弃写入以免重复累加 retry_count。
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE billing_ch_batches
+         SET retry_count = retry_count + 1,
+             next_retry_at = now() + make_interval(secs => least(300, 5 * power(2, retry_count))),
+             status = CASE WHEN retry_count + 1 >= $2 THEN 2 ELSE 0 END
+         WHERE id = $1 AND status = 0 AND next_retry_at = $3
+         RETURNING id",
     )
+    .bind(id)
+    .bind(MAX_RETRY)
+    .bind(lease_at)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if updated.is_none() {
+        tx.commit().await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE billing_outbox o
+         SET status = CASE WHEN b.status = 2 THEN 2 ELSE o.status END,
+             retry_count = b.retry_count,
+             next_retry_at = b.next_retry_at,
+             ch_batch_id = b.id
+         FROM billing_ch_events e
+         JOIN billing_ch_batches b ON b.id = e.batch_id
+         WHERE b.id = $1
+           AND o.event_id = CASE WHEN e.event_key LIKE 'outbox:%'
+               THEN substring(e.event_key FROM 8)::uuid END",
+    )
+    .bind(id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
-        r#"UPDATE billing_outbox o SET status=CASE WHEN b.status=2 THEN 2 ELSE o.status END,
-           retry_count=b.retry_count,next_retry_at=b.next_retry_at,ch_batch_id=b.id
-           FROM billing_ch_events e JOIN billing_ch_batches b ON b.id=e.batch_id
-           WHERE b.id=$1 AND o.event_id=CASE WHEN e.event_key LIKE 'outbox:%'
-               THEN substring(e.event_key FROM 8)::uuid END"#,
-        id
+    sqlx::query(
+        "INSERT INTO billing_dlq (source, payload, error, retry_count, ch_batch_id, event_key)
+         SELECT 'chsink', v->'payload', $2, b.retry_count, b.id, v->>'key'
+         FROM billing_ch_batches b
+         CROSS JOIN LATERAL jsonb_array_elements(b.payloads) v
+         WHERE b.id = $1 AND b.status = 2
+         ON CONFLICT (event_key) WHERE event_key IS NOT NULL DO NOTHING",
     )
+    .bind(id)
+    .bind(error)
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
-        r#"INSERT INTO billing_dlq (source,payload,error,retry_count,ch_batch_id,event_key)
-           SELECT 'chsink',v->'payload',$2,b.retry_count,b.id,v->>'key'
-           FROM billing_ch_batches b CROSS JOIN LATERAL jsonb_array_elements(b.payloads) v
-           WHERE b.id=$1 AND b.status=2
-           ON CONFLICT (event_key) WHERE event_key IS NOT NULL DO NOTHING"#,
-        id,
-        error
-    )
-    .execute(&mut *tx)
-    .await?;
+    tx.commit().await?;
     Ok(())
 }
