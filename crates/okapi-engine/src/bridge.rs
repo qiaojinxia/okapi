@@ -112,8 +112,8 @@ pub async fn playground_parameters(
     let mut common: Option<ParameterProfile> = None;
     for c in &candidates {
         let upstream = c.upstream_model(&meta.canonical);
-        let dialect = crate::dialect::upstream_dialect(&c.provider, upstream);
-        let mut p = model_parameters::profile(dialect, upstream, c.api_base.as_deref());
+        let dialect = crate::dialect::upstream_dialect(&c.provider, upstream.as_ref());
+        let mut p = model_parameters::profile(dialect, upstream.as_ref(), c.api_base.as_deref());
         let controlled = |field: &str| {
             c.strip_request_fields.iter().any(|f| f == field)
                 || c.inject_request_fields.contains_key(field)

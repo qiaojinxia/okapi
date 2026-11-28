@@ -176,12 +176,8 @@ async fn probe_one(state: &AppState, key: ProbeKey) -> Verdict {
     if base.is_empty() {
         return Verdict::Skipped("no_api_base");
     }
-    // 探的是网关真正会发出去的名字：过一遍 model_mapping（azure 下映射值就是部署名）
-    let upstream_model = key
-        .model_mapping
-        .get(&key.probe_model)
-        .and_then(Value::as_str)
-        .unwrap_or(&key.probe_model);
+    // 探的是网关真正会发出去的名字：过一遍 model_mapping（支持精确 / 通配 / 正则；azure 下映射值就是部署名）
+    let upstream_model = okapi_store::model_mapping::resolve(&key.model_mapping, &key.probe_model);
     let api_version = key
         .settings
         .get("api_version")
@@ -192,7 +188,7 @@ async fn probe_one(state: &AppState, key: ProbeKey) -> Verdict {
         ProbeTarget {
             provider: &key.provider,
             api_base: base,
-            model: upstream_model,
+            model: upstream_model.as_ref(),
             api_version,
             settings: &key.settings,
             credential,

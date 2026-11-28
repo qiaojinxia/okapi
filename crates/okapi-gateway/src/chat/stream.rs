@@ -145,7 +145,7 @@ pub(super) fn with_relayed(
     relayed: Relayed,
 ) -> Response {
     let model = relayed.model.map(|served| {
-        if served != cand.upstream_model(&bill.model) {
+        if served != cand.upstream_model(&bill.model).as_ref() {
             served
         } else if bill.downgraded_from.is_some() {
             bill.model.clone()

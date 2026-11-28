@@ -537,7 +537,7 @@ fn shape_and_maybe_verify(
         let ctx = OverrideContext {
             model: &bill.model,
             requested_model: &bill.requested_model,
-            upstream_model,
+            upstream_model: upstream_model.as_ref(),
             ingress: bill.ingress.as_str(),
             user_agent: bill.user_agent.as_deref(),
             client_headers: &bill.client_headers,
@@ -582,7 +582,7 @@ pub(super) async fn dispatch_chat(
     let plan = ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?;
     let native_responses = plan.native_responses();
     let (body, override_headers) = shape_and_verify_outbound(bill, cand, body)?;
-    let upstream_model = cand.upstream_model(&bill.model).to_owned();
+    let upstream_model = cand.upstream_model(&bill.model).into_owned();
     // 订阅 provider 额外带上客户端身份头（真实 Claude Code / Codex CLI 经网关出去时上游看到它自己）
     let mut outbound = super::super::oauth_cred::outbound_with_client(
         cand,

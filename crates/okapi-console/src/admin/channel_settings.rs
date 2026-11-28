@@ -61,6 +61,11 @@ pub(super) fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), A
         okapi_providers::request_overrides::validate_rules_value(v)
             .map_err(|param| AppError::bad_request().with_param(param))?;
     }
+    if let Some(v) = s.get("status_code_mapping")
+        && !status_code_mapping_ok(v)
+    {
+        return Err(AppError::bad_request().with_param("status_code_mapping"));
+    }
     // aws_region（bedrock SigV4 区域覆写）：`us-east-1` 这类小写字母 / 数字 / 连字符
     if let Some(v) = s.get("aws_region")
         && !v.as_str().is_some_and(|r| {
@@ -220,6 +225,30 @@ pub(super) fn inject_request_fields_ok(value: &Value) -> bool {
         .all(|k| !k.is_empty() && !PROTECTED.contains(&k.as_str()))
 }
 
+/// `status_code_mapping`：缺省/null 放行；对象、最多 32 项，键值均为 400..=599 合法 HTTP 错误状态码。
+pub(super) fn status_code_mapping_ok(value: &Value) -> bool {
+    if value.is_null() {
+        return true;
+    }
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.len() > 32 {
+        return false;
+    }
+    obj.iter().all(|(k, v)| {
+        let key_ok = k
+            .parse::<u16>()
+            .ok()
+            .is_some_and(|code| (400..=599).contains(&code) && code.to_string() == *k);
+        let val_ok = v
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .is_some_and(|code| (400..=599).contains(&code));
+        key_ok && val_ok
+    })
+}
+
 /// azure / bedrock / vertex 渠道必须有地址：三家都没有全局缺省，缺了只能拼出打向
 /// api.openai.com 的错误请求。vertex 还要求带 `/projects/{p}/locations/{l}`（§11.35）。
 /// `provider` 是本次生效的协议，`api_base` 是本次生效的地址。
@@ -252,6 +281,16 @@ mod request_extension_tests {
         assert!(ensure_request_extensions("codex", Some(&settings)).is_err());
         assert!(ensure_request_extensions("openai", Some(&settings)).is_err());
         assert!(ensure_request_extensions("openai", None).is_ok());
+    }
+
+    #[test]
+    fn status_code_mapping_validates_error_status_bounds() {
+        assert!(status_code_mapping_ok(&Value::Null));
+        assert!(status_code_mapping_ok(&json!({"400": 429, "503": 502})));
+        assert!(!status_code_mapping_ok(&json!({"200": 429})));
+        assert!(!status_code_mapping_ok(&json!({"400": 200})));
+        assert!(!status_code_mapping_ok(&json!({"0400": 429})));
+        assert!(!status_code_mapping_ok(&json!({"400": "429"})));
     }
 }
 

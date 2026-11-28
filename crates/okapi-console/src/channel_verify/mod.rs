@@ -179,13 +179,8 @@ async fn prepare(
     }
 
     let _ = state.data_plane()?;
-    let upstream_model = model_mapping
-        .get(&model)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&model)
-        .to_owned();
+    let upstream_model =
+        okapi_store::model_mapping::resolve(&model_mapping, &model).into_owned();
 
     let extensions = settings.get("extensions").cloned().unwrap_or(Value::Null);
     let mimic_profile_active = matches!(

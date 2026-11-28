@@ -42,6 +42,9 @@ pub struct ChannelCandidate {
     /// 声明式参数 / Header 条件改写规则（channels.settings.request_overrides）；
     /// 由 providers::request_overrides 解释，store 与调度器不解析其内容。
     pub request_overrides: serde_json::Value,
+    /// 上游错误状态码归一化映射（channels.settings.status_code_mapping：`"400" -> 429`）；
+    /// 仅影响返回给客户端的 HTTP 状态码，不改动内部故障归类与请求日志记录的真实上游状态。
+    pub status_code_mapping: serde_json::Value,
     /// 跨方言转换会丢工具时怎么办（channels.settings.tool_loss_policy：safe / strict / allow；
     /// None = 缺省 safe，解析见 `okapi_providers::convert::tool_loss::ToolLossPolicy`）。
     pub tool_loss_policy: Option<String>,
@@ -209,13 +212,27 @@ impl ChannelCandidate {
         self.proxy_url = proxy_url;
     }
 
-    /// 解析上游实际模型名。
+    /// 解析上游实际模型名（精确 > 通配 `*` > 正则 `re:...`）。
     #[must_use]
-    pub fn upstream_model<'a>(&'a self, model: &'a str) -> &'a str {
-        self.model_mapping
-            .get(model)
-            .and_then(|v| v.as_str())
-            .unwrap_or(model)
+    pub fn upstream_model<'a>(&'a self, model: &'a str) -> std::borrow::Cow<'a, str> {
+        crate::model_mapping::resolve(&self.model_mapping, model)
+    }
+
+    /// 渠道级上游错误状态码归一化（`settings.status_code_mapping`）：未命中或非法时原样返回。
+    #[must_use]
+    pub fn mapped_error_status(&self, upstream_status: u16) -> u16 {
+        let Some(map) = self.status_code_mapping.as_object() else {
+            return upstream_status;
+        };
+        if map.is_empty() {
+            return upstream_status;
+        }
+        let key = upstream_status.to_string();
+        map.get(&key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok())
+            .filter(|v| (400..=599).contains(v))
+            .unwrap_or(upstream_status)
     }
 }
 
@@ -225,6 +242,7 @@ struct MemberMeta {
     tags: Vec<String>,
     model_filter: Option<Vec<String>>,
     request_overrides: serde_json::Value,
+    status_code_mapping: serde_json::Value,
 }
 
 /// 服务指定模型的可用渠道 key 候选：
@@ -331,10 +349,12 @@ pub async fn candidates_for_model(
                 serde_json::Value,
                 Option<serde_json::Value>,
                 Option<serde_json::Value>,
+                Option<serde_json::Value>,
             ),
         >(
             r"SELECT pc.pool_code, pc.channel_id, pc.role, pc.enabled, pc.tags, pc.model_filter,
-                     c.settings -> 'request_overrides'
+                     c.settings -> 'request_overrides',
+                     c.settings -> 'status_code_mapping'
               FROM pool_channels pc
               JOIN channels c ON c.id = pc.channel_id
               WHERE pc.pool_code = ANY($1::varchar[]) AND c.deleted_at IS NULL",
@@ -345,8 +365,16 @@ pub async fn candidates_for_model(
 
     let mut meta_map: std::collections::HashMap<(String, i64), MemberMeta> =
         std::collections::HashMap::with_capacity(member_metas.len());
-    for (pool_code, channel_id, role, enabled, tags, model_filter, request_overrides) in
-        member_metas
+    for (
+        pool_code,
+        channel_id,
+        role,
+        enabled,
+        tags,
+        model_filter,
+        request_overrides,
+        status_code_mapping,
+    ) in member_metas
     {
         let tags: Vec<String> = serde_json::from_value(tags).unwrap_or_default();
         let model_filter: Option<Vec<String>> =
@@ -359,6 +387,7 @@ pub async fn candidates_for_model(
                 tags,
                 model_filter,
                 request_overrides: request_overrides.unwrap_or(serde_json::Value::Null),
+                status_code_mapping: status_code_mapping.unwrap_or(serde_json::Value::Null),
             },
         );
     }
@@ -379,20 +408,50 @@ pub async fn candidates_for_model(
             if !seen.insert(r.channel_key_id) {
                 return None;
             }
-            let (pool_role, pool_tags, pool_model_filter, request_overrides) = meta.map_or_else(
-                || ("primary".to_owned(), Vec::new(), None, serde_json::Value::Null),
+            let (
+                pool_role,
+                pool_tags,
+                pool_model_filter,
+                request_overrides,
+                status_code_mapping,
+            ) = meta.map_or_else(
+                || {
+                    (
+                        "primary".to_owned(),
+                        Vec::new(),
+                        None,
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                    )
+                },
                 |m| {
                     (
                         m.role.clone(),
                         m.tags.clone(),
                         m.model_filter.clone(),
                         m.request_overrides.clone(),
+                        m.status_code_mapping.clone(),
                     )
                 },
             );
-            Some((r, pool_role, pool_tags, pool_model_filter, request_overrides))
+            Some((
+                r,
+                pool_role,
+                pool_tags,
+                pool_model_filter,
+                request_overrides,
+                status_code_mapping,
+            ))
         })
-        .map(|(r, pool_role, pool_tags, pool_model_filter, request_overrides)| {
+        .map(
+            |(
+                r,
+                pool_role,
+                pool_tags,
+                pool_model_filter,
+                request_overrides,
+                status_code_mapping,
+            )| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             let responses_native = responses_native_for(&r.provider, r.responses_native);
             let (same_key_retries, first_output_timeout_secs) =
@@ -453,6 +512,7 @@ pub async fn candidates_for_model(
                     .and_then(|v| v.as_object().cloned())
                     .unwrap_or_default(),
                 request_overrides,
+                status_code_mapping,
                 responses_native,
                 tool_loss_policy: r.tool_loss_policy,
                 capabilities: r.capabilities,

@@ -304,16 +304,27 @@ test('批量配置（增删模型 / 调度参数 / 调度池 / 解冷）、作�
   })
   await expect(page.getByRole('checkbox', { name: '勾选 openai-prod' })).not.toBeChecked()
 
-  // 2. 编辑渠道 -> 请求与计费行为 -> 条件改写规则（预设 + 保存）
+  // 2. 编辑渠道 -> 模型映射（通配预设 + 实时试算）+ 请求与计费行为（条件改写规则 + 状态码映射）并保存
   await page.getByRole('row').filter({ hasText: 'openai-prod' }).getByRole('button', { name: '编辑', exact: true }).click()
   const editDrawer = page.getByRole('dialog')
+  await editDrawer.getByRole('tab', { name: '模型与调度池', exact: true }).click()
+  await editDrawer.locator('#channel-model-mapping > summary').click()
+  await editDrawer.getByRole('button', { name: '+ 通配加前缀', exact: true }).click()
+  await editDrawer.locator('#model-mapping-preview').fill('claude-sonnet-4')
+  await expect(editDrawer.locator('[data-slot="model-mapping-preview-result"]')).toContainText('us.anthropic.claude-sonnet-4-v1:0')
+
   await editDrawer.getByRole('tab', { name: '请求与计费行为', exact: true }).click()
   await editDrawer.getByRole('button', { name: '+ 按模型控温', exact: true }).click()
   await editDrawer.getByRole('button', { name: '+ 按 UA 拦截', exact: true }).click()
   await expect(editDrawer.locator('[data-slot="override-rule-card"]')).toHaveCount(2)
+  await editDrawer.getByRole('button', { name: '+ 503 → 429', exact: true }).click()
   await editDrawer.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => calls.find((c) => c.path === '/admin/channels/42' && c.method === 'PATCH')?.body).toMatchObject({
+    model_mapping: {
+      'claude-*': 'us.anthropic.claude-*-v1:0',
+    },
     settings: {
+      status_code_mapping: { '503': 429 },
       request_overrides: [
         {
           op: 'set',

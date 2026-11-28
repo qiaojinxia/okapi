@@ -51,15 +51,16 @@ impl Guard {
         }
     }
     pub fn channel(&mut self, candidate: &okapi_store::ChannelCandidate) {
+        let upstream = candidate.upstream_model(&self.model);
         if let Some(trace) = &self.trace {
             trace.begin(
                 candidate,
-                candidate.upstream_model(&self.model),
+                upstream.as_ref(),
                 &self.dimensions.upstream_endpoint,
             );
         }
         self.channel = Some((candidate.channel_id, candidate.channel_key_id));
-        self.dimensions.upstream_model = candidate.upstream_model(&self.model).to_owned();
+        self.dimensions.upstream_model = upstream.into_owned();
     }
     pub fn disarm(&mut self) {
         self.armed = false;

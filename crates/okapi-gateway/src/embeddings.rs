@@ -432,7 +432,7 @@ async fn forward(
             continue;
         }
         attempted += 1;
-        let upstream_model = cand.upstream_model(canonical).to_owned();
+        let upstream_model = cand.upstream_model(canonical).into_owned();
         let Ok(body_up) = rewrite_model(body, requested_model, &upstream_model) else {
             return Err((
                 AppError::bad_request(),

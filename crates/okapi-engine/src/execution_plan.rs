@@ -73,7 +73,7 @@ impl ExecutionPlan {
         Self::compile_target(
             ingress,
             &channel.provider,
-            channel.upstream_model(model),
+            channel.upstream_model(model).as_ref(),
             channel.responses_native,
             &channel.capabilities,
             requirements,

@@ -165,7 +165,7 @@ pub(super) async fn count_via_upstream(
     requested_model: &str,
     body: &Bytes,
 ) -> Result<Response, CountFailure> {
-    let upstream_model = cand.upstream_model(canonical).to_owned();
+    let upstream_model = cand.upstream_model(canonical).into_owned();
     let body_up = rewrite_model(body, requested_model, &upstream_model)
         .map_err(|_| CountFailure::Request(AppError::bad_request()))?;
     let base = cand

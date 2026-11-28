@@ -132,7 +132,7 @@ async fn open(
         let model = candidate.upstream_model(&ctx.prepared.canonical);
         match ctx
             .input
-            .forward_stream(&ctx.state, &candidate, model, &ctx.endpoint)
+            .forward_stream(&ctx.state, &candidate, model.as_ref(), &ctx.endpoint)
             .await
         {
             Ok(response) => {

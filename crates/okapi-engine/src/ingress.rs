@@ -70,9 +70,10 @@ impl Ingress {
     }
 
     pub fn accepts(self, channel: &ChannelCandidate, model: &str) -> bool {
+        let upstream = channel.upstream_model(model);
         self.supports(
             &channel.provider,
-            channel.upstream_model(model),
+            upstream.as_ref(),
             channel.responses_native,
             &channel.capabilities,
         )

@@ -29,6 +29,7 @@ pub(super) async fn try_model(
     let mut attempted = 0usize;
     let mut last_code: &'static str = codes::UPSTREAM_ERROR;
     let mut last_status: Option<i16> = None;
+    let mut last_mapped_status: Option<u16> = None;
     let mut last_channel: Option<(i64, i64)> = None;
     let mut last_upstream = None;
     let mut last_kind: Option<KeyFailure> = None;
@@ -53,7 +54,7 @@ pub(super) async fn try_model(
         }
         attempted += 1;
 
-        let upstream_model = cand.upstream_model(&bill.model).to_owned();
+        let upstream_model = cand.upstream_model(&bill.model).into_owned();
         let mut body_up =
             match build_upstream_body(bill, info, &cand, body, &upstream_model, parsed) {
             Ok(body_up) => body_up,
@@ -358,6 +359,12 @@ pub(super) async fn try_model(
                     .await;
                 last_code = code;
                 last_status = upstream_status;
+                last_mapped_status = upstream_status
+                    .and_then(|s| u16::try_from(s).ok())
+                    .and_then(|raw| {
+                        let mapped = cand.mapped_error_status(raw);
+                        (mapped != raw).then_some(mapped)
+                    });
                 last_kind = Some(failure_kind);
                 // allow_fallbacks:false（§11.24）——失败即返回，不改投其它渠道。
                 //
@@ -376,6 +383,9 @@ pub(super) async fn try_model(
                 failover = failover.saturating_add(1);
             }
             Err(AttemptError::Fatal(mut failure)) => {
+                if let FailureReply::Upstream { status, .. } = &mut failure.reply {
+                    *status = cand.mapped_error_status(*status);
+                }
                 failure.failover_count = failover;
                 failure.upstream = last_upstream.clone().map(Box::new);
                 return Err(failure);
@@ -393,7 +403,15 @@ pub(super) async fn try_model(
     }
 
     let err_code = last_code;
-    let reply = exhausted_reply(bill, err_code, last_status, last_kind, stopped_early).await;
+    let mut reply = exhausted_reply(bill, err_code, last_status, last_kind, stopped_early).await;
+    if let Some(mapped) = last_mapped_status
+        && let Ok(mapped_status) = StatusCode::from_u16(mapped)
+    {
+        reply.status = mapped_status;
+        if mapped_status == StatusCode::TOO_MANY_REQUESTS {
+            reply.code = codes::RATE_LIMITED.to_owned();
+        }
+    }
     let mut failure = ForwardFailure::app(reply, failover, last_channel);
     // 请求日志里仍记真实的上游失败原因；客户端看到的状态与它可以不同（见 `exhausted_reply`）
     err_code.clone_into(&mut failure.error_code);

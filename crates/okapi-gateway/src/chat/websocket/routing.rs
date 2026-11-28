@@ -92,7 +92,7 @@ fn body(
         probe,
         cand,
         &work.body,
-        cand.upstream_model(&bill.model),
+        cand.upstream_model(&bill.model).as_ref(),
         Some(&original),
     )?;
     let shaped = shape_upstream_body(bill, cand, built)?;
@@ -210,7 +210,7 @@ pub(super) async fn route(
         let failover = attempted;
         attempted += 1;
         bill.trace
-            .begin(&cand, cand.upstream_model(&bill.model), "/v1/responses");
+            .begin(&cand, cand.upstream_model(&bill.model).as_ref(), "/v1/responses");
         let body = match body(bill, probe, &cand, work) {
             Ok(body) => body,
             Err(error) => {

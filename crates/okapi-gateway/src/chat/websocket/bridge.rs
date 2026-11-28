@@ -44,7 +44,7 @@ pub(super) async fn start(
     let capture = Capture::new(input, root, budget, request)?;
     let request_id = Arc::new(Mutex::new(None));
     let handle = if work.warmup {
-        warmup(cand.upstream_model(&bill.model), work.lane.as_deref())
+        warmup(cand.upstream_model(&bill.model).as_ref(), work.lane.as_deref())
     } else {
         transport::http(
             bill.clone(),

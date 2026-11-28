@@ -286,7 +286,7 @@ async fn prepare(
             codes::NO_AVAILABLE_CHANNEL,
         ));
     };
-    let upstream_model = cand.upstream_model(&canonical).to_owned();
+    let upstream_model = cand.upstream_model(&canonical).into_owned();
     let base = cand
         .api_base
         .clone()

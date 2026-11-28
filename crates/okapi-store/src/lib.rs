@@ -25,6 +25,7 @@ pub mod image_tasks;
 pub mod legacy_speech;
 pub mod listing;
 pub mod model_config;
+pub mod model_mapping;
 pub mod mutate;
 pub mod netmatch;
 pub mod oauth_credentials;

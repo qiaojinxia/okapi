@@ -2498,6 +2498,7 @@ dependencies = [
  "hmac",
  "okapi-domain",
  "rand 0.10.2",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

@@ -211,6 +211,7 @@ export interface ChannelRow {
   pinned?: boolean
   pinned_at?: string | null
   models: string[]
+  model_mapping?: Record<string, string>
   keys: ChannelKeyRow[]
   settings: Partial<ChannelSettings> | null
   /// 所属池代码；空数组 = 孤儿（不在任何池，对谁都不可达）。
@@ -256,6 +257,12 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
       : {}),
     ...(Array.isArray(raw?.request_overrides) && raw.request_overrides.length > 0
       ? { request_overrides: raw.request_overrides }
+      : {}),
+    ...(raw?.status_code_mapping &&
+    typeof raw.status_code_mapping === 'object' &&
+    !Array.isArray(raw.status_code_mapping) &&
+    Object.keys(raw.status_code_mapping).length > 0
+      ? { status_code_mapping: raw.status_code_mapping }
       : {}),
   }
 }

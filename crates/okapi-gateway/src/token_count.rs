@@ -178,7 +178,7 @@ async fn count_authorized(
         }
     }
     if mode == CountMode::Estimate {
-        return estimate_response(candidates[0].upstream_model(canonical), &value);
+        return estimate_response(candidates[0].upstream_model(canonical).as_ref(), &value);
     }
     let body = if prefs.directive_present {
         super::routing_prefs::strip(&body).unwrap_or(body)
@@ -236,7 +236,7 @@ async fn count_authorized(
         }
     }
     if mode == CountMode::Auto && unsupported && parent.is_none() {
-        return estimate_response(candidates[0].upstream_model(canonical), &value);
+        return estimate_response(candidates[0].upstream_model(canonical).as_ref(), &value);
     }
     Err(last_error)
 }
@@ -265,7 +265,7 @@ async fn forward_count(
     body: Bytes,
 ) -> Result<okapi_providers::responses::InputTokenCount, UpstreamError> {
     let model = candidate.upstream_model(canonical);
-    let body = okapi_providers::rewrite_model(&body, requested, model)?;
+    let body = okapi_providers::rewrite_model(&body, requested, model.as_ref())?;
     // Responses 输入计数只到 Codex / OpenAI，不经 Claude Code 模拟，无需会话隔离
     let outbound = super::oauth_cred::outbound_with_client(
         candidate,

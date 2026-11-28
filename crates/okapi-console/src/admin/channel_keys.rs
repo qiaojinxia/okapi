@@ -12,32 +12,10 @@ use okapi_kernel::extract::Path;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// 校验并规整 `model_mapping`：对象，所有键值均须为非空非控制字符字符串（<=128 字节），去首尾空白。
+/// 校验并规整 `model_mapping`：对象，键值非空非控制字符（<=128 字节），`re:` 前缀须通过有界正则编译。
 pub(super) fn normalize_model_mapping(value: &Value) -> Result<Value, AppError> {
-    let Some(map) = value.as_object() else {
-        return Err(AppError::bad_request().with_param("model_mapping"));
-    };
-    if map.len() > 512 {
-        return Err(AppError::bad_request().with_param("model_mapping"));
-    }
-    let mut out = serde_json::Map::with_capacity(map.len());
-    for (k, v) in map {
-        let key = k.trim();
-        let Some(target) = v.as_str().map(str::trim) else {
-            return Err(AppError::bad_request().with_param("model_mapping"));
-        };
-        if key.is_empty()
-            || target.is_empty()
-            || key.len() > 128
-            || target.len() > 128
-            || key.chars().any(char::is_control)
-            || target.chars().any(char::is_control)
-        {
-            return Err(AppError::bad_request().with_param("model_mapping"));
-        }
-        out.insert(key.to_owned(), Value::String(target.to_owned()));
-    }
-    Ok(Value::Object(out))
+    okapi_store::model_mapping::validate_and_normalize(value)
+        .map_err(|param| AppError::bad_request().with_param(param))
 }
 
 /// 校验 `capabilities`：对象，键非空 <=64 字节且无控制字符，值须为布尔（如 `tools`/`vision`）。

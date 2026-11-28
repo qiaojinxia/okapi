@@ -227,6 +227,8 @@ pub struct ChannelSettingsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_overrides: Option<Vec<RequestOverrideRuleDto>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code_mapping: Option<BTreeMap<String, u16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<ChannelExtensionsDto>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -344,10 +346,10 @@ pub fn render_typescript() -> String {
         "export interface ChannelExtensions {\n  client_profile?: ClientProfile\n  codex_client?: CodexClientGate\n}\n\n",
     );
     out.push_str(
-        "export interface ChannelSettings {\n  account_control?: AccountControl\n  thinking_to_content: boolean\n  bill_by_response_model: boolean\n  strip_request_fields: string[]\n  responses_native?: boolean\n  tool_loss_policy?: ToolLossPolicy\n  api_version?: string\n  aws_region?: string\n  oauth_token_url?: string\n  balance_refresh?: 'on' | 'off'\n  health_probe?: 'on' | 'off'\n  image_stream_usage?: 'cumulative' | 'per_image'\n  low_balance?: LowBalanceRule\n  extra_headers?: Record<string, string>\n  inject_request_fields?: Record<string, unknown>\n  request_overrides?: RequestOverrideRule[]\n  extensions?: ChannelExtensions\n}\n\n",
+        "export interface ChannelSettings {\n  account_control?: AccountControl\n  thinking_to_content: boolean\n  bill_by_response_model: boolean\n  strip_request_fields: string[]\n  responses_native?: boolean\n  tool_loss_policy?: ToolLossPolicy\n  api_version?: string\n  aws_region?: string\n  oauth_token_url?: string\n  balance_refresh?: 'on' | 'off'\n  health_probe?: 'on' | 'off'\n  image_stream_usage?: 'cumulative' | 'per_image'\n  low_balance?: LowBalanceRule\n  extra_headers?: Record<string, string>\n  inject_request_fields?: Record<string, unknown>\n  request_overrides?: RequestOverrideRule[]\n  status_code_mapping?: Record<string, number>\n  extensions?: ChannelExtensions\n}\n\n",
     );
     out.push_str(
-        "export interface ChannelSettingsPatch {\n  account_control?: Partial<{ [K in keyof AccountControl]: AccountControl[K] | null }> | null\n  thinking_to_content?: boolean | null\n  bill_by_response_model?: boolean | null\n  strip_request_fields?: string[] | null\n  responses_native?: boolean | null\n  tool_loss_policy?: ToolLossPolicy | null\n  api_version?: string | null\n  aws_region?: string | null\n  oauth_token_url?: string | null\n  balance_refresh?: 'on' | 'off' | null\n  health_probe?: 'on' | 'off' | null\n  image_stream_usage?: 'cumulative' | 'per_image' | null\n  low_balance?: LowBalanceRule | null\n  extra_headers?: Record<string, string> | null\n  inject_request_fields?: Record<string, unknown> | null\n  request_overrides?: RequestOverrideRule[] | null\n  extensions?: {\n    client_profile?: ClientProfile | null\n    codex_client?: CodexClientGate | null\n  } | null\n}\n",
+        "export interface ChannelSettingsPatch {\n  account_control?: Partial<{ [K in keyof AccountControl]: AccountControl[K] | null }> | null\n  thinking_to_content?: boolean | null\n  bill_by_response_model?: boolean | null\n  strip_request_fields?: string[] | null\n  responses_native?: boolean | null\n  tool_loss_policy?: ToolLossPolicy | null\n  api_version?: string | null\n  aws_region?: string | null\n  oauth_token_url?: string | null\n  balance_refresh?: 'on' | 'off' | null\n  health_probe?: 'on' | 'off' | null\n  image_stream_usage?: 'cumulative' | 'per_image' | null\n  low_balance?: LowBalanceRule | null\n  extra_headers?: Record<string, string> | null\n  inject_request_fields?: Record<string, unknown> | null\n  request_overrides?: RequestOverrideRule[] | null\n  status_code_mapping?: Record<string, number> | null\n  extensions?: {\n    client_profile?: ClientProfile | null\n    codex_client?: CodexClientGate | null\n  } | null\n}\n",
     );
 
     out

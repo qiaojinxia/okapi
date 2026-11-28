@@ -273,7 +273,7 @@ async fn handle(
         }
         attempted += 1;
         failure.channel(&cand);
-        let upstream_model = cand.upstream_model(&canonical).to_owned();
+        let upstream_model = cand.upstream_model(&canonical).into_owned();
         if let Some(task) = task
             && !okapi_store::image_tasks::dispatch(
                 &state.pg,
@@ -452,6 +452,7 @@ async fn commit_and_record(
         snapshot["image_stream_incomplete"] = serde_json::json!(stream.incomplete);
     }
     let usage = usage.unwrap_or_default();
+    let upstream_model = cand.upstream_model(canonical);
     let mut input = SettlementInput {
         log_type: 2,
         channel_id: Some(cand.channel_id),
@@ -476,7 +477,7 @@ async fn commit_and_record(
             canonical,
             okapi_ledger::pg::UsageDimensions::new(
                 requested_model,
-                cand.upstream_model(canonical),
+                upstream_model.as_ref(),
                 &ingress,
                 endpoint,
             ),

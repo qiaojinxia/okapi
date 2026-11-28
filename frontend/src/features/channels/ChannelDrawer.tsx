@@ -89,6 +89,7 @@ export function ChannelDrawer({
           name: form.name,
           api_base: form.api_base,
           models,
+          ...(f.modelMappingDirty ? { model_mapping: f.modelMapping } : {}),
           priority: priority ?? 0,
           settings: channelSettingsForSave(settings),
           cost_milli: costMilli ?? undefined,

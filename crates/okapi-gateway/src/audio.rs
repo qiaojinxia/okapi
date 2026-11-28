@@ -125,7 +125,7 @@ async fn handle_speech(
         }
     };
     failure.channel(&cand);
-    let upstream_model = cand.upstream_model(&canonical).to_owned();
+    let upstream_model = cand.upstream_model(&canonical).into_owned();
     let Ok(body_up) = rewrite_model(body, &probe.model, &upstream_model) else {
         let _ = state
             .ledger
@@ -333,7 +333,7 @@ async fn handle_transcriptions(
         }
     };
     failure.channel(&cand);
-    let upstream_model = cand.upstream_model(&canonical).to_owned();
+    let upstream_model = cand.upstream_model(&canonical).into_owned();
     // model part 重写为上游名
     for (name, _, _, data) in &mut parts {
         if name == "model" {
@@ -443,6 +443,7 @@ async fn settle(
             quote.list_price,
         );
     }
+    let upstream_model = cand.map(|c| c.upstream_model(canonical));
     let input = SettlementInput {
         log_type: 2,
         channel_id: cand.map(|c| c.channel_id),
@@ -463,7 +464,7 @@ async fn settle(
             canonical,
             UsageDimensions::new(
                 requested_model,
-                cand.map_or("", |c| c.upstream_model(canonical)),
+                upstream_model.as_deref().unwrap_or(""),
                 endpoint,
                 endpoint,
             ),

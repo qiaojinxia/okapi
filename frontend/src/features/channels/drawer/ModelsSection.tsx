@@ -9,8 +9,9 @@ import { ModelPicker } from '@/features/channels/ModelPicker'
 import { isCloudManaged } from '@/features/channels/types'
 import { PoolMembership, PoolMembershipEditor } from '@/features/channels/PoolMembership'
 import type { ChannelForm } from './use-channel-form'
+import { ModelMappingEditor } from './ModelMappingEditor'
 
-/// 「模型与渠道池」：服务的模型（手填 / 从上游拉取）与池成员关系。
+/// 「模型与渠道池」：服务的模型（手填 / 从上游拉取）、模型映射与池成员关系。
 export function ModelsSection({ f, channel, poolsOpen, discover, onDone }: {
   f: ChannelForm
   channel: ChannelRow | undefined
@@ -20,7 +21,7 @@ export function ModelsSection({ f, channel, poolsOpen, discover, onDone }: {
 }) {
   const { t } = useTranslation()
   const isEdit = channel !== undefined
-  const { canManagePools, form, models, setModels, newPools, setNewPools, oauth, canDiscover, unknownModels } = f
+  const { canManagePools, form, models, setModels, modelMapping, setModelMapping, newPools, setNewPools, oauth, canDiscover, unknownModels } = f
   return (
     <>
       <FieldGroup
@@ -60,6 +61,9 @@ export function ModelsSection({ f, channel, poolsOpen, discover, onDone }: {
           </p>
         )}
       </FieldGroup>
+      {isEdit && (
+        <ModelMappingEditor value={modelMapping} onChange={setModelMapping} />
+      )}
       {isEdit && canManagePools && (
         <PoolMembership
           channelId={channel.id}

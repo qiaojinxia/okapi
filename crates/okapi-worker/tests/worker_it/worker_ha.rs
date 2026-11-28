@@ -150,6 +150,7 @@ async fn cross_replica_key_health_clears_failures_on_other_node() {
         strip_request_fields: Vec::new(),
         inject_request_fields: serde_json::Map::new(),
         request_overrides: serde_json::Value::Null,
+        status_code_mapping: serde_json::Value::Null,
         tool_loss_policy: None,
         responses_native: false,
         api_version: None,

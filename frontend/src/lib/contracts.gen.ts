@@ -187,6 +187,7 @@ export interface ChannelSettings {
   extra_headers?: Record<string, string>
   inject_request_fields?: Record<string, unknown>
   request_overrides?: RequestOverrideRule[]
+  status_code_mapping?: Record<string, number>
   extensions?: ChannelExtensions
 }
 
@@ -207,6 +208,7 @@ export interface ChannelSettingsPatch {
   extra_headers?: Record<string, string> | null
   inject_request_fields?: Record<string, unknown> | null
   request_overrides?: RequestOverrideRule[] | null
+  status_code_mapping?: Record<string, number> | null
   extensions?: {
     client_profile?: ClientProfile | null
     codex_client?: CodexClientGate | null

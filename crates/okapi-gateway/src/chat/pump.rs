@@ -68,7 +68,7 @@ pub(super) fn cand_info(
         upstream_request_id: None,
         bill_resp_model: cand.bill_by_response_model,
         trust_usage: cand.trust_upstream_usage,
-        upstream_model: cand.upstream_model(model).to_owned(),
+        upstream_model: cand.upstream_model(model).into_owned(),
         upstream_endpoint: upstream_endpoint(cand, model, stream, ingress).to_owned(),
         provider: cand.provider.clone(),
     }
@@ -523,6 +523,7 @@ mod upstream_endpoint_tests {
             strip_request_fields: Vec::new(),
             inject_request_fields: serde_json::Map::new(),
             request_overrides: serde_json::Value::Null,
+            status_code_mapping: serde_json::Value::Null,
             responses_native: true,
             tool_loss_policy: None,
             api_version: None,

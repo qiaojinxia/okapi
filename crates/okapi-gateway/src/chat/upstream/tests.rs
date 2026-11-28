@@ -194,6 +194,7 @@ fn candidate(provider: &str, upstream_model: Option<&str>) -> ChannelCandidate {
         strip_request_fields: Vec::new(),
         inject_request_fields: serde_json::Map::new(),
         request_overrides: serde_json::Value::Null,
+        status_code_mapping: serde_json::Value::Null,
         tool_loss_policy: None,
         responses_native: false,
         api_version: None,
@@ -533,4 +534,29 @@ async fn request_overrides_shape_body_headers_and_return_error() {
     let app_err = super::super::attempt::build_rejection(&reason);
     assert_eq!(app_err.status, axum::http::StatusCode::FORBIDDEN);
     assert_eq!(app_err.param.as_deref(), Some("agent_blocked"));
+}
+
+#[test]
+fn candidate_pattern_model_mapping_and_status_code_mapping() {
+    let mut cand = candidate("anthropic", None);
+    cand.model_mapping = serde_json::json!({
+        "claude-*": "us.anthropic.claude-*-v1:0",
+        "re:^gpt-(\\d+)$": "azure-gpt-$1"
+    });
+    assert_eq!(
+        cand.upstream_model("claude-sonnet-4"),
+        "us.anthropic.claude-sonnet-4-v1:0"
+    );
+    assert_eq!(cand.upstream_model("gpt-5"), "azure-gpt-5");
+    assert_eq!(cand.upstream_model("gemini-2.5"), "gemini-2.5");
+
+    cand.status_code_mapping = serde_json::json!({
+        "400": 429,
+        "503": 502,
+        "500": 200
+    });
+    assert_eq!(cand.mapped_error_status(400), 429);
+    assert_eq!(cand.mapped_error_status(503), 502);
+    assert_eq!(cand.mapped_error_status(500), 500, "2xx target must be ignored");
+    assert_eq!(cand.mapped_error_status(404), 404);
 }

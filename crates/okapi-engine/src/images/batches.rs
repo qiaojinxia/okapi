@@ -258,7 +258,7 @@ async fn submit(state: &AppState, req: Request, id: Uuid) -> Result<Batch, AppEr
             provider: &candidate.provider,
             channel_id: candidate.channel_id,
             channel_key_id: candidate.channel_key_id,
-            upstream_model: candidate.upstream_model(&prepared.canonical),
+            upstream_model: &candidate.upstream_model(&prepared.canonical),
             pricing: &pricing,
             unit_quote: &quote,
             maximum: Money::from_micros(maximum),

@@ -161,7 +161,7 @@ async fn handle_create(
         }
         attempted += 1;
         failure.channel(&cand);
-        let upstream_model = cand.upstream_model(&canonical).to_owned();
+        let upstream_model = cand.upstream_model(&canonical).into_owned();
         let Ok(body_up) = rewrite_model(&body, &probe.model, &upstream_model) else {
             refund(state, &key, request_id, "videos").await;
             let error = AppError::bad_request();
@@ -492,6 +492,7 @@ async fn commit_and_record(
     payer: Payer<'_>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
+    let upstream_model = cand.upstream_model(canonical);
     let input = SettlementInput {
         log_type: 2,
         channel_id: Some(cand.channel_id),
@@ -518,7 +519,7 @@ async fn commit_and_record(
             canonical,
             okapi_ledger::pg::UsageDimensions::new(
                 requested_model,
-                cand.upstream_model(canonical),
+                upstream_model.as_ref(),
                 "/v1/videos",
                 "/v1/videos",
             ),

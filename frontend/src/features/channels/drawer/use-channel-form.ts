@@ -29,6 +29,14 @@ export function useChannelForm(channel: ChannelRow | undefined, template?: Chann
   const accountReady = account.isSuccess
   const costMilli = ratioToCostMilli(form.cost)
   const [models, setModels] = useState<string[]>(seed?.models ?? [])
+  const [modelMapping, setModelMappingState] = useState<Record<string, string>>(
+    () => ({ ...seed?.model_mapping }),
+  )
+  const [modelMappingDirty, setModelMappingDirty] = useState(false)
+  const setModelMapping = (next: Record<string, string>) => {
+    setModelMappingState(next)
+    setModelMappingDirty(true)
+  }
   const [credential, setCredential] = useState('')
   const [oauthInput, setOauthInput] = useState<'login' | 'import'>(
     channel?.keys.some((key) => key.oauth_refreshable === false)
@@ -77,6 +85,9 @@ export function useChannelForm(channel: ChannelRow | undefined, template?: Chann
     costMilli,
     models,
     setModels,
+    modelMapping,
+    setModelMapping,
+    modelMappingDirty,
     credential,
     setCredential,
     oauthInput,
