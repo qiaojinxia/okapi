@@ -63,8 +63,7 @@ async fn count(state: &AppState, headers: &HeaderMap, body: Bytes) -> Result<Res
             codes::MODEL_NOT_ALLOWED,
         ));
     }
-    super::auth::check_group_rate(state, &key).await?;
-    super::admission::check_model_rpm(state, &key, &meta.canonical).await?;
+    super::admission::check_group_and_model_rates(state, &key, &meta.canonical).await?;
     // 本地估算不能解析服务端历史，不先探测其是否存在。
     if mode == CountMode::Estimate
         && value

@@ -117,8 +117,7 @@ async fn handle_create(
         return Err(AppError::bad_request().with_param("per_call_required"));
     }
     super::auth::check_member_limit(state, &key).await?;
-    super::auth::check_group_rate(state, &key).await?;
-    super::admission::check_model_rpm(state, &key, &canonical).await?;
+    super::admission::check_group_and_model_rates(state, &key, &canonical).await?;
 
     let super::admission::Reserved {
         pool: reservation_pool,

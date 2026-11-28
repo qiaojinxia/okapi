@@ -92,6 +92,44 @@ pub async fn check_model_rpm(
     Ok(())
 }
 
+/// 合并检查分组级 `[group_rpm, group_rph]` 与用户×模型 `model_rpm`：
+/// 三轴同属 `{user_id}` Cluster hash-tag，单次原子 Redis Lua 往返完成；任一超限均不扣减其他轴配额。
+/// 全部未配置时零 Redis 往返。
+pub async fn check_group_and_model_rates(
+    state: &AppState,
+    key: &AuthedKey,
+    model: &str,
+) -> Result<(), AppError> {
+    let cap = |v: Option<i32>| v.filter(|n| *n > 0).map(i64::from);
+    let (rpm, rph) = (cap(key.group_rpm_limit), cap(key.group_rph_limit));
+    let limits = state.setting_cached("model_rpm_limits").await;
+    let model_limit = limits
+        .as_ref()
+        .as_ref()
+        .and_then(|v| v.get(model))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|v| *v > 0);
+    if rpm.is_none() && rph.is_none() && model_limit.is_none() {
+        return Ok(());
+    }
+    if let Some(which) = state
+        .sched
+        .group_and_model_rate_check(
+            key.user_id,
+            &key.group_code,
+            rpm,
+            rph,
+            model_limit.map(|l| (model, l)),
+        )
+        .await
+    {
+        return Err(
+            AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
+        );
+    }
+    Ok(())
+}
+
 /// 预扣成功后的落点：所在池与订阅窗口（结算回到同一池）。
 pub struct Reserved {
     pub pool: Pool,

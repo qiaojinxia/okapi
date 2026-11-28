@@ -26,23 +26,35 @@ pub struct RuleInputs {
     pub surge_active: bool,
 }
 
-/// 采集本次请求的规则输入（无对应规则时零 IO）。
+/// 采集本次请求的规则输入（无对应规则时零 IO；多类规则启用时管道合并并并发查询）。
 pub async fn collect(state: &AppState, book: &PriceBook, user_id: i64) -> RuleInputs {
-    let monthly_tokens = if book.has_volume_rules() {
-        state.sched.monthly_tokens_get(user_id).await
-    } else {
-        0
-    };
-    let monthly_spend_micro = if book.has_spend_rules() {
-        state.sched.monthly_spend_get(user_id).await
-    } else {
-        0
-    };
-    let surge_active = if book.has_surge_rules() {
-        surge_active(state).await
-    } else {
-        false
-    };
+    let need_tokens = book.has_volume_rules();
+    let need_spend = book.has_spend_rules();
+    let need_surge = book.has_surge_rules();
+    if !need_tokens && !need_spend && !need_surge {
+        return RuleInputs::default();
+    }
+    let ((monthly_tokens, monthly_spend_micro), surge_active) = Box::pin(async {
+        let volume_fut = async {
+            if need_tokens || need_spend {
+                state
+                    .sched
+                    .monthly_volume_get(user_id, need_tokens, need_spend)
+                    .await
+            } else {
+                (0, 0)
+            }
+        };
+        let surge_fut = async {
+            if need_surge {
+                surge_active(state).await
+            } else {
+                false
+            }
+        };
+        tokio::join!(volume_fut, surge_fut)
+    })
+    .await;
     RuleInputs {
         monthly_tokens,
         monthly_spend_micro,
@@ -58,12 +70,23 @@ pub async fn collect(state: &AppState, book: &PriceBook, user_id: i64) -> RuleIn
 /// 下个自然月起与真实值一致（自收敛）。为这一个月回填历史用量的代价（要扫账本）不值得。
 pub async fn record_tokens(state: &AppState, user_id: i64, tokens: u64, amount_micro: i64) {
     let book = state.pricebook.load();
-    if book.has_volume_rules() {
-        state.sched.monthly_tokens_add(user_id, tokens).await;
+    let need_tokens = book.has_volume_rules();
+    let need_spend = book.has_spend_rules();
+    if !need_tokens && !need_spend {
+        return;
     }
-    if book.has_spend_rules() {
-        state.sched.monthly_spend_add(user_id, amount_micro).await;
-    }
+    tokio::join!(
+        async {
+            if need_tokens {
+                state.sched.monthly_tokens_add(user_id, tokens).await;
+            }
+        },
+        async {
+            if need_spend {
+                state.sched.monthly_spend_add(user_id, amount_micro).await;
+            }
+        }
+    );
 }
 
 /// surge 判定用**集群**在途量，不是本进程的。

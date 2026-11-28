@@ -120,19 +120,43 @@ pub(super) async fn prepare_chat(
     };
     let parsed = parsed.or(owned_parsed.as_ref());
 
-    let response_parent = if matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact) {
-        if let Some(value) = parsed {
-            response_affinity::resolve_parent_value(&state.sched, key.user_id, key.key_id, value)
-                .await?
-        } else {
-            response_affinity::resolve_parent(&state.sched, key.user_id, key.key_id, body).await?
-        }
-    } else {
-        None
-    };
-
     let book = state.pricebook.load();
-    let rules_in = super::super::rule_inputs::collect(state, &book, key.user_id).await;
+    let pin = super::super::channel_test::current();
+    let primary_pool = key
+        .pool_code
+        .as_deref()
+        .unwrap_or(okapi_store::channels::DEFAULT_POOL);
+
+    // 首字前独立只读 IO 并发收敛（Responses 父绑定 / 规则输入 / 池策略 / 成员与令牌周期消费只读查询）；
+    // `member_limit_result` 延迟到预扣前再 `?` 抛出，保持与 `tools` / `price_above_max` 完全一致的错误优先级且零副作用。
+    let (response_parent, rules_in, stored_policy, member_limit_result) = Box::pin(async {
+        let parent_fut = async {
+            if matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact) {
+                if let Some(value) = parsed {
+                    response_affinity::resolve_parent_value(
+                        &state.sched,
+                        key.user_id,
+                        key.key_id,
+                        value,
+                    )
+                    .await
+                } else {
+                    response_affinity::resolve_parent(&state.sched, key.user_id, key.key_id, body)
+                        .await
+                }
+            } else {
+                Ok(None)
+            }
+        };
+        tokio::join!(
+            parent_fut,
+            super::super::rule_inputs::collect(state, &book, key.user_id),
+            state.load_pool_policy(primary_pool),
+            super::super::auth::check_member_limit(state, &key),
+        )
+    })
+    .await;
+    let response_parent = response_parent?;
     let now = chrono::Utc::now();
     // 计价名（§11.25）：变体在价簿里配了价就按变体收，否则回退基座——修饰符改的是
     // 上游行为，站长愿不愿意为它单独定价是另一回事，没配价不该让请求失败。
@@ -181,12 +205,6 @@ pub(super) async fn prepare_chat(
         reasoning_tokens: 0,
         ..TokenUsage::default()
     };
-    let pin = super::super::channel_test::current();
-    let primary_pool = key
-        .pool_code
-        .as_deref()
-        .unwrap_or(okapi_store::channels::DEFAULT_POOL);
-    let stored_policy = state.load_pool_policy(primary_pool).await;
     let req_features = okapi_domain::pool_policy::RequestFeatures {
         model: &canonical,
         prompt_tokens: est_prompt,
@@ -255,17 +273,50 @@ pub(super) async fn prepare_chat(
     )?];
     // 测试钉住了渠道：换模型就不是在测它了
     if prefs.allow_fallbacks && response_parent.is_none() && pin.is_none() {
-        for fb in meta
+        let eligible: Vec<&str> = meta
             .fallback_models
             .iter()
             .filter(|fb| *fb != &canonical && key.allows_model(fb))
-        {
-            let Some(fallback) = resolve_model_cached(state, fb).await?.as_ref().clone() else {
-                continue;
-            };
-            if fallback.canonical == canonical {
-                continue;
+            .map(String::as_str)
+            .collect();
+        let resolved_fallbacks: Vec<(
+            okapi_store::channels::ResolvedModel,
+            okapi_providers::profiles::AdmissionHints,
+        )> = match eligible.as_slice() {
+            [] => Vec::new(),
+            [fb] => {
+                if let Some(fallback) = resolve_model_cached(state, fb).await?.as_ref().clone()
+                    && fallback.canonical != canonical
+                {
+                    let hints = admission_hints(state, &fallback.canonical, &pool_chain).await;
+                    vec![(fallback, hints)]
+                } else {
+                    Vec::new()
+                }
             }
+            many => {
+                let results = Box::pin(futures::future::join_all(many.iter().map(|fb| async {
+                    let resolved = resolve_model_cached(state, fb).await?;
+                    let Some(fallback) = resolved.as_ref().clone() else {
+                        return Ok::<_, AppError>(None);
+                    };
+                    if fallback.canonical == canonical {
+                        return Ok(None);
+                    }
+                    let hints = admission_hints(state, &fallback.canonical, &pool_chain).await;
+                    Ok(Some((fallback, hints)))
+                })))
+                .await;
+                let mut out = Vec::with_capacity(many.len());
+                for item in results {
+                    if let Some(pair) = item? {
+                        out.push(pair);
+                    }
+                }
+                out
+            }
+        };
+        for (fallback, hints) in resolved_fallbacks {
             let mut fallback_calc = calc.clone();
             fallback_calc.model = ModelCode::from(fallback.canonical.as_str());
             let fallback_cap = admitted_completion_cap(
@@ -278,7 +329,7 @@ pub(super) async fn prepare_chat(
                     completion_tokens: fallback_cap.saturating_mul(info.choices),
                     ..base_usage
                 },
-                admission_hints(state, &fallback.canonical, &pool_chain).await,
+                hints,
             );
             // 兜底链里没给工具定价的备选模型直接跳过，不拖垮整个请求
             if !server_tools.allows_fallback(&book, &fallback_calc.model) {
@@ -327,11 +378,10 @@ pub(super) async fn prepare_chat(
         reservation_candidates,
     )?);
 
-    // 团成员月度限额（§6.1 软实时）
-    super::super::auth::check_member_limit(state, &key).await?;
-    // 分组级 [rpm, rph]（§11.32，限额随鉴权缓存下发）
-    super::super::auth::check_group_rate(state, &key).await?;
-    super::super::admission::check_model_rpm(state, &key, &canonical).await?;
+    // 团成员月度限额 & 令牌周期预算（已在首字前并发段读完，这里按原顺序校验零等待）
+    member_limit_result?;
+    // 分组级 [rpm, rph] + 用户×模型 RPM：单次原子 Lua 往返（任一超限不空耗其他轴配额）
+    super::super::admission::check_group_and_model_rates(state, &key, &canonical).await?;
 
     // 预扣（余额 + RPM/TPM/RPD + 并发，单 Lua 原子）
     let super::super::admission::Reserved {

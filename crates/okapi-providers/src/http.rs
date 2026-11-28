@@ -10,7 +10,7 @@ use crate::error::UpstreamError;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
 /// 代理 client 闲置这么久就淘汰（连接池随之关闭）。
 const PROXIED_IDLE: Duration = Duration::from_mins(15);
+/// 单类代理 client 缓存容量上限（防止高频换代理/改密导致连接池与 FD 无界堆积）。
+const MAX_PROXIED_CLIENTS: usize = 256;
+/// 命中快路径时顺手触发闲置清理的最小间隔（避免仅在插入新代理 URL 时才清理旧池）。
+const PROXIED_SWEEP_INTERVAL_SECS: u64 = 60;
+
+/// 连接池空闲连接治理：防止数百代理与长驻上游持续堆积闲置 socket / FD。
+const DIRECT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const DIRECT_POOL_MAX_IDLE_PER_HOST: usize = 128;
+const PROXIED_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const PROXIED_POOL_MAX_IDLE_PER_HOST: usize = 16;
+const PROBE_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const PROBE_POOL_MAX_IDLE_PER_HOST: usize = 4;
+const WS_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const WS_POOL_MAX_IDLE_PER_HOST: usize = 16;
 
 /// 一条渠道的出站修饰：代理 + 额外请求头。缺省 = 直连、不加头。
 #[derive(Debug, Clone, Default)]
@@ -209,11 +223,11 @@ pub struct HttpPool {
 
 struct Clients {
     default: reqwest::Client,
-    proxied: RwLock<HashMap<String, Cached>>,
+    proxied: ProxyClientCache,
     probe_default: reqwest::Client,
-    probe_proxied: RwLock<HashMap<String, Cached>>,
+    probe_proxied: ProxyClientCache,
     websocket_default: reqwest::Client,
-    websocket_proxied: RwLock<HashMap<String, Cached>>,
+    websocket_proxied: ProxyClientCache,
     /// Claude Code 外形渠道的出站连接（BoringSSL 握手，见 `client_tls`）。
     claude_code: crate::client_tls::ClaudeCodeTls,
     /// Claude 订阅的账号接口（换码、刷新、用量）：真机走 axios，握手是另一套。
@@ -224,6 +238,118 @@ struct Clients {
 struct Cached {
     client: reqwest::Client,
     last_used: AtomicU64,
+}
+
+/// 有界、按闲置周期清理且冷启动单飞的代理 `reqwest::Client` 缓存：
+/// - 命中快路径只持读锁更新原子时间戳，并按 `PROXIED_SWEEP_INTERVAL_SECS` 定期清理已过期条目；
+/// - 未命中时仅在 `build_lock` 下单飞构建（不阻塞其他代理 URL 的读锁命中），避免并发冷击穿重复加载 TLS 根证书；
+/// - 超过 `max_entries` 时淘汰最久未用（LRU）条目，防止连接池与 FD 无界增长。
+struct ProxyClientCache {
+    entries: RwLock<HashMap<String, Cached>>,
+    build_lock: Mutex<()>,
+    last_sweep: AtomicU64,
+    max_entries: usize,
+    idle_secs: u64,
+    sweep_interval_secs: u64,
+}
+
+impl ProxyClientCache {
+    fn new() -> Self {
+        Self::with_limits(
+            MAX_PROXIED_CLIENTS,
+            PROXIED_IDLE.as_secs(),
+            PROXIED_SWEEP_INTERVAL_SECS,
+        )
+    }
+
+    fn with_limits(max_entries: usize, idle_secs: u64, sweep_interval_secs: u64) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            build_lock: Mutex::new(()),
+            last_sweep: AtomicU64::new(0),
+            max_entries: max_entries.max(1),
+            idle_secs,
+            sweep_interval_secs,
+        }
+    }
+
+    fn get_or_build(
+        &self,
+        url: &str,
+        now: u64,
+        build: impl FnOnce() -> Result<reqwest::Client, UpstreamError>,
+    ) -> Result<reqwest::Client, UpstreamError> {
+        if let Ok(guard) = self.entries.read()
+            && let Some(hit) = guard.get(url)
+        {
+            hit.last_used.store(now, Ordering::Relaxed);
+            let client = hit.client.clone();
+            drop(guard);
+            self.maybe_sweep_idle(now);
+            return Ok(client);
+        }
+
+        // 冷启动单飞：同类池仅在 miss 时串行构建，读锁保持畅通，其他代理请求不受影响。
+        let _build_guard = self
+            .build_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(guard) = self.entries.read()
+            && let Some(hit) = guard.get(url)
+        {
+            hit.last_used.store(now, Ordering::Relaxed);
+            return Ok(hit.client.clone());
+        }
+
+        let client = build()?;
+        if let Ok(mut guard) = self.entries.write() {
+            if let Some(hit) = guard.get(url) {
+                hit.last_used.store(now, Ordering::Relaxed);
+                return Ok(hit.client.clone());
+            }
+            evict_idle(&mut guard, now, self.idle_secs);
+            self.last_sweep.store(now, Ordering::Relaxed);
+            evict_lru_to_fit(&mut guard, self.max_entries.saturating_sub(1));
+            guard.insert(
+                url.to_owned(),
+                Cached {
+                    client: client.clone(),
+                    last_used: AtomicU64::new(now),
+                },
+            );
+        }
+        Ok(client)
+    }
+
+    fn maybe_sweep_idle(&self, now: u64) {
+        let prev = self.last_sweep.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) < self.sweep_interval_secs {
+            return;
+        }
+        if self
+            .last_sweep
+            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        if let Ok(mut guard) = self.entries.try_write() {
+            evict_idle(&mut guard, now, self.idle_secs);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&self, url: String, client: reqwest::Client, last_used: u64) {
+        if let Ok(mut guard) = self.entries.write() {
+            guard.insert(
+                url,
+                Cached {
+                    client,
+                    last_used: AtomicU64::new(last_used),
+                },
+            );
+        }
+    }
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -243,11 +369,11 @@ impl HttpPool {
         Ok(Self {
             clients: std::sync::Arc::new(Clients {
                 default: build_client(None, ClientPolicy::Forward)?,
-                proxied: RwLock::new(HashMap::new()),
+                proxied: ProxyClientCache::new(),
                 probe_default: build_client(None, ClientPolicy::Probe)?,
-                probe_proxied: RwLock::new(HashMap::new()),
+                probe_proxied: ProxyClientCache::new(),
                 websocket_default: build_client(None, ClientPolicy::WebSocket)?,
-                websocket_proxied: RwLock::new(HashMap::new()),
+                websocket_proxied: ProxyClientCache::new(),
                 claude_code: crate::client_tls::ClaudeCodeTls::new(
                     crate::client_tls::Shape::Messages,
                 )?,
@@ -378,39 +504,31 @@ impl HttpPool {
 
 fn cached_client(
     default: &reqwest::Client,
-    cache: &RwLock<HashMap<String, Cached>>,
+    cache: &ProxyClientCache,
     proxy_url: Option<&str>,
     policy: ClientPolicy,
 ) -> Result<reqwest::Client, UpstreamError> {
     let Some(url) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(default.clone());
     };
-    if let Ok(guard) = cache.read()
-        && let Some(hit) = guard.get(url)
-    {
-        hit.last_used.store(now_secs(), Ordering::Relaxed);
-        return Ok(hit.client.clone());
-    }
-    let built = build_client(Some(url), policy)?;
-    if let Ok(mut guard) = cache.write() {
-        // 新建时顺手淘汰闲置的：改过密码 / 删掉的代理不会再被取用，留着只占连接池
-        let now = now_secs();
-        evict_idle(&mut guard, now);
-        guard.insert(
-            url.to_owned(),
-            Cached {
-                client: built.clone(),
-                last_used: AtomicU64::new(now),
-            },
-        );
-    }
-    Ok(built)
+    cache.get_or_build(url, now_secs(), || build_client(Some(url), policy))
 }
 
-fn evict_idle(cache: &mut HashMap<String, Cached>, now: u64) {
-    cache.retain(|_, entry| {
-        now.saturating_sub(entry.last_used.load(Ordering::Relaxed)) < PROXIED_IDLE.as_secs()
-    });
+fn evict_idle(cache: &mut HashMap<String, Cached>, now: u64, idle_secs: u64) {
+    cache.retain(|_, entry| now.saturating_sub(entry.last_used.load(Ordering::Relaxed)) < idle_secs);
+}
+
+fn evict_lru_to_fit(cache: &mut HashMap<String, Cached>, target_len: usize) {
+    while cache.len() > target_len {
+        let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest_key);
+    }
 }
 
 fn build_client(
@@ -426,9 +544,19 @@ fn client_builder(
     proxy_url: Option<&str>,
     policy: ClientPolicy,
 ) -> Result<reqwest::ClientBuilder, UpstreamError> {
+    let (pool_idle_timeout, pool_max_idle_per_host) = match (proxy_url.is_some(), policy) {
+        (_, ClientPolicy::Probe) => (PROBE_POOL_IDLE_TIMEOUT, PROBE_POOL_MAX_IDLE_PER_HOST),
+        (_, ClientPolicy::WebSocket) => (WS_POOL_IDLE_TIMEOUT, WS_POOL_MAX_IDLE_PER_HOST),
+        (true, ClientPolicy::Forward) => {
+            (PROXIED_POOL_IDLE_TIMEOUT, PROXIED_POOL_MAX_IDLE_PER_HOST)
+        }
+        (false, ClientPolicy::Forward) => (DIRECT_POOL_IDLE_TIMEOUT, DIRECT_POOL_MAX_IDLE_PER_HOST),
+    };
     // Custom auth headers are not stripped by reqwest on cross-host redirects.
     let mut builder = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(pool_idle_timeout)
+        .pool_max_idle_per_host(pool_max_idle_per_host)
         .redirect(reqwest::redirect::Policy::none());
     if matches!(policy, ClientPolicy::WebSocket) {
         builder = builder.http1_only();
@@ -591,26 +719,79 @@ mod tests {
     }
 
     #[test]
-    fn idle_proxied_clients_are_evicted() {
+    fn idle_proxied_clients_are_evicted_even_on_hit_sweep() {
         let client = build_client(None, ClientPolicy::Forward).unwrap();
         let idle = PROXIED_IDLE.as_secs();
-        let mut cache = HashMap::from([
-            (
-                "http://old:1".to_owned(),
-                Cached {
-                    client: client.clone(),
-                    last_used: AtomicU64::new(0),
-                },
-            ),
-            (
-                "http://fresh:2".to_owned(),
-                Cached {
-                    client,
-                    last_used: AtomicU64::new(idle),
-                },
-            ),
-        ]);
-        evict_idle(&mut cache, idle + 1);
-        assert_eq!(cache.keys().collect::<Vec<_>>(), ["http://fresh:2"]);
+        let cache = ProxyClientCache::with_limits(8, idle, 60);
+        cache.insert_for_test("http://old:1".to_owned(), client.clone(), 0);
+        cache.insert_for_test("http://fresh:2".to_owned(), client, idle);
+
+        // Hitting an active proxy triggers the periodic idle sweep without needing a new proxy insert.
+        let _ = cache
+            .get_or_build("http://fresh:2", idle + 1, || unreachable!("must hit cache"))
+            .unwrap();
+        let keys: Vec<String> = cache.entries.read().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["http://fresh:2"]);
+    }
+
+    #[test]
+    fn proxied_cache_enforces_capacity_by_evicting_lru() {
+        let client = build_client(None, ClientPolicy::Forward).unwrap();
+        let cache = ProxyClientCache::with_limits(2, 900, 60);
+        cache
+            .get_or_build("http://p1:1", 10, || Ok(client.clone()))
+            .unwrap();
+        cache
+            .get_or_build("http://p2:2", 20, || Ok(client.clone()))
+            .unwrap();
+        // Refresh p1 so p2 becomes the least recently used entry.
+        cache
+            .get_or_build("http://p1:1", 30, || unreachable!("must hit"))
+            .unwrap();
+        cache
+            .get_or_build("http://p3:3", 40, || Ok(client))
+            .unwrap();
+
+        let mut keys: Vec<String> = cache.entries.read().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["http://p1:1", "http://p3:3"]);
+    }
+
+    #[test]
+    fn proxied_cache_coalesces_concurrent_misses_singleflight() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, Barrier};
+
+        let cache = Arc::new(ProxyClientCache::with_limits(8, 900, 60));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let shared = build_client(None, ClientPolicy::Forward).unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let builds = Arc::clone(&builds);
+                let barrier = Arc::clone(&barrier);
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cache
+                        .get_or_build("http://cold-proxy:7890", 100, || {
+                            builds.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(15));
+                            Ok(shared)
+                        })
+                        .unwrap()
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "concurrent misses for the same proxy URL must build exactly one Client"
+        );
     }
 }

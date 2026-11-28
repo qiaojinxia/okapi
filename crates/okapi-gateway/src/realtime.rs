@@ -180,8 +180,7 @@ async fn prepare(
         ));
     }
     super::auth::check_member_limit(state, key).await?;
-    super::auth::check_group_rate(state, key).await?;
-    super::admission::check_model_rpm(state, key, &canonical).await?;
+    super::admission::check_group_and_model_rates(state, key, &canonical).await?;
 
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;

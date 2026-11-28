@@ -92,8 +92,7 @@ async fn handle_speech(
     let calc = super::admission::calc_context(&key, &canonical, rules_in, chrono::Utc::now(), None);
     let quote = calculate_characters(&book, &calc, chars)?;
     super::auth::check_member_limit(state, &key).await?;
-    super::auth::check_group_rate(state, &key).await?;
-    super::admission::check_model_rpm(state, &key, &canonical).await?;
+    super::admission::check_group_and_model_rates(state, &key, &canonical).await?;
 
     let super::admission::Reserved {
         pool: reservation_pool,
@@ -296,8 +295,7 @@ async fn handle_transcriptions(
         return Err(AppError::bad_request().with_param("transcriptions_requires_per_call_model"));
     }
     super::auth::check_member_limit(state, &key).await?;
-    super::auth::check_group_rate(state, &key).await?;
-    super::admission::check_model_rpm(state, &key, &canonical).await?;
+    super::admission::check_group_and_model_rates(state, &key, &canonical).await?;
 
     let super::admission::Reserved {
         pool: reservation_pool,

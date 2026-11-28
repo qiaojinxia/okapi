@@ -174,12 +174,10 @@ async fn wss_through_authenticated_connect_proxy_retains_tls_and_http1() {
     let (addr, peer) = tls_server().await;
     let (proxy_url, proxy) = connect_proxy(addr).await;
     let pool = HttpPool::new().unwrap();
-    pool.clients.websocket_proxied.write().unwrap().insert(
+    pool.clients.websocket_proxied.insert_for_test(
         proxy_url.clone(),
-        Cached {
-            client: trusted_client(Some(&proxy_url), ClientPolicy::WebSocket),
-            last_used: AtomicU64::new(now_secs()),
-        },
+        trusted_client(Some(&proxy_url), ClientPolicy::WebSocket),
+        now_secs(),
     );
     exchange(
         pool,
