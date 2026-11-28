@@ -195,6 +195,8 @@ pub struct FlowControl {
     pub settle_shedding: Arc<std::sync::atomic::AtomicBool>,
     /// 普通成功结算的进程内微批组提交器（每批最多 64 笔 / 2ms 聚合窗口，显著降低 PG WAL 与渠道热点行锁竞争）。
     pub settle_batcher: Arc<settlement::SettlementBatcher>,
+    /// 对话存档的进程内有界微批落盘器（独立于财务结算 `settlements`，按条数/字节/200ms 批量写 CH/PG）。
+    pub archive_batcher: Arc<super::conversation_archive::ArchiveBatcher>,
     /// Unit tests must not expose their settlement journal to a live worker.
     #[cfg(test)]
     pub(crate) settlement_journal_tag: Arc<str>,

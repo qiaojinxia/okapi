@@ -17,13 +17,13 @@ pub mod routing_prefs;
 pub mod token_count;
 
 pub use okapi_engine::{
-    SETTLE_DRAIN_CAP, account_control, auth, bridge, build_ch_optional, channel_balance,
-    channel_permit, channel_probe, channel_test, connect_nats_optional, credentials, diagnostics,
-    dialect, flow_control_for_pool, images, ingress, oauth_cred, openai_dialect,
-    refresh_pricebook_if_newer, request_policy, rule_inputs, scheduler, settlement_retry,
-    spawn_epoch_poller, spawn_epoch_subscriber, spawn_routing_invalidate_subscriber,
-    spawn_ssrf_policy_sync, spawn_state_sync, state, stream_policy, sync_ssrf_policy, user_turns,
-    videos,
+    ARCHIVE_DRAIN_CAP, SETTLE_DRAIN_CAP, account_control, auth, bridge, build_ch_optional,
+    channel_balance, channel_permit, channel_probe, channel_test, connect_nats_optional,
+    credentials, diagnostics, dialect, flow_control_for_pool, images, ingress, oauth_cred,
+    openai_dialect, refresh_pricebook_if_newer, request_policy, rule_inputs, scheduler,
+    settlement_retry, spawn_epoch_poller, spawn_epoch_subscriber,
+    spawn_routing_invalidate_subscriber, spawn_ssrf_policy_sync, spawn_state_sync, state,
+    stream_policy, sync_ssrf_policy, user_turns, videos,
 };
 pub(crate) use okapi_engine::{
     admission, candidates, execution_plan, extensions, failure, key_gate, key_health, server_tools,
@@ -166,6 +166,7 @@ where
     }
 
     let settlements = state.settlements.clone();
+    let archive_batcher = Arc::clone(&state.flow.archive_batcher);
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!(bind = %cfg.bind, "okapi gateway 启动");
@@ -181,6 +182,8 @@ where
     // Realtime 会话在升级后脱离了 HTTP 排水：通知它们收尾，结算同样计入下面的等待
     settlements.drain();
     settlements.wait_idle(SETTLE_DRAIN_CAP).await;
+    // 在途流式结算结束后再冲刷对话存档微批（独立短超时，不拖住财务结算）
+    archive_batcher.drain(ARCHIVE_DRAIN_CAP).await;
     tracing::info!("okapi gateway 已下线");
     Ok(())
 }

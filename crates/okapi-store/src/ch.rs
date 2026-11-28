@@ -28,6 +28,11 @@ const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max
 /// 批写 JSONEachRow 超过此阈值即启用 `Content-Encoding: gzip` 压缩上行。
 const GZIP_REQUEST_THRESHOLD: usize = 512;
 
+/// ClickHouse 并发查询闸默认值及上下界（大查询 weight = 2，下限必须 >= 2 以防永久阻塞）。
+const DEFAULT_CH_MAX_CONCURRENCY: usize = 4;
+const MIN_CH_MAX_CONCURRENCY: usize = 2;
+const MAX_CH_MAX_CONCURRENCY: usize = 64;
+
 #[derive(Clone)]
 pub struct ChClient {
     http: reqwest::Client,
@@ -35,6 +40,8 @@ pub struct ChClient {
     database: String,
     credentials: Option<(String, String)>,
     query_gate: std::sync::Arc<tokio::sync::Semaphore>,
+    archive_table_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    archive_table_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 /// 拆出 URL 内嵌凭证（`http://user:pass@host:port`）→（纯净 base，凭证）。
@@ -98,13 +105,40 @@ impl ChClient {
             .pool_idle_timeout(Duration::from_secs(2))
             .build()?;
         let (base, credentials) = split_credentials(base_url.trim())?;
+        let max_concurrency = crate::env_config::number(
+            "OKAPI_CH_MAX_CONCURRENCY",
+            DEFAULT_CH_MAX_CONCURRENCY,
+            |v| (MIN_CH_MAX_CONCURRENCY..=MAX_CH_MAX_CONCURRENCY).contains(v),
+        );
         Ok(Self {
             http,
             base,
             database: database.to_owned(),
             credentials,
-            query_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+            query_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
+            archive_table_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            archive_table_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
+    }
+
+    /// 单飞幂等确保对话存档表存在（按 `ChClient` 实例隔离，避免并发 DDL 风暴与跨库污染）。
+    pub(crate) async fn ensure_archive_table(&self, ddl: &str) -> Result<(), StoreError> {
+        use std::sync::atomic::Ordering;
+        if self.archive_table_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.archive_table_lock.lock().await;
+        if self.archive_table_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.execute(ddl).await?;
+        self.archive_table_ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn invalidate_archive_table(&self) {
+        self.archive_table_ready
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -264,6 +298,9 @@ impl ChClient {
         self.execute_concurrent(materialized_views).await?;
         self.execute_concurrent(read_views).await?;
         server_tools::schema::ensure(self).await?;
+        // ch_schema.sql 已包含 conversation_archives 建表 DDL，跳过首次存档写入的冗余建表检查
+        self.archive_table_ready
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -287,12 +324,8 @@ impl ChClient {
             urlencode(dedup_token),
             AGGREGATION_GUARD,
         );
-        let mut body = String::new();
-        for row in rows {
-            body.push_str(&row.to_string());
-            body.push('\n');
-        }
-        self.post_raw(url, body.into_bytes(), true, false).await?;
+        let body = encode_json_each_row(rows)?;
+        self.post_raw(url, body, true, false).await?;
         Ok(())
     }
 
@@ -427,6 +460,16 @@ fn urlencode(input: &str) -> String {
     out
 }
 
+fn encode_json_each_row(rows: &[serde_json::Value]) -> Result<Vec<u8>, StoreError> {
+    let mut body = Vec::with_capacity(rows.len().saturating_mul(256));
+    for row in rows {
+        serde_json::to_writer(&mut body, row)
+            .map_err(|_| StoreError::InvalidData("clickhouse_json_encode_failed"))?;
+        body.push(b'\n');
+    }
+    Ok(body)
+}
+
 fn gzip_compress(input: &[u8]) -> Result<Vec<u8>, StoreError> {
     use std::io::Write as _;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -450,7 +493,28 @@ fn gzip_decompress(input: &[u8]) -> Result<String, StoreError> {
 
 #[cfg(test)]
 mod url_tests {
-    use super::{gzip_compress, gzip_decompress, split_credentials};
+    use super::{encode_json_each_row, gzip_compress, gzip_decompress, split_credentials};
+
+    #[test]
+    fn encodes_json_each_row_directly_into_ndjson_bytes() {
+        let rows = vec![
+            serde_json::json!({"id": 1, "msg": "hello"}),
+            serde_json::json!({"id": 2, "msg": "你好"}),
+        ];
+        let bytes = encode_json_each_row(&rows).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(lines[0]).unwrap(),
+            rows[0]
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(lines[1]).unwrap(),
+            rows[1]
+        );
+        assert!(text.ends_with('\n'));
+    }
 
     #[test]
     fn gzip_round_trips_and_rejects_truncated_payloads() {

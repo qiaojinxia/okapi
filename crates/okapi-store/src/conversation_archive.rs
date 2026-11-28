@@ -9,7 +9,6 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
-use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 const CH_CREATE_TABLE_SQL: &str = r"CREATE TABLE IF NOT EXISTS conversation_archives (
@@ -38,8 +37,6 @@ SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000";
 const PG_PRUNE_BATCH: i64 = 5000;
 const PG_PRUNE_MAX_ROUNDS: usize = 20;
 const PREVIEW_CHARS: usize = 160;
-
-static CH_TABLE_ENSURED: AtomicBool = AtomicBool::new(false);
 
 /// 完整的单笔对话存档记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,14 +115,9 @@ pub struct PruneReport {
     pub cutoff: Option<DateTime<Utc>>,
 }
 
-/// 幂等确保 ClickHouse `conversation_archives` 表存在（进程内缓存已建标记）。
+/// 幂等确保 ClickHouse `conversation_archives` 表存在（按 `ChClient` 单飞缓存，避免并发 DDL 风暴）。
 pub async fn ensure_ch_table(ch: &ChClient) -> Result<(), StoreError> {
-    if CH_TABLE_ENSURED.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    ch.execute(CH_CREATE_TABLE_SQL).await?;
-    CH_TABLE_ENSURED.store(true, Ordering::Release);
-    Ok(())
+    ch.ensure_archive_table(CH_CREATE_TABLE_SQL).await
 }
 
 fn fmt_ch_ts(ts: DateTime<Utc>) -> String {
@@ -164,26 +156,43 @@ pub async fn insert(
     ch: Option<&ChClient>,
     record: &ArchiveRecord,
 ) -> Result<&'static str, StoreError> {
+    insert_batch(pg, ch, std::slice::from_ref(record)).await
+}
+
+/// 批量写入对话存档：ClickHouse 启用时以单次多行 `JSONEachRow` 写入（避免高频单行写入引发
+/// MergeTree part 碎片化与合并放大），失败时自动整批降级为 PostgreSQL `UNNEST` 批量写。
+pub async fn insert_batch(
+    pg: &PgPool,
+    ch: Option<&ChClient>,
+    records: &[ArchiveRecord],
+) -> Result<&'static str, StoreError> {
+    if records.is_empty() {
+        return Ok(if ch.is_some() {
+            "clickhouse"
+        } else {
+            "postgres"
+        });
+    }
     if let Some(ch) = ch {
-        match insert_ch(ch, record).await {
+        match insert_ch_batch(ch, records).await {
             Ok(()) => return Ok("clickhouse"),
             Err(err) => {
-                CH_TABLE_ENSURED.store(false, Ordering::Release);
+                ch.invalidate_archive_table();
                 tracing::warn!(
-                    request_id = %record.request_id,
+                    count = records.len(),
+                    first_request_id = %records[0].request_id,
                     error = %err,
-                    "ClickHouse 对话存档写入失败，降级写入 PostgreSQL"
+                    "ClickHouse 对话存档批量写入失败，降级写入 PostgreSQL"
                 );
             }
         }
     }
-    insert_pg(pg, record).await?;
+    insert_pg_batch(pg, records).await?;
     Ok("postgres")
 }
 
-async fn insert_ch(ch: &ChClient, r: &ArchiveRecord) -> Result<(), StoreError> {
-    ensure_ch_table(ch).await?;
-    let row = json!({
+fn archive_row_to_ch_json(r: &ArchiveRecord) -> Value {
+    json!({
         "created_at": fmt_ch_ts(r.created_at),
         "request_id": r.request_id.to_string(),
         "user_id": u64::try_from(r.user_id.max(0)).unwrap_or(0),
@@ -201,13 +210,117 @@ async fn insert_ch(ch: &ChClient, r: &ArchiveRecord) -> Result<(), StoreError> {
         "reasoning_text": r.reasoning_text,
         "tool_calls": r.tool_calls,
         "truncated": u8::from(r.truncated),
-    });
-    let token = format!("conv:{}", r.request_id);
-    ch.insert_json_each_row("conversation_archives", &[row], &token)
+    })
+}
+
+fn batch_dedup_token(records: &[ArchiveRecord]) -> String {
+    if let [single] = records {
+        return format!("conv:{}", single.request_id);
+    }
+    // FNV-1a 64-bit over all request_ids for deterministic retry dedup per batch.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for r in records {
+        for &b in r.request_id.as_bytes() {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!(
+        "conv-batch:{}:{}:{hash:016x}",
+        records[0].request_id,
+        records.len()
+    )
+}
+
+async fn insert_ch_batch(ch: &ChClient, records: &[ArchiveRecord]) -> Result<(), StoreError> {
+    ensure_ch_table(ch).await?;
+    let rows: Vec<Value> = records.iter().map(archive_row_to_ch_json).collect();
+    let token = batch_dedup_token(records);
+    ch.insert_json_each_row("conversation_archives", &rows, &token)
         .await
 }
 
-async fn insert_pg(pg: &PgPool, r: &ArchiveRecord) -> Result<(), StoreError> {
+async fn insert_pg_batch(pg: &PgPool, records: &[ArchiveRecord]) -> Result<(), StoreError> {
+    if let [single] = records {
+        return insert_pg_one(pg, single).await;
+    }
+    let len = records.len();
+    let mut request_ids = Vec::with_capacity(len);
+    let mut user_ids = Vec::with_capacity(len);
+    let mut api_key_ids = Vec::with_capacity(len);
+    let mut channel_ids = Vec::with_capacity(len);
+    let mut models = Vec::with_capacity(len);
+    let mut requested_models = Vec::with_capacity(len);
+    let mut endpoints = Vec::with_capacity(len);
+    let mut is_streams = Vec::with_capacity(len);
+    let mut status_codes = Vec::with_capacity(len);
+    let mut error_codes = Vec::with_capacity(len);
+    let mut request_bodies = Vec::with_capacity(len);
+    let mut response_bodies = Vec::with_capacity(len);
+    let mut response_texts = Vec::with_capacity(len);
+    let mut reasoning_texts = Vec::with_capacity(len);
+    let mut tool_calls = Vec::with_capacity(len);
+    let mut truncateds = Vec::with_capacity(len);
+    let mut created_ats = Vec::with_capacity(len);
+
+    for r in records {
+        request_ids.push(r.request_id);
+        user_ids.push(r.user_id);
+        api_key_ids.push(r.api_key_id);
+        channel_ids.push(r.channel_id);
+        models.push(r.model.as_str());
+        requested_models.push(r.requested_model.as_str());
+        endpoints.push(r.endpoint.as_str());
+        is_streams.push(r.is_stream);
+        status_codes.push(r.status_code);
+        error_codes.push(r.error_code.as_str());
+        request_bodies.push(r.request_body.as_str());
+        response_bodies.push(r.response_body.as_str());
+        response_texts.push(r.response_text.as_str());
+        reasoning_texts.push(r.reasoning_text.as_str());
+        tool_calls.push(r.tool_calls.as_str());
+        truncateds.push(r.truncated);
+        created_ats.push(r.created_at);
+    }
+
+    sqlx::query(
+        r"INSERT INTO conversation_archives (
+            request_id, user_id, api_key_id, channel_id, model, requested_model,
+            endpoint, is_stream, status_code, error_code,
+            request_body, response_body, response_text, reasoning_text, tool_calls,
+            truncated, created_at
+          )
+          SELECT * FROM UNNEST(
+            $1::uuid[], $2::bigint[], $3::bigint[], $4::bigint[], $5::text[], $6::text[],
+            $7::text[], $8::bool[], $9::smallint[], $10::text[],
+            $11::text[], $12::text[], $13::text[], $14::text[], $15::text[],
+            $16::bool[], $17::timestamptz[]
+          )
+          ON CONFLICT (request_id) DO NOTHING",
+    )
+    .bind(request_ids)
+    .bind(user_ids)
+    .bind(api_key_ids)
+    .bind(channel_ids)
+    .bind(models)
+    .bind(requested_models)
+    .bind(endpoints)
+    .bind(is_streams)
+    .bind(status_codes)
+    .bind(error_codes)
+    .bind(request_bodies)
+    .bind(response_bodies)
+    .bind(response_texts)
+    .bind(reasoning_texts)
+    .bind(tool_calls)
+    .bind(truncateds)
+    .bind(created_ats)
+    .execute(pg)
+    .await?;
+    Ok(())
+}
+
+async fn insert_pg_one(pg: &PgPool, r: &ArchiveRecord) -> Result<(), StoreError> {
     sqlx::query(
         r"INSERT INTO conversation_archives (
             request_id, user_id, api_key_id, channel_id, model, requested_model,
@@ -784,5 +897,111 @@ mod tests {
     fn parses_clickhouse_timestamps() {
         let dt = parse_ch_ts("2026-11-22 10:15:30.456");
         assert_eq!(fmt_ch_ts(dt), "2026-11-22 10:15:30.456");
+    }
+
+    #[test]
+    fn batch_dedup_token_keeps_single_compat_and_is_deterministic_for_batches() {
+        let make = |id| ArchiveRecord {
+            request_id: id,
+            user_id: 1,
+            api_key_id: 2,
+            channel_id: 3,
+            model: "m".into(),
+            requested_model: "m".into(),
+            endpoint: "/v1/chat/completions".into(),
+            is_stream: false,
+            status_code: 200,
+            error_code: String::new(),
+            request_body: String::new(),
+            response_body: String::new(),
+            response_text: String::new(),
+            reasoning_text: String::new(),
+            tool_calls: String::new(),
+            truncated: false,
+            created_at: Utc::now(),
+            storage: String::new(),
+        };
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let single = [make(a)];
+        assert_eq!(batch_dedup_token(&single), format!("conv:{a}"));
+
+        let batch1 = [make(a), make(b)];
+        let batch2 = [make(a), make(b)];
+        let batch3 = [make(b), make(a)];
+        assert_eq!(batch_dedup_token(&batch1), batch_dedup_token(&batch2));
+        assert_ne!(batch_dedup_token(&batch1), batch_dedup_token(&batch3));
+        assert!(batch_dedup_token(&batch1).starts_with(&format!("conv-batch:{a}:2:")));
+    }
+
+    #[tokio::test]
+    async fn ensure_ch_table_coalesces_concurrent_ddl_and_rechecks_after_invalidation() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ddl_hits = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::clone(&ddl_hits);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let hits = Arc::clone(&hits);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let ch = ChClient::new(&format!("http://{addr}"), "okapi").unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let ch = ch.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                ensure_ch_table(&ch).await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            ddl_hits.load(Ordering::SeqCst),
+            1,
+            "concurrent ensure_ch_table calls must singleflight into one DDL"
+        );
+
+        // Subsequent calls hit the lock-free fast path without touching ClickHouse.
+        ensure_ch_table(&ch).await.unwrap();
+        assert_eq!(ddl_hits.load(Ordering::SeqCst), 1);
+
+        // After invalidation, another concurrent wave again issues exactly one DDL.
+        ch.invalidate_archive_table();
+        let barrier2 = Arc::new(tokio::sync::Barrier::new(4));
+        let mut tasks2 = Vec::new();
+        for _ in 0..4 {
+            let ch = ch.clone();
+            let barrier = Arc::clone(&barrier2);
+            tasks2.push(tokio::spawn(async move {
+                barrier.wait().await;
+                ensure_ch_table(&ch).await
+            }));
+        }
+        for task in tasks2 {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(ddl_hits.load(Ordering::SeqCst), 2);
+        server.abort();
     }
 }

@@ -366,10 +366,16 @@ pub(super) async fn prepare_chat(
     let effective_strategy = Some(effective_policy.strategy.clone());
     let archive_policy = state.conversation_archive_policy().await;
     let archive = (archive_policy.enabled && pin.is_none()).then(|| {
-        Arc::new(okapi_engine::conversation_archive::prepare_request(
-            body,
-            archive_policy.max_body_bytes(),
-        ))
+        Arc::new(match parsed {
+            Some(value) => okapi_engine::conversation_archive::prepare_request_value(
+                value,
+                archive_policy.max_body_bytes(),
+            ),
+            None => okapi_engine::conversation_archive::prepare_request(
+                body,
+                archive_policy.max_body_bytes(),
+            ),
+        })
     });
     let bill = RequestBilling {
         trace,

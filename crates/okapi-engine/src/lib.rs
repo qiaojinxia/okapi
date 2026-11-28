@@ -51,6 +51,8 @@ use std::time::Duration;
 /// 共约 4s），30s 足够；超时留给对账修复而不是无限期拖住编排层的 terminationGracePeriod。
 pub const SETTLE_DRAIN_CAP: Duration = Duration::from_secs(30);
 
+pub use conversation_archive::ARCHIVE_DRAIN_CAP;
+
 /// 按 PG 连接池大小构造结算/准入流控（`settle_gate` 钳制为连接池一半，留一半给前台点查）。
 pub fn flow_control_for_pool(pg_pool_max: u32) -> state::FlowControl {
     let pool = usize::try_from(pg_pool_max.max(1)).unwrap_or(usize::MAX);
@@ -68,6 +70,7 @@ pub fn flow_control_for_pool(pg_pool_max: u32) -> state::FlowControl {
         ),
         settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settle_batcher: Arc::new(state::SettlementBatcher::new()),
+        archive_batcher: Arc::new(conversation_archive::ArchiveBatcher::new()),
         #[cfg(test)]
         settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
     }

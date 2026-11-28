@@ -120,6 +120,7 @@ where
         state.spawn_metrics_publisher("console");
     }
     let settlements = state.settlements.clone();
+    let archive_batcher = std::sync::Arc::clone(&state.flow.archive_batcher);
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.console_bind).await?;
     tracing::info!(bind = %cfg.console_bind, "okapi console 启动");
@@ -134,6 +135,7 @@ where
     // 连接排完不等于账已落，等它们归零再退出，免得滚动发布时留下只剩 Redis 预扣的请求
     settlements.drain();
     settlements.wait_idle(gateway::SETTLE_DRAIN_CAP).await;
+    archive_batcher.drain(gateway::ARCHIVE_DRAIN_CAP).await;
     tracing::info!("okapi console 已下线");
     Ok(())
 }
