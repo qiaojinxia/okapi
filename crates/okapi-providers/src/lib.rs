@@ -15,6 +15,7 @@
 
 pub mod account;
 pub mod account_fault;
+pub mod advanced_routes;
 pub mod anthropic;
 mod anthropic_usage;
 pub mod aws_eventstream;

@@ -412,6 +412,7 @@ pub(crate) mod tests {
             inject_request_fields: serde_json::Map::new(),
             request_overrides: serde_json::Value::Null,
             status_code_mapping: serde_json::Value::Null,
+            advanced_routes: serde_json::Value::Null,
             responses_native: true,
             tool_loss_policy: None,
             api_version: None,

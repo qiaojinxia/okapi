@@ -264,6 +264,9 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
     Object.keys(raw.status_code_mapping).length > 0
       ? { status_code_mapping: raw.status_code_mapping }
       : {}),
+    ...(Array.isArray(raw?.advanced_routes) && raw.advanced_routes.length > 0
+      ? { advanced_routes: raw.advanced_routes }
+      : {}),
   }
 }
 

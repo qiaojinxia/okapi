@@ -92,11 +92,25 @@ pub async fn send_generate_at(
     stream: bool,
     outbound: &crate::http::Outbound,
 ) -> Result<GeminiResponse, UpstreamError> {
+    send_generate_at_headers(http, url, &[auth_header], body, stream, outbound).await
+}
+
+/// 同 [`send_generate_at`]，接收任意数量的鉴权头（支持空切片以配合查询参数鉴权）。
+pub async fn send_generate_at_headers(
+    http: &crate::http::HttpPool,
+    url: String,
+    auth_headers: &[(&str, &str)],
+    body: Bytes,
+    stream: bool,
+    outbound: &crate::http::Outbound,
+) -> Result<GeminiResponse, UpstreamError> {
     let mut req = http
         .post(outbound, url)?
-        .header(auth_header.0, auth_header.1)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.clone());
+    for (name, value) in auth_headers {
+        req = req.header(*name, *value);
+    }
     if !stream {
         req = req.timeout(NON_STREAM_TIMEOUT);
     }

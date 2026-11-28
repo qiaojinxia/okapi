@@ -8,6 +8,7 @@ pub mod field_loss;
 pub mod gemini_to_openai;
 pub mod openai_to_anthropic;
 pub mod openai_to_gemini;
+pub mod registry;
 pub mod responses_to_chat;
 pub mod thinking;
 pub mod tool_loss;

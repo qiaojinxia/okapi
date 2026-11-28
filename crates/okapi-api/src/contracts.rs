@@ -103,6 +103,56 @@ pub struct RequestOverrideRuleDto {
     pub status: Option<u16>,
 }
 
+/// 声明式路由 `settings.advanced_routes[].converter` 支持的转换器名称清单（与 `okapi-providers::convert::registry` 对齐）。
+pub const ADVANCED_ROUTE_CONVERTERS: &[&str] = &[
+    "auto",
+    "passthrough",
+    "openai_passthrough",
+    "anthropic_passthrough",
+    "gemini_passthrough",
+    "responses_passthrough",
+    "responses_compact_passthrough",
+    "openai_to_anthropic",
+    "openai_to_gemini",
+    "openai_to_responses",
+    "anthropic_to_openai",
+    "anthropic_to_responses",
+    "gemini_to_openai",
+    "gemini_to_anthropic",
+    "gemini_to_responses",
+    "responses_to_openai",
+    "responses_to_anthropic",
+    "responses_to_gemini",
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvancedRouteAuthDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_param: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvancedRouteDto {
+    pub incoming_path: String,
+    pub upstream_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_upstream_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converter: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AdvancedRouteAuthDto>,
+    #[serde(default)]
+    pub pass_through_body: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolLossPolicyDto {
@@ -229,6 +279,8 @@ pub struct ChannelSettingsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_code_mapping: Option<BTreeMap<String, u16>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub advanced_routes: Option<Vec<AdvancedRouteDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<ChannelExtensionsDto>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -328,6 +380,19 @@ pub fn render_typescript() -> String {
         "export interface RequestOverrideRule {\n  name?: string\n  enabled: boolean\n  conditions?: OverrideCondition[]\n  op: OverrideOp\n  path?: string\n  from?: string\n  value?: unknown\n  pattern?: string\n  status?: number\n}\n\n",
     );
 
+    out.push_str("export const ADVANCED_ROUTE_CONVERTERS = [\n");
+    push_string_list(&mut out, ADVANCED_ROUTE_CONVERTERS, "  ");
+    out.push_str("] as const\n");
+    out.push_str(
+        "export type AdvancedRouteConverter = (typeof ADVANCED_ROUTE_CONVERTERS)[number]\n\n",
+    );
+    out.push_str(
+        "export interface AdvancedRouteAuth {\n  header?: string\n  prefix?: string\n  query_param?: string\n}\n\n",
+    );
+    out.push_str(
+        "export interface AdvancedRoute {\n  incoming_path: string\n  upstream_path: string\n  stream_upstream_path?: string\n  converter?: string\n  models?: string[]\n  auth?: AdvancedRouteAuth\n  pass_through_body?: boolean\n}\n\n",
+    );
+
     out.push_str("export type LocalPeriod = 'total' | 'day' | 'week' | 'month'\n\n");
 
     out.push_str(
@@ -346,10 +411,10 @@ pub fn render_typescript() -> String {
         "export interface ChannelExtensions {\n  client_profile?: ClientProfile\n  codex_client?: CodexClientGate\n}\n\n",
     );
     out.push_str(
-        "export interface ChannelSettings {\n  account_control?: AccountControl\n  thinking_to_content: boolean\n  bill_by_response_model: boolean\n  strip_request_fields: string[]\n  responses_native?: boolean\n  tool_loss_policy?: ToolLossPolicy\n  api_version?: string\n  aws_region?: string\n  oauth_token_url?: string\n  balance_refresh?: 'on' | 'off'\n  health_probe?: 'on' | 'off'\n  image_stream_usage?: 'cumulative' | 'per_image'\n  low_balance?: LowBalanceRule\n  extra_headers?: Record<string, string>\n  inject_request_fields?: Record<string, unknown>\n  request_overrides?: RequestOverrideRule[]\n  status_code_mapping?: Record<string, number>\n  extensions?: ChannelExtensions\n}\n\n",
+        "export interface ChannelSettings {\n  account_control?: AccountControl\n  thinking_to_content: boolean\n  bill_by_response_model: boolean\n  strip_request_fields: string[]\n  responses_native?: boolean\n  tool_loss_policy?: ToolLossPolicy\n  api_version?: string\n  aws_region?: string\n  oauth_token_url?: string\n  balance_refresh?: 'on' | 'off'\n  health_probe?: 'on' | 'off'\n  image_stream_usage?: 'cumulative' | 'per_image'\n  low_balance?: LowBalanceRule\n  extra_headers?: Record<string, string>\n  inject_request_fields?: Record<string, unknown>\n  request_overrides?: RequestOverrideRule[]\n  status_code_mapping?: Record<string, number>\n  advanced_routes?: AdvancedRoute[]\n  extensions?: ChannelExtensions\n}\n\n",
     );
     out.push_str(
-        "export interface ChannelSettingsPatch {\n  account_control?: Partial<{ [K in keyof AccountControl]: AccountControl[K] | null }> | null\n  thinking_to_content?: boolean | null\n  bill_by_response_model?: boolean | null\n  strip_request_fields?: string[] | null\n  responses_native?: boolean | null\n  tool_loss_policy?: ToolLossPolicy | null\n  api_version?: string | null\n  aws_region?: string | null\n  oauth_token_url?: string | null\n  balance_refresh?: 'on' | 'off' | null\n  health_probe?: 'on' | 'off' | null\n  image_stream_usage?: 'cumulative' | 'per_image' | null\n  low_balance?: LowBalanceRule | null\n  extra_headers?: Record<string, string> | null\n  inject_request_fields?: Record<string, unknown> | null\n  request_overrides?: RequestOverrideRule[] | null\n  status_code_mapping?: Record<string, number> | null\n  extensions?: {\n    client_profile?: ClientProfile | null\n    codex_client?: CodexClientGate | null\n  } | null\n}\n",
+        "export interface ChannelSettingsPatch {\n  account_control?: Partial<{ [K in keyof AccountControl]: AccountControl[K] | null }> | null\n  thinking_to_content?: boolean | null\n  bill_by_response_model?: boolean | null\n  strip_request_fields?: string[] | null\n  responses_native?: boolean | null\n  tool_loss_policy?: ToolLossPolicy | null\n  api_version?: string | null\n  aws_region?: string | null\n  oauth_token_url?: string | null\n  balance_refresh?: 'on' | 'off' | null\n  health_probe?: 'on' | 'off' | null\n  image_stream_usage?: 'cumulative' | 'per_image' | null\n  low_balance?: LowBalanceRule | null\n  extra_headers?: Record<string, string> | null\n  inject_request_fields?: Record<string, unknown> | null\n  request_overrides?: RequestOverrideRule[] | null\n  status_code_mapping?: Record<string, number> | null\n  advanced_routes?: AdvancedRoute[] | null\n  extensions?: {\n    client_profile?: ClientProfile | null\n    codex_client?: CodexClientGate | null\n  } | null\n}\n",
     );
 
     out

@@ -2,7 +2,10 @@ use super::*;
 use axum::http::HeaderMap;
 use okapi_domain::Money;
 use okapi_pricing::CalcContext;
+use okapi_providers::StreamHandle;
+use okapi_providers::convert::registry::surface_stream_failures;
 use okapi_providers::convert::tool_loss::ForeignTools;
+use okapi_providers::convert::{anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o};
 use okapi_providers::reasoning::{Effort, ReasoningDirective};
 use std::sync::Arc;
 use std::time::Instant;
@@ -196,6 +199,7 @@ fn candidate(provider: &str, upstream_model: Option<&str>) -> ChannelCandidate {
         inject_request_fields: serde_json::Map::new(),
         request_overrides: serde_json::Value::Null,
         status_code_mapping: serde_json::Value::Null,
+        advanced_routes: serde_json::Value::Null,
         tool_loss_policy: None,
         responses_native: false,
         api_version: None,
@@ -560,4 +564,57 @@ fn candidate_pattern_model_mapping_and_status_code_mapping() {
     assert_eq!(cand.mapped_error_status(503), 502);
     assert_eq!(cand.mapped_error_status(500), 500, "2xx target must be ignored");
     assert_eq!(cand.mapped_error_status(404), 404);
+}
+
+#[tokio::test]
+async fn advanced_routes_compile_convert_and_record_registry_diagnostics() {
+    let (bill, info) = test_billing(Ingress::OpenAi, "claude-sonnet-4-5");
+    let mut cand = candidate("openai_compat", None);
+    cand.advanced_routes = serde_json::json!([
+        {
+            "incoming_path": "/v1/chat/completions",
+            "upstream_path": "/gateway/v2/messages",
+            "converter": "openai_to_anthropic",
+            "models": ["claude-*"],
+            "auth": {"header": "X-Custom-Auth", "prefix": "Token "}
+        }
+    ]);
+
+    let plan = ExecutionPlan::compile(Ingress::OpenAi, &cand, "claude-sonnet-4-5", Requirements::default())
+        .expect("advanced route should compile");
+    assert_eq!(plan.advanced_route_index, Some(0));
+    assert_eq!(plan.operation, Operation::Messages);
+    assert_eq!(plan.converter.name, "openai_to_anthropic");
+    assert_eq!(
+        plan.converter.quality,
+        okapi_providers::convert::registry::ConversionQuality::Good
+    );
+    assert_eq!(plan.endpoint_for(&cand, false), "/gateway/v2/messages");
+
+    let raw = Bytes::from_static(
+        br#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}],"service_tier":"flex"}"#,
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&raw).expect("valid json");
+    let out = build_upstream_body(&bill, &info, &cand, &raw, "claude-sonnet-4-5", Some(&parsed))
+        .expect("advanced route request converts via registry");
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+    assert_eq!(v["model"], "claude-sonnet-4-5");
+    assert_eq!(v["messages"][0]["role"], "user");
+    assert!(v.get("max_tokens").is_some());
+
+    let snap = bill.trace.snapshot();
+    assert_eq!(snap["conversion_converter"], "openai_to_anthropic");
+    assert_eq!(snap["conversion_quality"], "good");
+    assert_eq!(snap["dropped_fields"], serde_json::json!(["service_tier"]));
+    assert!(snap["conversion_diagnostics"].as_array().is_some_and(|a| !a.is_empty()));
+
+    // 切回同方言原生 OpenAI 渠道后，旧尝试的 conversion_* 诊断全部清理
+    let native = candidate("openai", None);
+    build_upstream_body(&bill, &info, &native, &raw, "claude-sonnet-4-5", Some(&parsed))
+        .expect("failover to native openai");
+    let cleared = bill.trace.snapshot();
+    assert!(cleared.get("conversion_converter").is_none());
+    assert!(cleared.get("conversion_quality").is_none());
+    assert!(cleared.get("conversion_diagnostics").is_none());
+    assert!(cleared.get("dropped_fields").is_none());
 }

@@ -125,6 +125,44 @@ export interface RequestOverrideRule {
   status?: number
 }
 
+export const ADVANCED_ROUTE_CONVERTERS = [
+  'auto',
+  'passthrough',
+  'openai_passthrough',
+  'anthropic_passthrough',
+  'gemini_passthrough',
+  'responses_passthrough',
+  'responses_compact_passthrough',
+  'openai_to_anthropic',
+  'openai_to_gemini',
+  'openai_to_responses',
+  'anthropic_to_openai',
+  'anthropic_to_responses',
+  'gemini_to_openai',
+  'gemini_to_anthropic',
+  'gemini_to_responses',
+  'responses_to_openai',
+  'responses_to_anthropic',
+  'responses_to_gemini',
+] as const
+export type AdvancedRouteConverter = (typeof ADVANCED_ROUTE_CONVERTERS)[number]
+
+export interface AdvancedRouteAuth {
+  header?: string
+  prefix?: string
+  query_param?: string
+}
+
+export interface AdvancedRoute {
+  incoming_path: string
+  upstream_path: string
+  stream_upstream_path?: string
+  converter?: string
+  models?: string[]
+  auth?: AdvancedRouteAuth
+  pass_through_body?: boolean
+}
+
 export type LocalPeriod = 'total' | 'day' | 'week' | 'month'
 
 export interface CodexClientGate {
@@ -188,6 +226,7 @@ export interface ChannelSettings {
   inject_request_fields?: Record<string, unknown>
   request_overrides?: RequestOverrideRule[]
   status_code_mapping?: Record<string, number>
+  advanced_routes?: AdvancedRoute[]
   extensions?: ChannelExtensions
 }
 
@@ -209,6 +248,7 @@ export interface ChannelSettingsPatch {
   inject_request_fields?: Record<string, unknown> | null
   request_overrides?: RequestOverrideRule[] | null
   status_code_mapping?: Record<string, number> | null
+  advanced_routes?: AdvancedRoute[] | null
   extensions?: {
     client_profile?: ClientProfile | null
     codex_client?: CodexClientGate | null

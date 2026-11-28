@@ -81,7 +81,7 @@ pub(super) async fn try_model(
         last_channel = Some((cand.channel_id, cand.channel_key_id));
         last_upstream = Some((
             upstream_model.clone(),
-            upstream_endpoint(&cand, &bill.model, bill.is_stream, bill.ingress).to_owned(),
+            upstream_endpoint(&cand, &bill.model, bill.is_stream, bill.ingress).into_owned(),
         ));
         let sticky_layer: i16 = if bill.response_parent.is_some() {
             1
@@ -125,7 +125,7 @@ pub(super) async fn try_model(
             bill.trace.begin(
                 &cand,
                 &upstream_model,
-                upstream_endpoint(&cand, &bill.model, bill.is_stream, bill.ingress),
+                &upstream_endpoint(&cand, &bill.model, bill.is_stream, bill.ingress),
             );
             let attempt = async {
                 if info.stream {
@@ -259,7 +259,7 @@ pub(super) async fn try_model(
                         last_upstream = Some((
                             upstream_model.clone(),
                             upstream_endpoint(&cand, &bill.model, bill.is_stream, bill.ingress)
-                                .to_owned(),
+                                .into_owned(),
                         ));
                         continue;
                     }

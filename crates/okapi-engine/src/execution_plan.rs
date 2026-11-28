@@ -1,10 +1,14 @@
 //! A checked protocol/adapter operation, not a normalized request or response IR.
 use super::ingress::Ingress;
+use okapi_providers::convert::registry::{self as conv_registry, ConverterSpec};
+use okapi_providers::inference::Surface;
 use okapi_providers::registry::{
-    self, AdapterKind, ApiFormat, Dialect, NativeResponses, ProviderDescriptor, WireTransport,
+    self, AdapterKind, ApiFormat, CredentialKind, Dialect, NativeResponses, ProviderDescriptor,
+    WireTransport,
 };
 use okapi_store::ChannelCandidate;
 use serde_json::Value;
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, Default)]
 pub struct Requirements {
@@ -33,6 +37,28 @@ impl Operation {
             Self::ResponsesCompact => ApiFormat::ResponsesCompact,
         }
     }
+
+    #[must_use]
+    pub const fn from_api_format(format: ApiFormat) -> Self {
+        match format {
+            ApiFormat::ChatCompletions => Self::ChatCompletions,
+            ApiFormat::Messages => Self::Messages,
+            ApiFormat::Gemini => Self::GenerateContent,
+            ApiFormat::Responses => Self::Responses,
+            ApiFormat::ResponsesCompact => Self::ResponsesCompact,
+        }
+    }
+
+    #[must_use]
+    pub const fn surface(self) -> Surface {
+        match self {
+            Self::ChatCompletions => Surface::Chat,
+            Self::Messages => Surface::Messages,
+            Self::GenerateContent => Surface::Generate,
+            Self::Responses => Surface::Responses { compact: false },
+            Self::ResponsesCompact => Surface::Responses { compact: true },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,6 +66,10 @@ pub struct ExecutionPlan {
     pub adapter: &'static ProviderDescriptor,
     pub dialect: Dialect,
     pub operation: Operation,
+    /// 本次执行绑定的注册表协议转换规范（同方言直通时 `is_native() == true`）。
+    pub converter: &'static ConverterSpec,
+    /// 命中渠道 `settings.advanced_routes` 时的规则下标；`None` 表示走内置适配器传输。
+    pub advanced_route_index: Option<usize>,
     chat_fallback: bool,
 }
 
@@ -70,10 +100,39 @@ impl ExecutionPlan {
     ) -> Result<Self, PlanError> {
         okapi_providers::profiles::validate_extensions(&channel.provider, &channel.extensions)
             .map_err(|_| PlanError::Extension)?;
+        let upstream = channel.upstream_model(model);
+        if let Some(matched) = okapi_providers::advanced_routes::match_route(
+            &channel.advanced_routes,
+            format(ingress),
+            model,
+            upstream.as_ref(),
+        ) {
+            let adapter = registry::lookup(&channel.provider).ok_or(PlanError::Unregistered)?;
+            if adapter.credential != CredentialKind::StaticKey {
+                return Err(PlanError::Endpoint);
+            }
+            let operation = Operation::from_api_format(matched.converter.to);
+            let dialect = matched.converter.to.dialect();
+            check_requirements(
+                ingress,
+                dialect,
+                operation,
+                &channel.capabilities,
+                requirements,
+            )?;
+            return Ok(Self {
+                adapter,
+                dialect,
+                operation,
+                converter: matched.converter,
+                advanced_route_index: Some(matched.index),
+                chat_fallback: false,
+            });
+        }
         Self::compile_target(
             ingress,
             &channel.provider,
-            channel.upstream_model(model).as_ref(),
+            upstream.as_ref(),
             channel.responses_native,
             &channel.capabilities,
             requirements,
@@ -124,14 +183,9 @@ impl ExecutionPlan {
                 }
             }
         };
-        if (requirements.tools || requirements.server_tools) && denies(caps, "tools")
-            || requirements.vision && denies(caps, "vision")
-            || ingress == Ingress::ResponsesCompact && denies(caps, "compact")
-            || requirements.server_tools
-                && (dialect != Dialect::Anthropic || operation == Operation::Responses)
-        {
-            return Err(PlanError::Capability);
-        }
+        check_requirements(ingress, dialect, operation, caps, requirements)?;
+        let converter = conv_registry::lookup(format(ingress), operation.api_format())
+            .ok_or(PlanError::Endpoint)?;
         let chat_fallback = matches!(operation, Operation::Responses)
             && matches!(adapter.native_responses, NativeResponses::Optional { .. })
             && !denies(caps, "chat_completions");
@@ -139,20 +193,15 @@ impl ExecutionPlan {
             adapter,
             dialect,
             operation,
+            converter,
+            advanced_route_index: None,
             chat_fallback,
         })
     }
 
     /// 这次转发要不要把请求从入口方言转成别家的（转了就可能丢工具，见 `convert::tool_loss`）。
-    pub const fn converts(self, ingress: Ingress) -> bool {
-        !matches!(
-            (ingress, self.operation),
-            (Ingress::OpenAi, Operation::ChatCompletions)
-                | (Ingress::Anthropic, Operation::Messages)
-                | (Ingress::Gemini, Operation::GenerateContent)
-                | (Ingress::Responses, Operation::Responses)
-                | (Ingress::ResponsesCompact, _)
-        )
+    pub const fn converts(self, _ingress: Ingress) -> bool {
+        !self.converter.is_native()
     }
 
     pub const fn native_responses(self) -> bool {
@@ -160,6 +209,19 @@ impl ExecutionPlan {
             self.operation,
             Operation::Responses | Operation::ResponsesCompact
         )
+    }
+
+    /// 若命中了渠道声明式 `advanced_routes`，返回该规则的自定义上游路径标签，否则回退内置端点标签。
+    #[must_use]
+    pub fn endpoint_for(self, cand: &ChannelCandidate, stream: bool) -> Cow<'static, str> {
+        if let Some(idx) = self.advanced_route_index
+            && let Some(route) = okapi_providers::advanced_routes::route_at(&cand.advanced_routes, idx)
+        {
+            return Cow::Owned(okapi_providers::advanced_routes::endpoint_label(
+                &route, stream,
+            ));
+        }
+        Cow::Borrowed(self.endpoint(stream))
     }
 
     /// 这次尝试打到上游的端点（`{model}` 是上游模型名的占位）：账单与日志的 `upstream_endpoint`、
@@ -228,6 +290,24 @@ pub fn format(ingress: Ingress) -> ApiFormat {
         Ingress::ResponsesCompact => ApiFormat::ResponsesCompact,
         Ingress::Gemini => ApiFormat::Gemini,
     }
+}
+
+fn check_requirements(
+    ingress: Ingress,
+    dialect: Dialect,
+    operation: Operation,
+    caps: &Value,
+    requirements: Requirements,
+) -> Result<(), PlanError> {
+    if (requirements.tools || requirements.server_tools) && denies(caps, "tools")
+        || requirements.vision && denies(caps, "vision")
+        || ingress == Ingress::ResponsesCompact && denies(caps, "compact")
+        || requirements.server_tools
+            && (dialect != Dialect::Anthropic || operation == Operation::Responses)
+    {
+        return Err(PlanError::Capability);
+    }
+    Ok(())
 }
 
 fn allows(caps: &Value, name: &str) -> bool {

@@ -181,12 +181,8 @@ impl OpenAiUpstream {
         outbound: &Outbound,
     ) -> Result<ChatResponse, UpstreamError> {
         let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-        let req = self.http.post(outbound, url)?.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {credential}"),
-        );
-        self.send_chat(req, outbound.proxy_url.as_deref(), body, stream)
-            .await
+        let auth = format!("Bearer {credential}");
+        send_chat_at(&self.http, url, &[("authorization", &auth)], body, stream, outbound).await
     }
 
     /// chat completions 的发送与响应解析（URL 与鉴权头由调用方装好）：
@@ -198,6 +194,32 @@ impl OpenAiUpstream {
         body: Bytes,
         stream: bool,
     ) -> Result<ChatResponse, UpstreamError> {
+        send_chat_request(req, proxy_url, body, stream).await
+    }
+}
+
+/// 向任意 URL 发一次 OpenAI Chat Completions 形状的请求（供官方、兼容渠道及声明式 `advanced_routes` 共用）。
+pub async fn send_chat_at(
+    http: &HttpPool,
+    url: String,
+    auth_headers: &[(&str, &str)],
+    body: Bytes,
+    stream: bool,
+    outbound: &Outbound,
+) -> Result<ChatResponse, UpstreamError> {
+    let mut req = http.post(outbound, url)?;
+    for (name, value) in auth_headers {
+        req = req.header(*name, *value);
+    }
+    send_chat_request(req, outbound.proxy_url.as_deref(), body, stream).await
+}
+
+async fn send_chat_request(
+    req: reqwest::RequestBuilder,
+    proxy_url: Option<&str>,
+    body: Bytes,
+    stream: bool,
+) -> Result<ChatResponse, UpstreamError> {
         let mut req = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone());
@@ -241,7 +263,6 @@ impl OpenAiUpstream {
             })
         }
     }
-}
 
 /// embeddings 上游响应（恒为 JSON）。
 pub struct EmbeddingsResponse {

@@ -73,6 +73,46 @@ impl AppState {
         .await
     }
 
+    /// 按已编译的 [`super::execution_plan::ExecutionPlan`] 执行上游调用：
+    /// 命中渠道声明式 `advanced_routes` 时直走自定义路径/鉴权传输，否则走注册的内置适配器。
+    pub async fn infer_plan(
+        &self,
+        plan: super::execution_plan::ExecutionPlan,
+        call: InferCall<'_>,
+    ) -> Result<Response, UpstreamError> {
+        let Some(route_idx) = plan.advanced_route_index else {
+            return self.infer_via(plan.operation.surface(), call).await;
+        };
+        let route =
+            okapi_providers::advanced_routes::route_at(&call.cand.advanced_routes, route_idx)
+                .ok_or_else(|| UpstreamError::Build("advanced_route_missing".into()))?;
+        let InferCall {
+            cand,
+            endpoint,
+            base,
+            model,
+            body,
+            stream,
+            outbound,
+        } = call;
+        super::account_control::execute(self, cand, model, endpoint, async {
+            let credential = CredentialManager.resolve(self, cand).await?;
+            okapi_providers::advanced_routes::execute(
+                self.upstreams.openai.http(),
+                &route,
+                plan.operation.api_format(),
+                base,
+                model,
+                credential.material(),
+                body,
+                stream,
+                outbound,
+            )
+            .await
+        })
+        .await
+    }
+
     pub async fn responses_via(
         &self,
         compact: bool,

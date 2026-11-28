@@ -173,8 +173,21 @@ pub(crate) async fn validate_channel_settings(
     ensure_settings_tool_loss_policy(settings)?;
     ensure_settings_balance(settings)?;
     ensure_settings_health_probe(settings)?;
+    ensure_settings_advanced_routes(provider, settings)?;
     ensure_request_extensions(provider, settings)?;
     ensure_account_control(settings)
+}
+
+/// `settings.advanced_routes`（声明式路由映射）写入校验：路径安全、转换器存在且与入口匹配、仅允许静态密钥渠道。
+pub(super) fn ensure_settings_advanced_routes(
+    provider: &str,
+    settings: Option<&Value>,
+) -> Result<(), AppError> {
+    let Some(v) = settings.and_then(|s| s.get("advanced_routes")) else {
+        return Ok(());
+    };
+    okapi_providers::advanced_routes::validate_routes_value(provider, v)
+        .map_err(|param| AppError::bad_request().with_param(param))
 }
 
 /// `settings.oauth_token_url`（订阅 OAuth 的 token 端点覆写）与 api_base 过同一道 SSRF 闸：
@@ -239,8 +252,7 @@ pub(super) fn status_code_mapping_ok(value: &Value) -> bool {
     obj.iter().all(|(k, v)| {
         let key_ok = k
             .parse::<u16>()
-            .ok()
-            .is_some_and(|code| (400..=599).contains(&code) && code.to_string() == *k);
+            .is_ok_and(|code| (400..=599).contains(&code) && code.to_string() == *k);
         let val_ok = v
             .as_u64()
             .and_then(|n| u16::try_from(n).ok())
@@ -291,6 +303,28 @@ mod request_extension_tests {
         assert!(!status_code_mapping_ok(&json!({"400": 200})));
         assert!(!status_code_mapping_ok(&json!({"0400": 429})));
         assert!(!status_code_mapping_ok(&json!({"400": "429"})));
+    }
+
+    #[test]
+    fn advanced_routes_settings_validation_enforces_provider_and_converter() {
+        let valid = json!({
+            "advanced_routes": [{
+                "incoming_path": "/v1/chat/completions",
+                "upstream_path": "/custom/v1/messages",
+                "converter": "openai_to_anthropic"
+            }]
+        });
+        assert!(ensure_settings_advanced_routes("openai_compat", Some(&valid)).is_ok());
+        assert!(ensure_settings_advanced_routes("bedrock", Some(&valid)).is_err());
+
+        let invalid = json!({
+            "advanced_routes": [{
+                "incoming_path": "/v1/messages",
+                "upstream_path": "/custom/v1/messages",
+                "converter": "openai_to_anthropic"
+            }]
+        });
+        assert!(ensure_settings_advanced_routes("openai_compat", Some(&invalid)).is_err());
     }
 }
 

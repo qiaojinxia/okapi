@@ -69,7 +69,7 @@ pub(super) fn cand_info(
         bill_resp_model: cand.bill_by_response_model,
         trust_usage: cand.trust_upstream_usage,
         upstream_model: cand.upstream_model(model).into_owned(),
-        upstream_endpoint: upstream_endpoint(cand, model, stream, ingress).to_owned(),
+        upstream_endpoint: upstream_endpoint(cand, model, stream, ingress).into_owned(),
         provider: cand.provider.clone(),
     }
 }
@@ -80,9 +80,11 @@ pub(super) fn upstream_endpoint(
     model: &str,
     stream: bool,
     ingress: Ingress,
-) -> &'static str {
+) -> std::borrow::Cow<'static, str> {
     ExecutionPlan::compile(ingress, cand, model, Requirements::default())
-        .map_or("", |plan| plan.endpoint(stream))
+        .map_or(std::borrow::Cow::Borrowed(""), |plan| {
+            plan.endpoint_for(cand, stream)
+        })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -524,6 +526,7 @@ mod upstream_endpoint_tests {
             inject_request_fields: serde_json::Map::new(),
             request_overrides: serde_json::Value::Null,
             status_code_mapping: serde_json::Value::Null,
+            advanced_routes: serde_json::Value::Null,
             responses_native: true,
             tool_loss_policy: None,
             api_version: None,

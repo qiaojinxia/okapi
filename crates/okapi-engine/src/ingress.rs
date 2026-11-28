@@ -71,6 +71,16 @@ impl Ingress {
 
     pub fn accepts(self, channel: &ChannelCandidate, model: &str) -> bool {
         let upstream = channel.upstream_model(model);
+        if okapi_providers::advanced_routes::match_route(
+            &channel.advanced_routes,
+            super::execution_plan::format(self),
+            model,
+            upstream.as_ref(),
+        )
+        .is_some()
+        {
+            return true;
+        }
         self.supports(
             &channel.provider,
             upstream.as_ref(),

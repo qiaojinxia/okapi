@@ -49,13 +49,36 @@ impl Dialect {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApiFormat {
     ChatCompletions,
     Messages,
     Responses,
     ResponsesCompact,
     Gemini,
+}
+
+impl ApiFormat {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Messages => "messages",
+            Self::Responses => "responses",
+            Self::ResponsesCompact => "responses_compact",
+            Self::Gemini => "gemini",
+        }
+    }
+
+    #[must_use]
+    pub const fn dialect(self) -> Dialect {
+        match self {
+            Self::ChatCompletions | Self::Responses | Self::ResponsesCompact => Dialect::OpenAi,
+            Self::Messages => Dialect::Anthropic,
+            Self::Gemini => Dialect::Gemini,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

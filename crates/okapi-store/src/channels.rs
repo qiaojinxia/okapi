@@ -45,6 +45,9 @@ pub struct ChannelCandidate {
     /// 上游错误状态码归一化映射（channels.settings.status_code_mapping：`"400" -> 429`）；
     /// 仅影响返回给客户端的 HTTP 状态码，不改动内部故障归类与请求日志记录的真实上游状态。
     pub status_code_mapping: serde_json::Value,
+    /// 声明式路由映射（channels.settings.advanced_routes）；
+    /// 由 providers::advanced_routes 解释，store 与调度器不解析其内容。
+    pub advanced_routes: serde_json::Value,
     /// 跨方言转换会丢工具时怎么办（channels.settings.tool_loss_policy：safe / strict / allow；
     /// None = 缺省 safe，解析见 `okapi_providers::convert::tool_loss::ToolLossPolicy`）。
     pub tool_loss_policy: Option<String>,
@@ -243,6 +246,7 @@ struct MemberMeta {
     model_filter: Option<Vec<String>>,
     request_overrides: serde_json::Value,
     status_code_mapping: serde_json::Value,
+    advanced_routes: serde_json::Value,
 }
 
 /// 服务指定模型的可用渠道 key 候选：
@@ -350,11 +354,13 @@ pub async fn candidates_for_model(
                 Option<serde_json::Value>,
                 Option<serde_json::Value>,
                 Option<serde_json::Value>,
+                Option<serde_json::Value>,
             ),
         >(
             r"SELECT pc.pool_code, pc.channel_id, pc.role, pc.enabled, pc.tags, pc.model_filter,
                      c.settings -> 'request_overrides',
-                     c.settings -> 'status_code_mapping'
+                     c.settings -> 'status_code_mapping',
+                     c.settings -> 'advanced_routes'
               FROM pool_channels pc
               JOIN channels c ON c.id = pc.channel_id
               WHERE pc.pool_code = ANY($1::varchar[]) AND c.deleted_at IS NULL",
@@ -374,6 +380,7 @@ pub async fn candidates_for_model(
         model_filter,
         request_overrides,
         status_code_mapping,
+        advanced_routes,
     ) in member_metas
     {
         let tags: Vec<String> = serde_json::from_value(tags).unwrap_or_default();
@@ -388,6 +395,7 @@ pub async fn candidates_for_model(
                 model_filter,
                 request_overrides: request_overrides.unwrap_or(serde_json::Value::Null),
                 status_code_mapping: status_code_mapping.unwrap_or(serde_json::Value::Null),
+                advanced_routes: advanced_routes.unwrap_or(serde_json::Value::Null),
             },
         );
     }
@@ -414,12 +422,14 @@ pub async fn candidates_for_model(
                 pool_model_filter,
                 request_overrides,
                 status_code_mapping,
+                advanced_routes,
             ) = meta.map_or_else(
                 || {
                     (
                         "primary".to_owned(),
                         Vec::new(),
                         None,
+                        serde_json::Value::Null,
                         serde_json::Value::Null,
                         serde_json::Value::Null,
                     )
@@ -431,6 +441,7 @@ pub async fn candidates_for_model(
                         m.model_filter.clone(),
                         m.request_overrides.clone(),
                         m.status_code_mapping.clone(),
+                        m.advanced_routes.clone(),
                     )
                 },
             );
@@ -441,6 +452,7 @@ pub async fn candidates_for_model(
                 pool_model_filter,
                 request_overrides,
                 status_code_mapping,
+                advanced_routes,
             ))
         })
         .map(
@@ -451,6 +463,7 @@ pub async fn candidates_for_model(
                 pool_model_filter,
                 request_overrides,
                 status_code_mapping,
+                advanced_routes,
             )| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             let responses_native = responses_native_for(&r.provider, r.responses_native);
@@ -513,6 +526,7 @@ pub async fn candidates_for_model(
                     .unwrap_or_default(),
                 request_overrides,
                 status_code_mapping,
+                advanced_routes,
                 responses_native,
                 tool_loss_policy: r.tool_loss_policy,
                 capabilities: r.capabilities,

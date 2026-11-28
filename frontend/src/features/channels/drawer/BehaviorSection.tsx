@@ -10,8 +10,11 @@ import { Switch } from '@/components/ui/switch'
 import { TagInput } from '@/components/ui/tag-input'
 import type { ChannelForm } from './use-channel-form'
 import { ExtraHeadersEditor, InjectFieldsEditor } from './request-editors'
+import { AdvancedRoutesEditor } from './AdvancedRoutesEditor'
 import { RequestOverridesEditor } from './RequestOverridesEditor'
 import { StatusCodeMappingEditor } from './StatusCodeMappingEditor'
+
+const STATIC_KEY_PROVIDERS = new Set(['openai', 'openai_compat', 'anthropic', 'gemini', 'azure'])
 
 /// 「请求与计费行为」（只在编辑时有）：客户端模拟、思考内容、按响应模型计费、请求改写。
 export function BehaviorSection({ f, channel }: {
@@ -27,6 +30,7 @@ export function BehaviorSection({ f, channel }: {
     || Object.keys(settings.extra_headers ?? {}).length > 0
     || (settings.request_overrides?.length ?? 0) > 0
     || Object.keys(settings.status_code_mapping ?? {}).length > 0
+    || (settings.advanced_routes?.length ?? 0) > 0
   return (
     <>
       {(channel.provider === 'anthropic' || channel.provider === 'anthropic_max') && (
@@ -114,6 +118,16 @@ export function BehaviorSection({ f, channel }: {
             )
           }
         />
+        {STATIC_KEY_PROVIDERS.has(channel.provider) && (
+          <AdvancedRoutesEditor
+            value={settings.advanced_routes ?? []}
+            onChange={(advanced_routes) =>
+              setSettings(({ advanced_routes: _drop, ...s }) =>
+                advanced_routes.length === 0 ? s : { ...s, advanced_routes },
+              )
+            }
+          />
+        )}
         </div>
       </OptionalSection>
     </>

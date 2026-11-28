@@ -1,5 +1,5 @@
-//! 上游请求体：按入口 × 渠道方言构造与改写，并分派到注册的上游实现。
-use super::super::execution_plan::{ExecutionPlan, Operation, PlanError, Requirements};
+//! 上游请求体：按入口 × 渠道方言构造与改写，并经由协议转换注册表与声明式路由分派到上游。
+use super::super::execution_plan::{ExecutionPlan, Operation, Requirements};
 use super::super::ingress::Ingress;
 use super::{
     ProbeInfo, RequestBilling, UnifiedReasoning, bound_default_output_value, lost_tools,
@@ -7,13 +7,10 @@ use super::{
 };
 use bytes::Bytes;
 use okapi_kernel::sched_redis::response_affinity::{ResponseBinding, ResponseWriter};
-use okapi_providers::convert::{
-    anthropic_to_openai as conv_a2o, chat_to_responses as conv_c2r, gemini_to_openai as conv_g2o,
-    openai_to_anthropic as convert, openai_to_gemini as conv_gem, responses_to_chat as conv_resp,
-};
+use okapi_providers::convert::registry::ConvertContext;
 use okapi_providers::reasoning;
 use okapi_providers::{
-    ChatResponse, StreamHandle, UpstreamError, ensure_stream_usage_value, rewrite_model_value,
+    ChatResponse, UpstreamError, ensure_stream_usage_value, rewrite_model_value,
 };
 use okapi_store::ChannelCandidate;
 use std::borrow::Cow;
@@ -100,7 +97,7 @@ pub(super) fn build_upstream_body(
     if needs_default_output_bound(bill.ingress, bill.default_output_cap, working.as_value()) {
         bound_default_output_value(bill.ingress, bill.default_output_cap, working.as_mut());
     }
-    convert_request_in_place(&mut working, bill, info, plan.operation, upstream_model)?;
+    convert_request_in_place(&mut working, bill, info, plan, upstream_model)?;
     if bill
         .server_tools
         .needs_restore(working.as_value(), dialect)?
@@ -174,8 +171,17 @@ fn record_conversion_loss(
     if !plan.converts(bill.ingress) {
         bill.trace.remove("dropped_tools");
         bill.trace.remove("dropped_fields");
+        bill.trace.remove("conversion_converter");
+        bill.trace.remove("conversion_quality");
+        bill.trace.remove("conversion_diagnostics");
         return;
     }
+    bill.trace
+        .set("conversion_converter", serde_json::json!(plan.converter.name));
+    bill.trace.set(
+        "conversion_quality",
+        serde_json::json!(plan.converter.quality.as_str()),
+    );
     let lost = lost_tools(info, bill);
     if lost.is_empty() {
         bill.trace.remove("dropped_tools");
@@ -184,8 +190,8 @@ fn record_conversion_loss(
             .set("dropped_tools", serde_json::json!(lost.all()));
     }
     let dropped = okapi_providers::convert::field_loss::dropped_fields(
-        super::super::execution_plan::format(bill.ingress),
-        plan.operation.api_format(),
+        plan.converter.from,
+        plan.converter.to,
         source,
     );
     if dropped.is_empty() {
@@ -193,6 +199,13 @@ fn record_conversion_loss(
     } else {
         bill.trace
             .set("dropped_fields", serde_json::json!(dropped));
+    }
+    let diagnostics = plan.converter.diagnostics(source, &lost);
+    if diagnostics.is_empty() {
+        bill.trace.remove("conversion_diagnostics");
+    } else {
+        bill.trace
+            .set("conversion_diagnostics", serde_json::json!(diagnostics));
     }
 }
 
@@ -231,128 +244,62 @@ fn apply_fallback_reasoning(
     }
 }
 
-/// 请求体的「入口 × 操作」矩阵：同方言只按需原地改 model / 补丁，跨方言直接从内存 `Value` 构造。
+/// 请求体转换：同方言原生直通按需原地改 model / 补丁，跨方言统一走注册表步链。
 fn convert_request_in_place(
     working: &mut WorkingBody<'_>,
     bill: &RequestBilling,
     info: &ProbeInfo,
-    operation: Operation,
+    plan: ExecutionPlan,
     upstream_model: &str,
 ) -> Result<(), UpstreamError> {
-    match (bill.ingress, operation) {
-        (Ingress::Responses, Operation::Responses)
-        | (Ingress::ResponsesCompact, Operation::ResponsesCompact) => {
-            if info.requested_model != upstream_model {
-                rewrite_model_value(working.as_mut(), &info.requested_model, upstream_model)?;
+    if plan.converter.is_native() {
+        return match bill.ingress {
+            Ingress::Responses | Ingress::ResponsesCompact => {
+                if info.requested_model != upstream_model {
+                    rewrite_model_value(working.as_mut(), &info.requested_model, upstream_model)?;
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        (Ingress::OpenAi, Operation::ChatCompletions) => {
-            if info.requested_model != upstream_model {
-                rewrite_model_value(working.as_mut(), &info.requested_model, upstream_model)?;
+            Ingress::OpenAi => {
+                if info.requested_model != upstream_model {
+                    rewrite_model_value(working.as_mut(), &info.requested_model, upstream_model)?;
+                }
+                if info.stream
+                    && working
+                        .as_value()
+                        .as_object()
+                        .and_then(|o| o.get("stream_options"))
+                        .and_then(|s| s.get("include_usage"))
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                {
+                    ensure_stream_usage_value(working.as_mut())?;
+                }
+                Ok(())
             }
-            if info.stream
-                && working
-                    .as_value()
-                    .as_object()
-                    .and_then(|o| o.get("stream_options"))
-                    .and_then(|s| s.get("include_usage"))
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-            {
-                ensure_stream_usage_value(working.as_mut())?;
+            Ingress::Anthropic => {
+                if info.requested_model != upstream_model {
+                    rewrite_model_value(working.as_mut(), &info.requested_model, upstream_model)?;
+                }
+                if needs_anthropic_default_cap(working.as_value())? {
+                    with_anthropic_default_cap_value(working.as_mut(), bill.completion_cap)?;
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        (Ingress::Anthropic, Operation::Messages) => {
-            if info.requested_model != upstream_model {
-                rewrite_model_value(working.as_mut(), &info.requested_model, upstream_model)?;
-            }
-            if needs_anthropic_default_cap(working.as_value())? {
-                with_anthropic_default_cap_value(working.as_mut(), bill.completion_cap)?;
-            }
-            Ok(())
-        }
-        (Ingress::Gemini, Operation::GenerateContent) => Ok(()),
-        _ => {
-            let converted = convert_cross_dialect(
-                bill.ingress,
-                operation,
-                working.as_value(),
-                upstream_model,
-                bill.completion_cap,
-                info.stream,
-            )?;
-            working.replace(converted);
-            Ok(())
-        }
+            Ingress::Gemini => Ok(()),
+        };
     }
-}
 
-fn convert_cross_dialect(
-    ingress: Ingress,
-    operation: Operation,
-    src: &serde_json::Value,
-    upstream_model: &str,
-    completion_cap: u32,
-    stream: bool,
-) -> Result<serde_json::Value, UpstreamError> {
-    match (ingress, operation) {
-        (Ingress::OpenAi, Operation::Messages) => {
-            convert::request_openai_to_anthropic_value(src, upstream_model, completion_cap)
-        }
-        (Ingress::OpenAi, Operation::GenerateContent) => {
-            conv_gem::request_openai_to_gemini_value(src)
-        }
-        (Ingress::Anthropic, Operation::ChatCompletions) => {
-            conv_a2o::request_anthropic_to_openai_value(src, upstream_model)
-        }
-        (Ingress::Responses, Operation::ChatCompletions) => {
-            conv_resp::request_responses_to_chat_value(src, upstream_model)
-        }
-        (Ingress::Responses, Operation::Messages) => {
-            let chat = conv_resp::request_responses_to_chat_value(src, upstream_model)?;
-            convert::request_openai_to_anthropic_value(&chat, upstream_model, completion_cap)
-        }
-        (Ingress::Responses, Operation::GenerateContent) => {
-            let chat = conv_resp::request_responses_to_chat_value(src, upstream_model)?;
-            conv_gem::request_openai_to_gemini_value(&chat)
-        }
-        (Ingress::Gemini, Operation::Messages) => {
-            let chat = conv_g2o::request_gemini_to_openai_value(src, upstream_model, stream)?;
-            convert::request_openai_to_anthropic_value(&chat, upstream_model, completion_cap)
-        }
-        (Ingress::Gemini, Operation::ChatCompletions) => {
-            conv_g2o::request_gemini_to_openai_value(src, upstream_model, stream)
-        }
-        (Ingress::OpenAi, Operation::Responses) => {
-            conv_c2r::request_chat_to_responses_value(src, upstream_model)
-        }
-        (Ingress::Anthropic, Operation::Responses) => {
-            let chat = conv_a2o::request_anthropic_to_openai_value(src, upstream_model)?;
-            conv_c2r::request_chat_to_responses_value(&chat, upstream_model)
-        }
-        (Ingress::Gemini, Operation::Responses) => {
-            let chat = conv_g2o::request_gemini_to_openai_value(src, upstream_model, stream)?;
-            conv_c2r::request_chat_to_responses_value(&chat, upstream_model)
-        }
-        (
-            Ingress::OpenAi | Ingress::Anthropic | Ingress::Gemini | Ingress::Responses,
-            Operation::ResponsesCompact,
-        )
-        | (Ingress::Responses, Operation::Responses)
-        | (Ingress::Anthropic | Ingress::Gemini, Operation::GenerateContent)
-        | (
-            Ingress::ResponsesCompact,
-            Operation::ChatCompletions
-            | Operation::Messages
-            | Operation::GenerateContent
-            | Operation::Responses
-            | Operation::ResponsesCompact,
-        )
-        | (Ingress::OpenAi, Operation::ChatCompletions)
-        | (Ingress::Anthropic, Operation::Messages) => Err(PlanError::Endpoint.into()),
-    }
+    let converted = plan.converter.convert_request(
+        working.as_value(),
+        &ConvertContext {
+            upstream_model,
+            completion_cap: bill.completion_cap,
+            stream: info.stream,
+        },
+    )?;
+    working.replace(converted);
+    Ok(())
 }
 
 fn needs_anthropic_default_cap(value: &serde_json::Value) -> Result<bool, UpstreamError> {
@@ -379,39 +326,6 @@ fn with_anthropic_default_cap_value(
     Ok(())
 }
 
-/// thinking-to-content 渠道开关：OpenAI 方言出口的 reasoning 转 <think> 正文。
-pub(super) fn wrap_thinking_to_content(resp: ChatResponse) -> ChatResponse {
-    use futures::StreamExt as _;
-    use okapi_providers::convert::thinking;
-    match resp {
-        ChatResponse::Json {
-            status,
-            upstream_request_id,
-            body,
-            usage,
-        } => ChatResponse::Json {
-            status,
-            upstream_request_id,
-            body: thinking::rewrite_json(&body),
-            usage,
-        },
-        ChatResponse::Stream(h) => {
-            let mut st = thinking::ThinkingToContent::new();
-            let events = h
-                .events
-                .flat_map(move |item| futures::stream::iter(st.step(item)));
-            ChatResponse::Stream(StreamHandle {
-                upstream_request_id: h.upstream_request_id,
-                events: Box::pin(events),
-            })
-        }
-    }
-}
-
-/// 入口协议 × 渠道协议 分派：返回的事件流/JSON 一律已是**客户端方言**形状，
-/// 泵送与结算无感。
-// 四象限线性分派，拆分破坏矩阵完整视野
-#[allow(clippy::too_many_lines)]
 /// 渠道字段透传控制（new-api rc.23 #6847 对齐）：先剥除配置的顶层字段，再浅合并强制注入的字段。
 /// 方言无关（对入口原文生效，转换路径自然继承）；受保护键两边都不动（防误配打断主链）。
 /// 两项都没配时不解析（缺省零开销）；配了也只解析一次。
@@ -569,8 +483,8 @@ fn shape_and_maybe_verify(
     Ok((encoded, header_patch))
 }
 
-// 入口方言 × 上游协议矩阵的收敛点，拆分损害路由全貌可读性
-#[allow(clippy::too_many_lines)]
+/// 入口协议 × 渠道协议统一分派：传输走 [`AppState::infer_plan`]（兼容内置适配器与
+/// `settings.advanced_routes`），回向响应按 [`ExecutionPlan::converter`] 的注册步链转换为客户端方言。
 pub(super) async fn dispatch_chat(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
@@ -578,7 +492,6 @@ pub(super) async fn dispatch_chat(
     body: Bytes,
     stream: bool,
 ) -> Result<ChatResponse, UpstreamError> {
-    use futures::StreamExt as _;
     let plan = ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?;
     let native_responses = plan.native_responses();
     let (body, override_headers) = shape_and_verify_outbound(bill, cand, body)?;
@@ -590,286 +503,50 @@ pub(super) async fn dispatch_chat(
         Some(bill.user_id),
     );
     override_headers.apply_to(&mut outbound.extra_headers);
-    // 操作臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
-    let endpoint = plan.endpoint(stream);
-    let infer_call = |model, body, stream| super::super::dialect::InferCall {
-        cand,
-        endpoint,
-        base,
-        model,
-        body,
-        stream,
-        outbound: &outbound,
+
+    let endpoint = plan.endpoint_for(cand, stream);
+    let call_model = if matches!(
+        plan.operation,
+        Operation::Responses | Operation::ResponsesCompact
+    ) && plan.advanced_route_index.is_none()
+    {
+        ""
+    } else {
+        upstream_model.as_str()
     };
-    let resp = match (bill.ingress, plan.operation) {
-        (Ingress::ResponsesCompact, Operation::ResponsesCompact) => {
-            bill.state
-                .responses_via(true, infer_call("", body, false))
-                .await
-        }
-        // Responses 客户端 + 说 Responses 方言的上游：直转，事件原样透出
-        (Ingress::Responses, Operation::Responses) => {
-            bill.state
-                .responses_via(false, infer_call("", body, stream))
-                .await
-        }
-        // Gemini 客户端 + gemini 方言上游：透传 + 计费元数据扫描
-        (Ingress::Gemini, Operation::GenerateContent) => {
-            match bill
-                .state
-                .generate_via_outbound(infer_call(&upstream_model, body, stream))
-                .await?
-            {
-                okapi_providers::gemini::GeminiResponse::Json {
-                    status,
-                    upstream_request_id,
-                    body,
-                } => {
-                    let usage = serde_json::from_slice::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| conv_gem::usage_from_gemini(v.get("usageMetadata")));
-                    Ok(ChatResponse::Json {
-                        status,
-                        upstream_request_id,
-                        body,
-                        usage,
-                    })
-                }
-                okapi_providers::gemini::GeminiResponse::Stream(h) => {
-                    let mut scanner = okapi_providers::gemini::MetaScanner::new();
-                    let events = h
-                        .events
-                        .flat_map(move |item| futures::stream::iter(scanner.scan(item)));
-                    Ok(ChatResponse::Stream(StreamHandle {
-                        upstream_request_id: h.upstream_request_id,
-                        events: Box::pin(events),
-                    }))
-                }
-            }
-        }
-        // Gemini 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
-        (Ingress::Gemini, Operation::Messages) => bill
-            .state
-            .messages_via(infer_call(&upstream_model, body, stream))
-            .await
-            .and_then(|resp| convert::wrap_messages(resp, &upstream_model))
-            .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
-        // Gemini 客户端 + OpenAI(兼容 / Azure) 上游：chat 形状 → Gemini 形状
-        (Ingress::Gemini, Operation::ChatCompletions) => bill
-            .state
-            .openai_chat_with_outbound(cand, endpoint, &upstream_model, body, stream, &outbound)
-            .await
-            .map(surface_stream_failures)
-            .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
-        // OpenAI/Responses 客户端 + gemini 方言上游：providers 内转回 OpenAI 形状
-        (Ingress::OpenAi | Ingress::Responses, Operation::GenerateContent) => bill
-            .state
-            .generate_via_outbound(infer_call(&upstream_model, body, stream))
-            .await
-            .and_then(|resp| conv_gem::wrap_generate(resp, &upstream_model)),
-        // OpenAI/Responses 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状
-        (Ingress::OpenAi | Ingress::Responses, Operation::Messages) => bill
-            .state
-            .messages_via(infer_call(&upstream_model, body, stream))
-            .await
-            .and_then(|resp| convert::wrap_messages(resp, &upstream_model)),
-        // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
-        (Ingress::OpenAi | Ingress::Responses, Operation::ChatCompletions) => {
-            bill.state
-                .openai_chat_with_outbound(cand, endpoint, &upstream_model, body, stream, &outbound)
-                .await
-        }
-        // Anthropic 客户端 + anthropic 方言上游：透传 + 计费元数据扫描
-        (Ingress::Anthropic, Operation::Messages) => {
-            match bill
-                .state
-                .messages_via(infer_call(&upstream_model, body, stream))
-                .await?
-            {
-                okapi_providers::anthropic::MessagesResponse::Json {
-                    status,
-                    upstream_request_id,
-                    body,
-                } => {
-                    let usage = serde_json::from_slice::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| convert::usage_from_anthropic(v.get("usage")));
-                    Ok(ChatResponse::Json {
-                        status,
-                        upstream_request_id,
-                        body,
-                        usage,
-                    })
-                }
-                okapi_providers::anthropic::MessagesResponse::Stream(h) => {
-                    let mut scanner = okapi_providers::anthropic::MetaScanner::new();
-                    let events = h
-                        .events
-                        .flat_map(move |item| futures::stream::iter(scanner.scan(item)));
-                    Ok(ChatResponse::Stream(StreamHandle {
-                        upstream_request_id: h.upstream_request_id,
-                        events: Box::pin(events),
-                    }))
-                }
-            }
-        }
-        // OpenAI 客户端 + Responses 上游（Responses-only 渠道或开启 chat_via_responses 的 Codex 渠道）
-        (Ingress::OpenAi, Operation::Responses) => bill
-            .state
-            .responses_via(false, infer_call("", body, stream))
-            .await
-            .map(surface_stream_failures)
-            .and_then(|resp| conv_c2r::wrap_responses_as_chat(resp, &upstream_model)),
-        // Anthropic 客户端 + Responses 上游：Responses → Chat → Anthropic 两跳回向转换
-        (Ingress::Anthropic, Operation::Responses) => bill
-            .state
-            .responses_via(false, infer_call("", body, stream))
-            .await
-            .map(surface_stream_failures)
-            .and_then(|resp| conv_c2r::wrap_responses_as_chat(resp, &upstream_model))
-            .and_then(|resp| wrap_chat_as_anthropic(resp, &upstream_model)),
-        // Gemini 客户端 + Responses 上游：Responses → Chat → Gemini 两跳回向转换
-        (Ingress::Gemini, Operation::Responses) => bill
-            .state
-            .responses_via(false, infer_call("", body, stream))
-            .await
-            .map(surface_stream_failures)
-            .and_then(|resp| conv_c2r::wrap_responses_as_chat(resp, &upstream_model))
-            .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
-        // Anthropic 客户端 + OpenAI(兼容 / Azure) 上游：回向转换为 Anthropic 事件/JSON
-        (Ingress::Anthropic, Operation::ChatCompletions) => wrap_chat_as_anthropic(
-            surface_stream_failures(
-                bill.state
-                    .openai_chat_with_outbound(cand, endpoint, &upstream_model, body, stream, &outbound)
-                    .await?,
-            ),
-            &upstream_model,
-        ),
-        // 编计划时已排除：Messages 入口不接 Gemini 方言，Compact 操作只给同名入口
-        (
-            Ingress::OpenAi | Ingress::Anthropic | Ingress::Gemini | Ingress::Responses,
-            Operation::ResponsesCompact,
+    let call_stream = plan.operation != Operation::ResponsesCompact && stream;
+
+    let raw = bill
+        .state
+        .infer_plan(
+            plan,
+            super::super::dialect::InferCall {
+                cand,
+                endpoint: endpoint.as_ref(),
+                base,
+                model: call_model,
+                body,
+                stream: call_stream,
+                outbound: &outbound,
+            },
         )
-        | (Ingress::Anthropic, Operation::GenerateContent)
-        | (
-            Ingress::ResponsesCompact,
-            Operation::ChatCompletions
-            | Operation::Messages
-            | Operation::GenerateContent
-            | Operation::Responses,
-        ) => Err(PlanError::Endpoint.into()),
-    };
-    let mut resp = resp?;
+        .await?;
+    let resp = plan
+        .converter
+        .convert_response(raw, &upstream_model, cand.thinking_to_content)?;
     if matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact) && native_responses {
         bill.trace.finish(None, None);
-        // 直转：上游已是 Responses 形状，reasoning 以原生 reasoning item 呈现，
-        // 既无需合成事件骨架，也不做 thinking_to_content（那是 chat 形状的补丁）
-        return Ok(resp);
-    }
-    if matches!(bill.ingress, Ingress::OpenAi | Ingress::Responses) && cand.thinking_to_content {
-        resp = wrap_thinking_to_content(resp);
-    }
-    // Responses 出口：chat 形状 → Responses 事件/对象（降级链的回程半跳）
-    if bill.ingress == Ingress::Responses {
-        resp = wrap_responses_egress(resp, &upstream_model)?;
     }
     Ok(resp)
 }
 
-/// 上游说 chat 方言、流要转成别的方言给客户端时：在转换**之前**认出流里的错误事件（`{"error":…}`），
-/// 变成 `Err` 交给转换器原样往下传。
-///
-/// 转换器不认 chat 的错误事件（当普通块处理，至多产出一个 `message_start`），转换后网关再按客户端方言找
-/// （`stream::stream_failure_in`）就找不到了：客户端拿到空回复，看不到上游的 429 / 529，也不会按限流退避
-/// （10-29 修过的 `server_is_overloaded` 同一类，跨方言这条路漏了）。判定与透传路径同一个函数；同方言透传
-/// 不走这里，仍在原始事件上判（不算错误的说明留作空回复的诊断）。
-fn surface_stream_failures(resp: ChatResponse) -> ChatResponse {
-    use futures::StreamExt as _;
-    match resp {
-        ChatResponse::Stream(h) => ChatResponse::Stream(StreamHandle {
-            upstream_request_id: h.upstream_request_id,
-            events: Box::pin(h.events.map(|item| {
-                if let Ok(event) = &item
-                    && let Some(error) = super::stream::stream_failure_in(event, &mut None)
-                {
-                    return Err(error);
-                }
-                item
-            })),
-        }),
-        json @ ChatResponse::Json { .. } => json,
-    }
-}
-
-/// chat 形状 → Anthropic Messages 方言（供 Chat / Responses 上游共享）。
-fn wrap_chat_as_anthropic(
-    resp: ChatResponse,
-    upstream_model: &str,
-) -> Result<ChatResponse, UpstreamError> {
-    use futures::StreamExt as _;
-    match resp {
-        ChatResponse::Json {
-            status,
-            upstream_request_id,
-            body,
-            usage,
-        } => {
-            let (body, parsed_usage) = conv_a2o::response_openai_to_anthropic(&body)?;
-            Ok(ChatResponse::Json {
-                status,
-                upstream_request_id,
-                body,
-                usage: usage.or(parsed_usage),
-            })
-        }
-        ChatResponse::Stream(h) => {
-            let mut st = conv_a2o::OaiStreamToAnthropic::new(upstream_model);
-            let events = h
-                .events
-                .flat_map(move |item| futures::stream::iter(st.step(item)));
-            Ok(ChatResponse::Stream(StreamHandle {
-                upstream_request_id: h.upstream_request_id,
-                events: Box::pin(events),
-            }))
-        }
-    }
-}
-
-/// chat 形状 → Responses 方言（response.created/.output_text.delta/.completed 事件骨架）。
+/// chat 形状 → Responses 方言（委托给协议转换注册表，供单测复用）。
+#[cfg(test)]
 pub(super) fn wrap_responses_egress(
     resp: ChatResponse,
     upstream_model: &str,
 ) -> Result<ChatResponse, UpstreamError> {
-    use futures::StreamExt as _;
-    let resp = surface_stream_failures(resp);
-    match resp {
-        ChatResponse::Json {
-            status,
-            upstream_request_id,
-            body,
-            usage,
-        } => {
-            let (body, parsed_usage) = conv_resp::response_chat_to_responses(&body)?;
-            Ok(ChatResponse::Json {
-                status,
-                upstream_request_id,
-                body,
-                // Protocol JSON cannot carry the internal invalid-usage marker.
-                // Preserve the upstream probe across every conversion hop.
-                usage: usage.or(parsed_usage),
-            })
-        }
-        ChatResponse::Stream(h) => {
-            let mut st = conv_resp::ChatStreamToResponses::new(upstream_model);
-            let events = h
-                .events
-                .flat_map(move |item| futures::stream::iter(st.step(item)));
-            Ok(ChatResponse::Stream(StreamHandle {
-                upstream_request_id: h.upstream_request_id,
-                events: Box::pin(events),
-            }))
-        }
-    }
+    okapi_providers::convert::registry::wrap_chat_as_responses(resp, upstream_model)
 }
 
 pub(super) fn response_writer(
