@@ -8,9 +8,11 @@ import { OptionalSection } from '@/components/ui/optional-section'
 import { OAuthLoginCard } from '@/features/channels/OAuthLoginCard'
 import { ClientProfileEditor } from '@/features/channels/ClientProfileEditor'
 import { ChannelEgress, NewChannelEgress } from '@/features/channels/ChannelEgress'
+import { ProviderMark } from '@/features/channels/ProviderChip'
 import { PROVIDERS, apiBasePlaceholder, needsVersionSegment } from '@/features/channels/types'
 import { Select } from '@/components/ui/select'
 import { Tabs } from '@/components/ui/tabs'
+import { cn } from '@/lib/utils'
 import type { ChannelForm } from './use-channel-form'
 import { CredentialStatus } from './key-panels'
 
@@ -20,15 +22,31 @@ export const PROVIDER_LABELS: Record<string, string> = {
 }
 
 /// 「接入信息」：名称、协议、地址、凭证 / 订阅登录、出口。
-export function ConnectionSection({ f, channel, rotate, onDone }: {
+export function ConnectionSection({
+  f,
+  channel,
+  showQuickProviders = false,
+  rotate,
+  onDone,
+}: {
   f: ChannelForm
   channel: ChannelRow | undefined
+  /// 页内引导工作区展示带品牌图标的协议快捷卡片，同时与下方 `#d-provider` 下拉保持同步。
+  showQuickProviders?: boolean
   rotate: { isPending: boolean; mutate: () => void }
   onDone: () => void
 }) {
   const { t } = useTranslation()
   const isEdit = channel !== undefined
   const { form, setForm, account, authorization, accountReady, models, credential, setCredential, oauthInput, setOauthInput, rotationKeyId, setRotationKeyId, settings, setSettings, controlValid, concurrencyValid, newEgress, setNewEgress, oauth, importToken, defaultBase, endpointRequired } = f
+  const providerIds = account.data?.data.length ? account.data.data.map((item) => item.id) : [...PROVIDERS]
+  const providerLabel = (p: string) => (PROVIDER_LABELS[p] ? t(PROVIDER_LABELS[p]!) : p)
+  const selectProvider = (v: string) => {
+    setForm((prev) => ({ ...prev, provider: v }))
+    setCredential('')
+    setOauthInput('login')
+    setSettings(({ extensions: _drop, ...s }) => s)
+  }
   const baseField = <div className="flex flex-col gap-1.5">
     <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
     <Input id="d-base" value={form.api_base} placeholder={defaultBase ?? apiBasePlaceholder(form.provider)} required={endpointRequired}
@@ -44,7 +62,40 @@ export function ConnectionSection({ f, channel, rotate, onDone }: {
   return (
     <>
       <FieldGroup title={t('admin:groupBasic')} hint={t('admin:groupBasicHint')}>
-        <div className="grid grid-cols-2 gap-4">
+        {!isEdit && showQuickProviders && (
+          <div className="flex flex-col gap-2">
+            <span className="text-xs font-medium text-muted-foreground">{t('admin:channelQuickProviders')}</span>
+            <div
+              role="group"
+              aria-label={t('admin:channelQuickProviders')}
+              className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5"
+            >
+              {providerIds.map((p) => {
+                const active = form.provider === p
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => selectProvider(p)}
+                    className={cn(
+                      'flex min-w-0 cursor-pointer items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-all outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+                      active
+                        ? 'border-primary/50 bg-primary/[0.06] shadow-xs ring-1 ring-inset ring-primary/15'
+                        : 'border-border/80 bg-card hover:border-muted-foreground/35 hover:bg-muted/30',
+                    )}
+                  >
+                    <ProviderMark provider={p} size="sm" className="h-7 w-7 rounded-lg" />
+                    <span className={cn('min-w-0 truncate text-xs', active ? 'font-semibold text-foreground' : 'font-medium text-foreground/85')}>
+                      {providerLabel(p)}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="d-name">{t('admin:channelName')}</Label>
             <Input
@@ -57,22 +108,17 @@ export function ConnectionSection({ f, channel, rotate, onDone }: {
             <Label htmlFor="d-provider">{t('admin:provider')}</Label>
             {isEdit ? (
               // 协议决定请求转换路径，改了等于换渠道语义；已有渠道只读，需要换就新建
-              <Input id="d-provider" value={PROVIDER_LABELS[form.provider] ? t(PROVIDER_LABELS[form.provider]!) : form.provider} readOnly className="opacity-60" />
+              <Input id="d-provider" value={providerLabel(form.provider)} readOnly className="opacity-60" />
             ) : (
               <Select
                 id="d-provider"
                 value={form.provider}
-                onChange={(v) => {
-                  setForm((f) => ({ ...f, provider: v }))
-                  setCredential('')
-                  setOauthInput('login')
-                  setSettings(({ extensions: _drop, ...s }) => s)
-                }}
-                options={(account.data?.data.length ? account.data.data.map((item) => item.id) : PROVIDERS).map((p) => ({ value: p, label: PROVIDER_LABELS[p] ? t(PROVIDER_LABELS[p]!) : p }))}
+                onChange={selectProvider}
+                options={providerIds.map((p) => ({ value: p, label: providerLabel(p) }))}
               />
             )}
           </div>
-          {endpointRequired && <div className="col-span-2">{baseField}</div>}
+          {endpointRequired && <div className="sm:col-span-2">{baseField}</div>}
         </div>
       </FieldGroup>
       {(!endpointRequired || form.provider === 'bedrock' || form.provider === 'azure') && (

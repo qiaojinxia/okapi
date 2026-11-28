@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import { nextStep, previousStep, toModelsStep } from './channel-steps'
+import { channelCreatePanel, nextStep, previousStep, toModelsStep } from './channel-steps'
 
 type Json = Record<string, unknown>
 
@@ -51,7 +51,7 @@ async function prepare(page: Page, options: { models?: 'ok' | 'denied' } = {}) {
 
 async function openNew(page: Page) {
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await expect(drawer.locator(':focus')).toHaveCount(1)
   await drawer.locator('#d-name').fill('fresh-channel')
   return drawer
@@ -190,4 +190,45 @@ test('订阅账号（登录换令牌）没有草稿凭证：不给按钮，说�
   await expect(drawer.getByRole('button', { name: '拉取上游模型' })).toHaveCount(0)
   await expect(drawer).toContainText('订阅账号登录并创建渠道后，可在编辑页拉取上游模型')
   expect(calls.filter((call) => call.path === '/admin/channels/fetch-models')).toHaveLength(0)
+})
+
+test('新建渠道以页内页签呈现：支持快捷协议卡片、切换列表页签保草稿，并可在引导模式与完整表单间无损切换', async ({ page }) => {
+  await prepare(page)
+  const createTab = page.getByRole('tab', { name: '新建渠道', exact: true })
+  const listTab = page.getByRole('tab', { name: /渠道列表/ })
+  await expect(listTab).toHaveAttribute('aria-selected', 'true')
+
+  // 点击页级「新建渠道」页签：URL 同步 ?tab=create，非右侧 dialog 抽屉
+  await createTab.click()
+  await expect(page).toHaveURL(/tab=create/)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  const panel = channelCreatePanel(page)
+  await expect(panel).toBeVisible()
+  // 点选快捷协议卡片，同步更新 #d-provider 与右侧摘要卡
+  await panel.getByRole('group', { name: '常用协议快捷选择' }).getByRole('button', { name: 'anthropic', exact: true }).click()
+  await expect(panel.locator('#d-provider')).toHaveValue('anthropic')
+  await panel.locator('#d-name').fill('tab-draft-anthropic')
+  await panel.locator('#d-cred').fill('sk-tab-draft')
+  await expect(panel.locator('[data-slot="guided-summary"]')).toContainText('tab-draft-anthropic')
+
+  // 切回列表页签再切回新建页签：草稿完整保留
+  await listTab.click()
+  await expect(page).not.toHaveURL(/tab=create/)
+  await createTab.click()
+  await expect(panel.locator('#d-name')).toHaveValue('tab-draft-anthropic')
+  await expect(panel.locator('#d-cred')).toHaveValue('sk-tab-draft')
+
+  // 切换到「完整表单」模式：步骤条收起，模型与调度区同屏可见且保留草稿；切回「引导模式」继续走步骤
+  const modeToggle = panel.locator('[data-slot="channel-create-mode"]')
+  await modeToggle.getByRole('button', { name: '完整表单', exact: true }).click()
+  await expect(panel.getByRole('navigation', { name: '新建渠道的步骤' })).toHaveCount(0)
+  await expect(panel.locator('#d-models')).toBeVisible()
+  await panel.locator('#d-models').fill('claude-sonnet-4')
+  await panel.locator('#d-models').press('Enter')
+  await expect(panel.getByRole('button', { name: '新建', exact: true })).toBeEnabled()
+
+  await modeToggle.getByRole('button', { name: '引导模式', exact: true }).click()
+  await expect(panel.getByRole('navigation', { name: '新建渠道的步骤' })).toBeVisible()
+  await expect(panel.locator('#d-name')).toHaveValue('tab-draft-anthropic')
 })

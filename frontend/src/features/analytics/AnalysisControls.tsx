@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { DateRangeField } from '@/components/ui/date-range'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { ModelInput } from '@/features/models/model-input'
 import { ADVANCED_KEYS } from '@/lib/cube'
 import { cn } from '@/lib/utils'
@@ -17,10 +18,6 @@ export function dimensionLabel(t: TFunction, dim: string): string {
   const basic: Record<string, string> = { model: 'dimModel', channel: 'dimChannel', provider: 'dimProvider', user: 'dimUser', api_key: 'dimApiKey', group: 'dimGroup' }
   return basic[dim] ? t(`analytics:${basic[dim]}`) : t(`analysis:${dim}`)
 }
-
-const SELECT_BASE = 'h-9 min-w-0 rounded-lg border border-border bg-card px-2.5 text-sm text-foreground shadow-[0_1px_2px_oklch(0.24_0.015_70/0.04)] outline-none transition-[border-color,box-shadow] hover:border-muted-foreground/35 focus-visible:border-primary/70 focus-visible:ring-2 focus-visible:ring-primary/25 dark:shadow-[inset_0_1px_0_oklch(1_0_0/0.03)]'
-export const selectClass = `${SELECT_BASE} w-full`
-export const compactSelectClass = `${SELECT_BASE} h-8 w-auto text-xs`
 
 function Choices({ label, values, onChange, model = false }: { label: string; values: string[]; onChange: (v: string[]) => void; model?: boolean }) {
   const { t } = useTranslation()
@@ -142,15 +139,56 @@ function Editor({ open, value, onApply, onClose, today }: { open: boolean; value
               <span className="block text-xs font-medium text-foreground/85">{t('analysis:dateRange')}</span>
               <DateRangeField today={calendarToday} label={t('analysis:dateRange')} placeholder={t('analysis:dateRangePlaceholder')} value={{ start: draft.start_date ?? '', end: draft.end_date ?? '' }} onChange={(range) => patch({ start_date: range.start || undefined, end_date: range.end || undefined })} />
             </div>
-            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">{t('analysis:granularity')}<select aria-label={t('analysis:granularity')} className={selectClass} value={draft.granularity ?? ''} onChange={(e) => patch({ granularity: e.target.value as AnalyticsSearch['granularity'] || undefined })}>{['', 'hour', 'day'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'auto'}`)}</option>)}</select></label>
-            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">{t('analysis:model_source')}<select aria-label={t('analysis:model_source')} className={selectClass} value={draft.model_source ?? 'billed'} onChange={(e) => patch({ model_source: e.target.value as AnalyticsSearch['model_source'] })}>{['billed', 'requested', 'upstream'].map((v) => <option key={v} value={v}>{t(`analysis:source_${v}`)}</option>)}</select></label>
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">
+              {t('analysis:granularity')}
+              <Select
+                aria-label={t('analysis:granularity')}
+                className="w-full"
+                value={draft.granularity ?? ''}
+                onChange={(v) => patch({ granularity: (v as AnalyticsSearch['granularity']) || undefined })}
+                options={['', 'hour', 'day'].map((v) => ({ value: v, label: t(`analysis:${v || 'auto'}`) }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">
+              {t('analysis:model_source')}
+              <Select
+                aria-label={t('analysis:model_source')}
+                className="w-full"
+                value={draft.model_source ?? 'billed'}
+                onChange={(v) => patch({ model_source: v as AnalyticsSearch['model_source'] })}
+                options={['billed', 'requested', 'upstream'].map((v) => ({ value: v, label: t(`analysis:source_${v}`) }))}
+              />
+            </label>
           </div>
         </FieldGroup>
         <FieldGroup title={t('analysis:requestSection')}>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {field('endpoint')}{field('upstream_endpoint')}{field('node')}
-            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">{t('analysis:request_type')}<select aria-label={t('analysis:request_type')} className={selectClass} value={draft.request_type ?? (draft.stream === true ? 'stream' : draft.stream === false ? 'non_stream' : '')} onChange={(e) => patch({ request_type: e.target.value || undefined, stream: undefined })}>{['', 'stream', 'non_stream', 'websocket'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'all'}`)}</option>)}</select></label>
-            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">{t('analysis:billing_type')}<select aria-label={t('analysis:billing_type')} className={selectClass} value={draft.billing_type ?? ''} onChange={(e) => patch({ billing_type: e.target.value || undefined })}>{['', 'ratio', 'tiered', 'per_call'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'all'}`)}</option>)}{draft.billing_type && !['ratio', 'tiered', 'per_call'].includes(draft.billing_type) && <option value={draft.billing_type}>{draft.billing_type}</option>}</select></label>
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">
+              {t('analysis:request_type')}
+              <Select
+                aria-label={t('analysis:request_type')}
+                className="w-full"
+                value={draft.request_type ?? (draft.stream === true ? 'stream' : draft.stream === false ? 'non_stream' : '')}
+                onChange={(v) => patch({ request_type: v || undefined, stream: undefined })}
+                options={['', 'stream', 'non_stream', 'websocket'].map((v) => ({ value: v, label: t(`analysis:${v || 'all'}`) }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-foreground/85">
+              {t('analysis:billing_type')}
+              <Select
+                aria-label={t('analysis:billing_type')}
+                className="w-full"
+                value={draft.billing_type ?? ''}
+                onChange={(v) => patch({ billing_type: v || undefined })}
+                options={[
+                  ...['', 'ratio', 'tiered', 'per_call'].map((v) => ({ value: v, label: t(`analysis:${v || 'all'}`) })),
+                  ...(draft.billing_type && !['ratio', 'tiered', 'per_call'].includes(draft.billing_type)
+                    ? [{ value: draft.billing_type, label: draft.billing_type }]
+                    : []),
+                ]}
+              />
+            </label>
           </div>
         </FieldGroup>
         <FieldGroup title={t('analysis:comparisonSection')} hint={t('analysis:selectionHint')}>

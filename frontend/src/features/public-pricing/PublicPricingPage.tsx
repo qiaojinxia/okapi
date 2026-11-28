@@ -15,6 +15,7 @@ import { Pagination } from '@/components/ui/pagination'
 import { BrandLockup } from '@/components/brand'
 import { PoweredBy } from '@/components/powered-by'
 import { Button, buttonVariants } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/input'
 import { SearchInput } from '@/components/ui/search-input'
 import { Segmented } from '@/components/ui/segmented'
@@ -145,7 +146,12 @@ export function PublicPricingPage() {
             <SlidersHorizontal className="mr-1 hidden h-4 w-4 text-muted-foreground sm:block" />
             <Select aria-label={t('catalog:billingMode')} value={search.mode ?? ''} onChange={(mode) => patch({ mode: mode || undefined })} placeholder={t('catalog:allBilling')} options={['ratio', 'per_call', 'tiered'].map((mode) => ({ value: mode, label: t(`analysis:${mode}`) }))} />
             {capabilities.length > 0 && <Select aria-label={t('catalog:capabilities')} value={search.capability ?? ''} onChange={(capability) => patch({ capability: capability || undefined })} placeholder={t('catalog:allCapabilities')} options={capabilities.map((cap) => ({ value: cap, label: t(`catalog:cap_${cap}`) }))} />}
-            <label className="flex min-h-9 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-muted-foreground"><input type="checkbox" className="h-4 w-4 accent-primary" checked={!!search.available} onChange={(e) => patch({ available: e.target.checked || undefined })} />{t('catalog:onlyAvailable')}</label>
+            <Checkbox
+              checked={!!search.available}
+              label={t('catalog:onlyAvailable')}
+              className="min-h-9 px-2 [&_span.text-sm]:text-xs [&_span.text-sm]:text-muted-foreground"
+              onChange={(checked) => patch({ available: checked || undefined })}
+            />
             {active && <Button size="sm" variant="ghost" onClick={clear}><X className="h-3.5 w-3.5" />{t('catalog:clearFilters')}</Button>}
           </div>
           <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-border bg-card p-3 shadow-card sm:p-4">

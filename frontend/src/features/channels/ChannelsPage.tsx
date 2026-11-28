@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   Copy,
   Ellipsis,
   ExternalLink,
@@ -25,10 +26,11 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { ChannelBalance, ChannelRow } from '@/features/channels/types'
+import type { ChannelBalance, ChannelRow, ChannelTab } from '@/features/channels/types'
 import { Button } from '@/components/ui/button'
 import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
+import { ChannelCreateWorkspace } from '@/features/channels/ChannelCreateWorkspace'
 import { ChannelDrawer, type ChannelEditFocus } from '@/features/channels/ChannelDrawer'
 import { ChannelGridCard } from '@/features/channels/ChannelGridCard'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
@@ -69,6 +71,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { SelectionBar } from '@/components/ui/selection-bar'
 import { TableSkeleton } from '@/components/ui/skeleton'
+import { TabPanel, Tabs } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
 import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
@@ -127,12 +130,22 @@ export function ChannelsPage() {
   }
   const search = routeApi.useSearch()
   const navigate = routeApi.useNavigate()
+  const activeTab: ChannelTab = search.tab ?? 'list'
+  const setActiveTab = (next: ChannelTab) => {
+    void navigate({
+      search: (prev) => ({
+        ...prev,
+        tab: next === 'list' ? undefined : next,
+      }),
+    })
+  }
+  const [createSession, setCreateSession] = useState(0)
   const query = search.q ?? ''
   const providerFilter = search.provider ?? ''
   const statusFilter = search.status ?? ''
   const [draft, setDraft] = useDraft(query)
   const [drawer, setDrawer] = useState<
-    { mode: 'create' } | { mode: 'edit'; channel: ChannelRow; focus?: ChannelEditFocus } | null
+    { channel: ChannelRow; focus?: ChannelEditFocus } | null
   >(null)
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
@@ -346,7 +359,13 @@ export function ChannelsPage() {
   const filtered = query !== '' || providerFilter !== '' || statusFilter !== ''
   const applySearch = () => setFilters({ q: draft })
   const clearFilters = () => setFilters({ q: '', provider: '', status: '' })
-  const openEdit = (channel: ChannelRow, focus?: ChannelEditFocus) => setDrawer({ mode: 'edit', channel, focus })
+  const openCreate = () => setActiveTab('create')
+  const openEdit = (channel: ChannelRow, focus?: ChannelEditFocus) => setDrawer({ channel, focus })
+  const handleCreated = () => {
+    invalidate()
+    setCreateSession((n) => n + 1)
+    setActiveTab('list')
+  }
   const egressLabel = (c: ChannelRow) => {
     const egress = c.egress
     if (egress?.mode === 'proxy') {
@@ -367,7 +386,7 @@ export function ChannelsPage() {
     })
 
   const editingChannel =
-    drawer?.mode === 'edit'
+    drawer !== null
       ? (rows.find((c) => c.id === drawer.channel.id) ?? drawer.channel)
       : undefined
 
@@ -378,26 +397,76 @@ export function ChannelsPage() {
         description={t('admin:channelsDesc')}
         meta={channels.data && t('admin:channelsSummary', { total, enabled: enabledCount })}
         action={
-          <>
-            <Button
-              variant="outline"
-              loading={testAll.isPending}
-              disabled={enabledCount === 0 && !filtered}
-              onClick={() => testAll.mutate()}
-            >
-              {testAll.isPending ? t('admin:testAllRunning') : t('admin:testAll')}
+          activeTab === 'create' ? (
+            <Button variant="outline" onClick={() => setActiveTab('list')}>
+              <ArrowLeft aria-hidden className="h-4 w-4" />
+              {t('admin:channelBackToList')}
             </Button>
-            <Button variant="outline" onClick={() => setDiagnosing(true)}>
-              {t('admin:diagTitle')}
-            </Button>
-            <Button onClick={() => setDrawer({ mode: 'create' })}>
-              <Plus aria-hidden className="h-4 w-4" />
-              {t('admin:createChannel')}
-            </Button>
-          </>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                loading={testAll.isPending}
+                disabled={enabledCount === 0 && !filtered}
+                onClick={() => testAll.mutate()}
+              >
+                {testAll.isPending ? t('admin:testAllRunning') : t('admin:testAll')}
+              </Button>
+              <Button variant="outline" onClick={() => setDiagnosing(true)}>
+                {t('admin:diagTitle')}
+              </Button>
+              <Button onClick={openCreate}>
+                <Plus aria-hidden className="h-4 w-4" />
+                {t('admin:createChannel')}
+              </Button>
+            </>
+          )
         }
       />
 
+      <Tabs
+        id="channels-tabs"
+        variant="underline"
+        ariaLabel={t('admin:channelsTitle')}
+        active={activeTab}
+        onChange={(id) => setActiveTab(id as ChannelTab)}
+        items={[
+          {
+            id: 'list',
+            label: t('admin:channelTabList'),
+            icon: Server,
+            count: channels.data?.total,
+            panelId: 'channels-panel-list',
+          },
+          {
+            id: 'create',
+            label: t('admin:channelTabCreate'),
+            icon: Plus,
+            panelId: 'channels-panel-create',
+          },
+        ]}
+      />
+
+      <TabPanel
+        id="channels-panel-create"
+        labelledBy="channels-tabs-create"
+        active={activeTab === 'create'}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5 pb-6 [scrollbar-gutter:stable]"
+      >
+        <ChannelCreateWorkspace
+          key={createSession}
+          onCancel={() => setActiveTab('list')}
+          onCreated={handleCreated}
+          onReset={() => setCreateSession((n) => n + 1)}
+        />
+      </TabPanel>
+
+      <TabPanel
+        id="channels-panel-list"
+        labelledBy="channels-tabs-list"
+        active={activeTab === 'list'}
+        className="list-page-section flex-1"
+      >
       <Toolbar
         filters={
           <>
@@ -460,7 +529,7 @@ export function ChannelsPage() {
             icon={Server}
             hint={t('admin:channelsEmptyHint')}
             action={
-              <Button onClick={() => setDrawer({ mode: 'create' })}>
+              <Button onClick={openCreate}>
                 <Plus className="h-4 w-4" />
                 {t('admin:createChannel')}
               </Button>
@@ -475,12 +544,12 @@ export function ChannelsPage() {
           >
             {(() => {
               const listControlBar = (
-                <div className="flex items-center justify-between gap-3 px-4 py-1 sm:px-5">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-1 sm:px-5">
                   <Checkbox
                     checked={allPicked}
                     indeterminate={somePicked && !allPicked}
                     label={t('admin:batchPickAll')}
-                    className="text-muted-foreground [&_span.text-sm]:text-xs [&_span.text-sm]:font-medium [&_span.text-sm]:text-muted-foreground"
+                    className="shrink-0 text-muted-foreground [&_span.text-sm]:whitespace-nowrap [&_span.text-sm]:text-xs [&_span.text-sm]:font-medium [&_span.text-sm]:text-muted-foreground"
                     onChange={(on) =>
                       setPicked((prev) => {
                         const next = new Set(prev)
@@ -492,7 +561,7 @@ export function ChannelsPage() {
                       })
                     }
                   />
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {issueCount > 0 && (
                       <button
                         type="button"
@@ -500,7 +569,7 @@ export function ChannelsPage() {
                         aria-pressed={focusingIssues}
                         onClick={() => setAttentionOnly((v) => !v)}
                         className={cn(
-                          'inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium tabular-nums ring-1 ring-inset outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
+                          'inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium whitespace-nowrap tabular-nums ring-1 ring-inset outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
                           focusingIssues
                             ? 'bg-warning/15 text-warning ring-warning/35'
                             : 'bg-card text-muted-foreground ring-border/80 hover:border-warning/40 hover:text-foreground',
@@ -513,40 +582,18 @@ export function ChannelsPage() {
                         </span>
                       </button>
                     )}
-                    <div
-                      role="group"
-                      aria-label={t('admin:channelViewMode')}
-                      data-slot="channel-view-toggle"
-                      className="inline-flex h-7 items-center rounded-lg border border-border/80 bg-muted/40 p-0.5 text-[11.5px]"
-                    >
-                      <button
-                        type="button"
-                        aria-pressed={viewMode === 'list'}
-                        onClick={() => setViewMode('list')}
-                        className={cn(
-                          'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
-                          viewMode === 'list'
-                            ? 'bg-card font-medium text-foreground shadow-xs'
-                            : 'text-muted-foreground hover:text-foreground',
-                        )}
-                      >
-                        <LayoutList aria-hidden className="h-3.5 w-3.5" />
-                        <span>{t('admin:channelViewList')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        aria-pressed={viewMode === 'cards'}
-                        onClick={() => setViewMode('cards')}
-                        className={cn(
-                          'inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-2 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
-                          viewMode === 'cards'
-                            ? 'bg-card font-medium text-foreground shadow-xs'
-                            : 'text-muted-foreground hover:text-foreground',
-                        )}
-                      >
-                        <LayoutGrid aria-hidden className="h-3.5 w-3.5" />
-                        <span>{t('admin:channelViewCards')}</span>
-                      </button>
+                    <div className="max-w-full shrink-0">
+                      <Segmented<ChannelViewMode>
+                        size="sm"
+                        ariaLabel={t('admin:channelViewMode')}
+                        dataSlot="channel-view-toggle"
+                        value={viewMode}
+                        onChange={setViewMode}
+                        options={[
+                          { value: 'list', label: t('admin:channelViewList'), icon: LayoutList },
+                          { value: 'cards', label: t('admin:channelViewCards'), icon: LayoutGrid },
+                        ]}
+                      />
                     </div>
                   </div>
                 </div>
@@ -942,8 +989,9 @@ export function ChannelsPage() {
       )}
 
       <Pagination {...pager} total={channels.data?.total} />
+      </TabPanel>
 
-      <SelectionBar count={picked.size} onClear={() => setPicked(new Set())}>
+      <SelectionBar count={activeTab === 'list' ? picked.size : 0} onClear={() => setPicked(new Set())}>
         <Button size="sm" variant="outline" loading={batch.isPending} onClick={() => batch.mutate('enable')}>
           <Power className="h-3.5 w-3.5" />
           {t('common:enabled')}
@@ -973,11 +1021,11 @@ export function ChannelsPage() {
       </SelectionBar>
 
       {dialog}
-      {drawer !== null && (
+      {drawer !== null && editingChannel !== undefined && (
         <ChannelDrawer
-          key={drawer.mode === 'edit' ? `${drawer.channel.id}:${drawer.focus ?? 'default'}` : 'create'}
+          key={`${drawer.channel.id}:${drawer.focus ?? 'default'}`}
           channel={editingChannel}
-          focus={drawer.mode === 'edit' ? drawer.focus : undefined}
+          focus={drawer.focus}
           onClose={() => setDrawer(null)}
           onDone={invalidate}
         />

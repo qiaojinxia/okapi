@@ -5,7 +5,7 @@ import { Download, FileText, MessageSquareText, RotateCw } from 'lucide-react'
 import type { LogSearch } from '@/routes/admin.logs'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/page'
-import { Segmented } from '@/components/ui/segmented'
+import { Tabs } from '@/components/ui/tabs'
 import type { EntityKind, EntityOption } from '@/features/entity-search/EntitySearchInput'
 import { DEFAULT_PAGE_SIZE, PAGE_SIZES, usePagination } from '@/hooks/use-pagination'
 import { maskEmails } from '@/lib/mask'
@@ -71,18 +71,8 @@ export function AdminLogsPage() {
         description={t('admin:logsDesc')}
         compact
         className="[&_p]:text-xs [&_p]:leading-5"
-        action={<>
-          <Segmented
-            size="sm"
-            ariaLabel={t('admin:logsNav')}
-            value={view}
-            onChange={(v) => setView(v as 'logs' | 'conversations')}
-            options={[
-              { value: 'logs', label: t('admin:logsNav'), icon: FileText },
-              { value: 'conversations', label: t('admin:archiveTabLabel'), icon: MessageSquareText },
-            ]}
-          />
-          {view === 'logs' && (
+        action={
+          view === 'logs' ? (
             <>
               <Button size="sm" variant="outline" disabled={rows.length === 0 || logs.isFetching} title={t('logs:exportPageHint', { n: rows.length })} onClick={() => exportCsv(rows)}>
                 <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
@@ -94,8 +84,19 @@ export function AdminLogsPage() {
                 {!logs.isFetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
               </Button>
             </>
-          )}
-        </>}
+          ) : undefined
+        }
+      />
+      <Tabs
+        id="admin-logs-tabs"
+        variant="underline"
+        ariaLabel={t('admin:logsNav')}
+        active={view}
+        onChange={(v) => setView(v as 'logs' | 'conversations')}
+        items={[
+          { id: 'logs', label: t('admin:logsNav'), icon: FileText },
+          { id: 'conversations', label: t('admin:archiveTabLabel'), icon: MessageSquareText },
+        ]}
       />
       {view === 'conversations' ? (
         <AdminConversationsTab />

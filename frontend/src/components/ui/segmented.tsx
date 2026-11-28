@@ -18,6 +18,8 @@ interface SegmentedProps<T extends string | number> {
   size?: 'sm' | 'md' | 'field'
   /// 给屏幕阅读器的分组名。
   ariaLabel?: string
+  /// 可选槽位标识，便于布局定位与 E2E 测试。
+  dataSlot?: string
   className?: string
 }
 
@@ -32,6 +34,7 @@ export function Segmented<T extends string | number>({
   onChange,
   size = 'md',
   ariaLabel,
+  dataSlot,
   className,
 }: SegmentedProps<T>) {
   const container = useRef<HTMLDivElement>(null)
@@ -60,6 +63,7 @@ export function Segmented<T extends string | number>({
     <div ref={container}
       id={id}
       role="group"
+      data-slot={dataSlot}
       aria-label={ariaLabel}
       onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(value) }}
       className={cn(

@@ -9,6 +9,7 @@ import { PageBody, PageHeader } from '@/components/ui/page'
 import { UsageScope } from '@/components/usage-scope'
 import { Tabs, TabPanel } from '@/components/ui/tabs'
 import { Segmented } from '@/components/ui/segmented'
+import { Select } from '@/components/ui/select'
 import { useUsageScope } from '@/hooks/use-usage-scope'
 import { Stat } from '@/components/ui/stat'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
@@ -85,9 +86,15 @@ export function ProfilePage() {
               <UsageScope {...usageScope} ariaLabel={t('profile:scope')} onChange={usageScope.setScope} />
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <label htmlFor="profile-year">{t('profile:year')}</label>
-                <select id="profile-year" value={selectedYear} onChange={(e) => setYear(Number(e.target.value))} className="h-11 rounded-lg border border-border bg-card px-3 font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-                  {Array.from({ length: currentYear - firstYear + 1 }, (_, i) => currentYear - i).map((y) => <option key={y} value={y}>{y}</option>)}
-                </select>
+                <Select
+                  id="profile-year"
+                  value={String(selectedYear)}
+                  onChange={(v) => setYear(Number(v))}
+                  options={Array.from({ length: currentYear - firstYear + 1 }, (_, i) => {
+                    const y = currentYear - i
+                    return { value: String(y), label: String(y) }
+                  })}
+                />
               </div>
             </div>
           </div>

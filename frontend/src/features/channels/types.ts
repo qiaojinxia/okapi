@@ -107,8 +107,12 @@ export const CHANNEL_STATUS_FILTERS = ['enabled', 'disabled'] as const
 export type ChannelStatusFilter = (typeof CHANNEL_STATUS_FILTERS)[number]
 export const CHANNEL_STATUS_VALUE: Record<ChannelStatusFilter, string> = { enabled: '1', disabled: '2' }
 
-/// `/admin/channels` 的 search params：分页 + 关键词 + 协议过滤 + 状态筛选。
+export const CHANNEL_TABS = ['list', 'create'] as const
+export type ChannelTab = (typeof CHANNEL_TABS)[number]
+
+/// `/admin/channels` 的 search params：页签 + 分页 + 关键词 + 协议过滤 + 状态筛选。
 export interface ChannelsSearch {
+  tab?: ChannelTab
   page?: number
   limit?: number
   /// 关键词（名称 / 地址）。

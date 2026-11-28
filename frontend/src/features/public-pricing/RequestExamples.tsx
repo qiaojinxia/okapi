@@ -5,6 +5,7 @@ import type { PricingModel } from './types'
 import { buildRequestExample, defaultApiBase, requestTemplates, templatesFor } from './request-examples'
 import type { RequestTemplate } from './request-examples'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { CopyButton, useCopy } from '@/components/ui/copy-button'
 import { Input, Label, Textarea } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
@@ -44,7 +45,14 @@ export function RequestExamples({ model, group }: { model: PricingModel; group: 
     </div>
     <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="flex flex-col gap-2"><Label htmlFor="example-template">{t('catalog:apiTemplate')}</Label><Select id="example-template" value={template} onChange={(value) => setTemplate(value as RequestTemplate)} options={templates.map((item) => ({ value: item.id, label: item.name }))} /></div>
-      {supportsStream && <label className="flex min-h-9 cursor-pointer items-center gap-2 text-xs"><input type="checkbox" className="h-4 w-4 accent-primary" checked={stream} onChange={(e) => setStream(e.target.checked)} />{t('catalog:streamResponse')}</label>}
+      {supportsStream && (
+        <Checkbox
+          checked={stream}
+          label={t('catalog:streamResponse')}
+          className="min-h-9 [&_span.text-sm]:text-xs"
+          onChange={setStream}
+        />
+      )}
     </div>
     {example && <div className="flex min-w-0 items-start gap-2 rounded-lg border border-border bg-muted/30 p-3">
       <span className="pt-1 text-xs font-semibold text-primary">POST</span><code className="min-w-0 flex-1 break-all pt-1 text-xs leading-5">{example.url}</code><CopyButton value={example.url} label={t('catalog:copyEndpoint')} />

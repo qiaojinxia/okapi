@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import { nextStep } from './channel-steps'
+import { channelCreatePanel, nextStep } from './channel-steps'
 
 const providerMetadata = { data: [
   { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: false, refresh: false, subscription: null } },
@@ -72,7 +72,7 @@ for (const width of [390, 1366]) {
       await page.goto('/admin/channels')
       if (editing) await page.getByRole('row').filter({ hasText: 'subscription-spacing' }).getByRole('button', { name: '编辑', exact: true }).click()
       else await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-      const drawer = page.getByRole('dialog')
+      const drawer = editing ? page.getByRole('dialog') : channelCreatePanel(page)
       if (!editing) {
         await drawer.getByLabel('渠道名', { exact: true }).fill('subscription-spacing')
         await drawer.locator('#d-provider').selectOption('anthropic_max')
@@ -185,7 +185,7 @@ test('直接导入 Claude token 并选择模拟请求风格，通过通用建渠
   })
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await expect(drawer.locator(':focus')).toHaveCount(1)
   await drawer.getByLabel('渠道名', { exact: true }).fill('direct-claude')
   await drawer.locator('#d-provider').selectOption('anthropic_max')

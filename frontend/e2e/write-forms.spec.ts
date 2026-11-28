@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import { toModelsStep } from './channel-steps'
+import { channelCreatePanel, toModelsStep } from './channel-steps'
 
 // 写操作表单回归（接口桩，不碰数据库）：渠道抽屉的注入字段 / 出站代理 / 额外请求头、
 // 门户安全页的会话吊销卡、找回与重置密码页。断言的重点是提交给后端的请求体形状——
@@ -1879,11 +1879,11 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
 
   await drawer.getByRole('checkbox', { name: 'default（内置默认池）' }).uncheck()
   await drawer.getByRole('checkbox', { name: 'premium', exact: true }).uncheck()
-  await expect(drawer.getByText('未加入任何池：这条渠道对谁都不可达，直到把它加进至少一个池。')).toBeVisible()
+  await expect(drawer.getByText('未加入任何调度池：这条渠道对谁都不可达，直到把它加进至少一个池。')).toBeVisible()
   const poolsOrphaned = page.waitForRequest((r) => r.url().endsWith('/pools'))
   await drawer.getByRole('button', { name: '保存池成员关系' }).click()
   await poolsOrphaned
-  await expect(page.getByRole('status').filter({ hasText: '该渠道现在不在任何池里' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: '该渠道现在不在任何调度池里' })).toBeVisible()
   expect(calls[3]).toEqual({
     path: '/admin/channels/42/pools',
     method: 'POST',
@@ -1910,9 +1910,9 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await page.keyboard.press('Escape')
   await expect(drawer).toBeHidden()
 
-  // 新建是分步引导：三件必答事（名 / 凭证 / 模型）按步骤放行，池成员随建渠道一起提交，缺省进 default
+  // 新建是页内引导页签：三件必答事（名 / 凭证 / 模型）按步骤放行，池成员随建渠道一起提交，缺省进 default
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  const create = await openedDialog(page)
+  const create = channelCreatePanel(page)
   const next = create.getByRole('button', { name: '下一步', exact: true })
   const submit = create.getByRole('button', { name: '新建', exact: true })
   // API key 渠道只有两步；「新建」在最后一步才出现
@@ -1947,21 +1947,21 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
     if (new URL(route.request().url()).search !== '') return route.fallback()
     return route.fulfill({ json: { data: [], total: 0 } })
   })
-  await page.reload()
+  await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  const emptyPicker = await openedDialog(page)
+  const emptyPicker = channelCreatePanel(page)
   await toModelsStep(emptyPicker)
   await expect(emptyPicker.getByText('尚无模型，请先在定价页配置。')).toBeVisible()
-  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '返回列表', exact: true }).click()
 
   await page.route('**/admin/models', (route) => {
     if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()
     if (new URL(route.request().url()).search !== '') return route.fallback()
     return route.fulfill(apiError(500, 'internal_error'))
   })
-  await page.reload()
+  await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  const picker = await openedDialog(page)
+  const picker = channelCreatePanel(page)
   await toModelsStep(picker, { name: 'fail-ch', credential: 'sk-fail' })
   await expect(picker.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
 

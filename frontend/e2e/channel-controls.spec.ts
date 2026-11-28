@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import { gotoStep, nextStep, previousStep, toModelsStep } from './channel-steps'
+import { channelCreatePanel, gotoStep, nextStep, previousStep, toModelsStep } from './channel-steps'
 
 type Json = Record<string, unknown>
 const usage = { timezone: 'America/Los_Angeles', usage: {
@@ -56,7 +56,7 @@ async function prepare(page: Page, rows: Json[] = []) {
 async function newChannel(page: Page, provider = 'openai', expandLimits = true) {
   await prepare(page)
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await expect(drawer.locator(':focus')).toHaveCount(1)
   await drawer.locator('#d-name').fill('new-controlled-channel')
   await drawer.locator('#d-provider').selectOption(provider)
@@ -585,7 +585,7 @@ test('subscription controls use plugin metadata rather than provider name', asyn
     { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: true, refresh: false, subscription: { quota_scope: 'session', window_secs: 7200, quota_windows: [7200] } } },
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await toModelsStep(drawer)
   await drawer.locator('#channel-quota-limits > summary').click()
   await expect(drawer.getByLabel('2小时额度使用上限（%）', { exact: true })).toBeVisible()
@@ -603,7 +603,7 @@ test('a newly registered account plugin drives channel options, authorization an
     } },
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await drawer.locator('#d-provider').selectOption('third_subscription')
   await drawer.locator('#d-name').fill('third-account')
   await expect(drawer.locator('#channel-connection-options')).not.toHaveAttribute('open', '')
@@ -680,7 +680,7 @@ test('account catalog failure blocks creation and retry preserves the configurat
     ? { status: 500, json: { error: { code: 'internal_error' } } }
     : { json: providerMetadata }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await drawer.locator('#d-name').fill('preserved-draft')
   await drawer.locator('#d-cred').fill('mock-api-key')
   await page.clock.runFor(10_000)
@@ -706,7 +706,7 @@ test('a non-subscription quota hook does not expose subscription configuration',
     { id: 'openai', default_base: 'https://api.openai.com/v1', account: { quota: true, refresh: false, subscription: null } },
   ] } }))
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = channelCreatePanel(page)
   await expect(drawer.locator('#channel-quota-limits')).toHaveCount(1)
   await expect(drawer.locator('[data-slot="channel-upstream-limits"]')).toHaveCount(0)
   await expect(drawer.locator('#channel-authorization-options')).toHaveCount(0)

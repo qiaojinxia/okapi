@@ -9,10 +9,10 @@ import { FLOW_METRICS } from '@/features/analytics/route-state'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
+import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { flowIdentity, flowShortName } from './flow-labels'
-import { compactSelectClass } from './AnalysisControls'
 import { WorkspaceHeader } from './WorkspaceHeader'
 import { cleanSearch } from '@/features/analytics/search'
 import { cubeParams } from '@/lib/cube'
@@ -235,13 +235,14 @@ export function FlowView({ tabs, search }: { tabs?: React.ReactNode; search: Ana
 
         <label className="ml-auto inline-flex items-center gap-2 text-muted-foreground">
           <span className="whitespace-nowrap">{t('analysis:top')}</span>
-          <select
-            className={cn(compactSelectClass, 'min-w-16')}
-            value={search.limit ?? 6}
-            onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, limit: Number(e.target.value) }) })}
-          >
-            {[3, 6, 10, 20].map((n) => <option key={n}>{n}</option>)}
-          </select>
+          <Select
+            size="sm"
+            aria-label={t('analysis:top')}
+            className="min-w-16"
+            value={String(search.limit ?? 6)}
+            onChange={(v) => void navigate({ search: (prev) => cleanSearch({ ...prev, limit: Number(v) }) })}
+            options={[3, 6, 10, 20].map((n) => ({ value: String(n), label: String(n) }))}
+          />
         </label>
       </div>
 

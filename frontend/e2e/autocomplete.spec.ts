@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import { toModelsStep } from './channel-steps'
+import { channelCreatePanel, toModelsStep } from './channel-steps'
 
 const models = [
   { model_name: 'gpt-alpha', display_name: '通用助手', vendor: 'OpenAI', pricing_mode: 'ratio' },
@@ -270,7 +270,7 @@ for (const width of [390, 768, 1280]) {
     await prepare(page)
     await page.goto('/admin/channels')
     await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-    await toModelsStep(page.getByRole('dialog'))
+    await toModelsStep(channelCreatePanel(page))
     const search = page.getByRole('searchbox', { name: '从已配定价的模型中选择' })
     await search.fill('通用 openai')
     await page.getByRole('button', { name: '选择匹配项', exact: true }).click()
@@ -288,7 +288,7 @@ for (const width of [390, 768, 1280]) {
     await expect(page.getByRole('checkbox', { name: 'claude-beta', exact: true })).toHaveCount(0)
     await expect(page.getByRole('checkbox', { name: 'gpt-alpha', exact: true })).toBeChecked()
     await expect(page.getByRole('checkbox', { name: 'custom-provider/very-long-model-identifier-for-mobile-layout-check', exact: true })).toBeChecked()
-    expect(await page.getByRole('dialog').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+    expect(await channelCreatePanel(page).evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
     await search.fill('anthropic')
     await expect(page.getByText('没有匹配的结果', { exact: true })).toBeVisible()
     await search.fill('')
@@ -340,7 +340,7 @@ test('模型目录分页：渠道选择和手动输入建议能找到第215条�
   const { reads } = await preparePagedModels(page)
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  await toModelsStep(page.getByRole('dialog'))
+  await toModelsStep(channelCreatePanel(page))
   const search = page.getByRole('searchbox', { name: '从已配定价的模型中选择' })
   await search.fill('kimi moonshot')
   const choice = page.getByRole('checkbox', { name: 'kimi-k3', exact: true })
@@ -376,10 +376,10 @@ test('模型目录分页：保存新模型使完整选项缓存失效，无需�
   await preparePagedModels(page)
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  await toModelsStep(page.getByRole('dialog'))
+  await toModelsStep(channelCreatePanel(page))
   await page.getByRole('searchbox', { name: '从已配定价的模型中选择' }).fill('kimi')
   await expect(page.getByRole('checkbox', { name: 'kimi-k3', exact: true })).toBeVisible()
-  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '返回列表', exact: true }).click()
   await page.getByRole('link', { name: '模型定价', exact: true }).click()
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const drawer = page.getByRole('dialog')
@@ -390,7 +390,7 @@ test('模型目录分页：保存新模型使完整选项缓存失效，无需�
   await expect(drawer).toHaveCount(0)
   await page.getByRole('link', { name: '渠道', exact: true }).click()
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  await toModelsStep(page.getByRole('dialog'))
+  await toModelsStep(channelCreatePanel(page))
   await page.getByRole('searchbox', { name: '从已配定价的模型中选择' }).fill('new-vendor-model')
   await expect(page.getByRole('checkbox', { name: 'new-vendor-model', exact: true })).toBeVisible()
 })
@@ -400,7 +400,7 @@ test('模型目录分页：后续页失败不把前20条伪装成完整目录，
   control.failLaterPages = true
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-  await toModelsStep(page.getByRole('dialog'))
+  await toModelsStep(channelCreatePanel(page))
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   await expect(page.getByRole('checkbox', { name: 'catalog-model-000', exact: true })).toHaveCount(0)
   control.failLaterPages = false
@@ -415,7 +415,7 @@ for (const fault of ['repeatFirstPage', 'emptyLaterPages'] as const) {
     control[fault] = true
     await page.goto('/admin/channels')
     await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
-    await toModelsStep(page.getByRole('dialog'))
+    await toModelsStep(channelCreatePanel(page))
     await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
     expect(reads.length).toBeLessThanOrEqual(4)
     await expect(page.getByRole('checkbox', { name: 'catalog-model-000', exact: true })).toHaveCount(0)

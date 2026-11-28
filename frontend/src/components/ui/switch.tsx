@@ -10,6 +10,8 @@ interface SwitchProps {
   disabled?: boolean
   /// 只留给读屏的标签：表格行内的开关由列头说明，可见文字只会挤占列宽。
   hideLabel?: boolean
+  /// `card`：独立卡片化开关行（白底细边微阴影），统一表单与设置页中的开关条目外观。
+  variant?: 'plain' | 'card'
   className?: string
 }
 
@@ -22,12 +24,15 @@ export function Switch({
   description,
   disabled = false,
   hideLabel = false,
+  variant = 'plain',
   className,
 }: SwitchProps) {
   return (
     <label
       className={cn(
         'flex items-start justify-between gap-4',
+        variant === 'card' &&
+          'rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30',
         disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
         className,
       )}

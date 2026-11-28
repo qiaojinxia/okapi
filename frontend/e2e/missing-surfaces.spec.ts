@@ -487,7 +487,7 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
 
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  const create = await openedDialog(page)
+  const create = page.locator('[data-slot="channel-create-workspace"]')
   await create.locator('#d-provider').selectOption('anthropic_max')
   // 分步引导：没名字过不了第一步，没模型进不了登录授权；底部说明还差什么
   const next = create.getByRole('button', { name: '下一步', exact: true })
@@ -1235,9 +1235,10 @@ test('路由诊断按入口区分协议错误，Codex 配置显示限制', async
   await expect(drawer.getByText('1 个可用候选')).toBeVisible()
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  await drawer.locator('#d-provider').selectOption('codex')
-  await drawer.locator('#channel-connection-options > summary').click()
-  await expect(drawer.getByRole('note')).toContainText('/v1/responses')
+  const create = page.locator('[data-slot="channel-create-workspace"]')
+  await create.locator('#d-provider').selectOption('codex')
+  await create.locator('#channel-connection-options > summary').click()
+  await expect(create.getByRole('note')).toContainText('/v1/responses')
 })
 
 test('注册：关闭不摆表单；邀请制必填 aff；URL aff 不手填；验证码带 lang；OAuth 只跳 /auth/oauth/{code}', async ({
@@ -3501,13 +3502,15 @@ test('渠道列表搜索：q trim 与协议进 URL；空结果可清空', async 
     .locator('xpath=ancestor::div[contains(@class,"border-dashed")]')
     .getByRole('button', { name: '新建渠道' })
     .click()
-  await expect(page.getByRole('dialog').getByRole('heading', { name: '新建渠道' })).toBeVisible()
+  await expect(
+    page.locator('[data-slot="channel-create-workspace"]').getByRole('heading', { name: '新建渠道' }),
+  ).toBeVisible()
 
   await page.route('**/admin/channels?*', (route) => {
     if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()
     return route.fulfill(apiError(500, 'internal_error'))
   })
-  await page.reload()
+  await page.goto('/admin/channels')
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
 })

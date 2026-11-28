@@ -220,7 +220,7 @@ test('全站日志：纯 PG 模式下可切到「对话存档」页签查看对�
   const calls = await setup(page, { clickhouseEnabled: false })
   await page.goto('/admin/logs')
 
-  await page.getByRole('button', { name: '对话存档' }).click()
+  await page.getByRole('tab', { name: '对话存档' }).click()
   const tab = page.locator('[data-slot="admin-conversations-tab"]')
   await expect(tab).toBeVisible()
   await expect(tab).toContainText('PostgreSQL')

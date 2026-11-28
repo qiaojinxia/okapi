@@ -4,6 +4,7 @@ import type { AnalyticsSearch, StackDim } from '@/features/analytics/route-state
 import { STACK_DIMS } from '@/features/analytics/route-state'
 import { Card } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
+import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { TimeChart } from '@/components/ui/time-chart'
 import { WorkspaceHeader } from './WorkspaceHeader'
@@ -11,7 +12,7 @@ import { cleanSearch } from './search'
 import type { TrendResp } from '@/lib/cube'
 import { STACKABLE, TREND_METRICS, trendChart } from './trend-data'
 import type { TrendMetric } from './trend-data'
-import { compactSelectClass, dimensionLabel } from './AnalysisControls'
+import { dimensionLabel } from './AnalysisControls'
 import { describeError } from '@/lib/i18n'
 import { formatMoneyAggregate } from '@/lib/money'
 
@@ -105,16 +106,16 @@ export function TrendView({
         <Segmented ariaLabel={t('charts:metric')} options={TREND_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))} value={metric} onChange={pickMetric} size="sm" />
         <label className="inline-flex min-h-8 items-center gap-2 text-xs text-muted-foreground">
           <span className="whitespace-nowrap">{t(STACKABLE.includes(metric) ? 'analytics:stackBy' : 'analysis:compare')}</span>
-          <select
+          <Select
+            size="sm"
             aria-label={t(STACKABLE.includes(metric) ? 'analytics:stackBy' : 'analysis:compare')}
             value={search.stack ?? 'none'}
-            onChange={(e) => setStack(e.target.value as StackDim | 'none')}
-            className={compactSelectClass}
-          >
-            {(['none', ...STACK_DIMS] as const).map((value) => (
-              <option key={value} value={value}>{value === 'none' ? t('analytics:stackNone') : dimensionLabel(t, value)}</option>
-            ))}
-          </select>
+            onChange={(value) => setStack(value as StackDim | 'none')}
+            options={(['none', ...STACK_DIMS] as const).map((value) => ({
+              value,
+              label: value === 'none' ? t('analytics:stackNone') : dimensionLabel(t, value),
+            }))}
+          />
         </label>
       </div>
       <div className="px-4 py-4 sm:px-5">

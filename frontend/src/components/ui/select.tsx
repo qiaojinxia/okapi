@@ -15,6 +15,8 @@ interface SelectProps {
   options: SelectOption[]
   /// 置顶的空值项（如"全部"/"不改"），省得每个调用方自己拼一个 option。
   placeholder?: string
+  /// `md` 为标准表单高度（36px），`sm` 为图表/卡片工具栏紧凑高度（32px）。
+  size?: 'sm' | 'md'
   id?: string
   disabled?: boolean
   className?: string
@@ -30,6 +32,7 @@ export function Select({
   onChange,
   options,
   placeholder,
+  size = 'md',
   id,
   disabled = false,
   className,
@@ -43,7 +46,11 @@ export function Select({
         disabled={disabled}
         aria-label={rest['aria-label']}
         onChange={(e) => onChange(e.target.value)}
-        className={cn(inputClass, 'h-9 w-full appearance-none pr-8 pl-3')}
+        className={cn(
+          inputClass,
+          'w-full appearance-none',
+          size === 'sm' ? 'h-8 py-0 pr-7 pl-2.5 text-xs' : 'h-9 pr-8 pl-3',
+        )}
       >
         {placeholder !== undefined && <option value="">{placeholder}</option>}
         {options.map((o) => (
@@ -52,7 +59,12 @@ export function Select({
           </option>
         ))}
       </select>
-      <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/75" />
+      <ChevronDown
+        className={cn(
+          'pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground/75',
+          size === 'sm' ? 'right-2 h-3.5 w-3.5' : 'right-2.5 h-3.5 w-3.5',
+        )}
+      />
     </span>
   )
 }

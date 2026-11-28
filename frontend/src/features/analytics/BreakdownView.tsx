@@ -9,8 +9,10 @@ import type { LogSearch } from '@/routes/admin.logs'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { ActionGroup, IconButton } from '@/components/ui/icon-button'
+import { Segmented } from '@/components/ui/segmented'
+import { Select } from '@/components/ui/select'
 import { ProviderMark } from '@/features/channels/ProviderChip'
-import { ADVANCED_KEYS, compactSelectClass, dimensionLabel } from './AnalysisControls'
+import { ADVANCED_KEYS, dimensionLabel } from './AnalysisControls'
 import { WorkspaceHeader } from './WorkspaceHeader'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
@@ -267,30 +269,16 @@ export function BreakdownView({ tabs, search }: { tabs?: React.ReactNode; search
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/55 px-4 py-2.5 sm:px-5">
         <div className="flex flex-wrap items-center gap-1.5">
-          <div className="inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-border/80 bg-muted/55 p-0.5">
-            {PRIMARY_DIMS.map((d) => {
-              const active = by === d
-              const disabled = dimFiltered(d, search)
-              return (
-                <button
-                  key={d}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => setBy(d)}
-                  className={cn(
-                    'h-7 rounded-md px-2.5 text-xs transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-                    disabled
-                      ? 'cursor-not-allowed text-muted-foreground/45 line-through decoration-muted-foreground/30'
-                      : active
-                        ? 'bg-card font-medium text-foreground shadow-xs ring-1 ring-inset ring-border/55 dark:ring-white/[0.08]'
-                        : 'cursor-pointer text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  {dimLabel[d]}
-                </button>
-              )
-            })}
-          </div>
+          <Segmented<BreakdownDim>
+            size="sm"
+            value={by}
+            onChange={setBy}
+            options={PRIMARY_DIMS.map((d) => ({
+              value: d,
+              label: dimLabel[d],
+              disabled: dimFiltered(d, search),
+            }))}
+          />
           {/* 保留完整 12 维度的原生 select（与自动化及键盘导航兼容）：选主维度时收成「更多维度 ▾」避免文案重复 */}
           <div
             className={cn(
@@ -319,16 +307,14 @@ export function BreakdownView({ tabs, search }: { tabs?: React.ReactNode; search
 
         <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
           <span className="whitespace-nowrap">{t('admin:dashboardSortBy')}</span>
-          <select
+          <Select
+            size="sm"
             aria-label={t('admin:dashboardSortBy')}
-            className={cn(compactSelectClass, 'min-w-28')}
+            className="min-w-28"
             value={sortMetric}
-            onChange={(e) => setSortMetric(e.target.value as FlowMetric)}
-          >
-            {FLOW_METRICS.map((value) => (
-              <option key={value} value={value}>{t(`charts:metric_${value}`)}</option>
-            ))}
-          </select>
+            onChange={(value) => setSortMetric(value as FlowMetric)}
+            options={FLOW_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))}
+          />
         </label>
       </div>
 

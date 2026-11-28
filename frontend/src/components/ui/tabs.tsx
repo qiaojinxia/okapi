@@ -147,16 +147,24 @@ export function Tabs({
 }
 
 /// 表单分区首次访问才挂载，之后切签只隐藏，保留尚未保存的输入。
-export function TabPanel({ id, labelledBy, active, children }: {
+export function TabPanel({ id, labelledBy, active, className, children }: {
   id: string
   labelledBy: string
   active: boolean
+  className?: string
   children: React.ReactNode
 }) {
   const [visited, setVisited] = useState(active)
   useEffect(() => { if (active) setVisited(true) }, [active])
   return (
-    <div id={id} role="tabpanel" aria-labelledby={labelledBy} hidden={!active} tabIndex={0}>
+    <div
+      id={id}
+      role="tabpanel"
+      aria-labelledby={labelledBy}
+      hidden={!active}
+      tabIndex={0}
+      className={cn(!active && 'hidden', className)}
+    >
       {(active || visited) && children}
     </div>
   )

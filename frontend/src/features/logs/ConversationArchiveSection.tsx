@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Segmented } from '@/components/ui/segmented'
 import { DetailSection } from '@/features/logs/detail-ui'
 import {
   type ArchiveRecord,
@@ -125,36 +126,20 @@ export function ConversationViewer({ record }: { record: ArchiveRecord }) {
             </Badge>
           )}
         </div>
-        <div className="flex items-center gap-1.5">
-          <div className="inline-flex rounded-lg border border-border/80 bg-muted/40 p-0.5 text-xs">
-            <button
-              type="button"
-              onClick={() => setView('chat')}
-              className={cn(
-                'inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 font-medium transition-colors',
-                view === 'chat'
-                  ? 'bg-card text-foreground shadow-xs'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              <MessageSquareText className="h-3 w-3" />
-              {t('logs:conversationChatView')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setView('raw')}
-              className={cn(
-                'inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 font-medium transition-colors',
-                view === 'raw'
-                  ? 'bg-card text-foreground shadow-xs'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              <Code2 className="h-3 w-3" />
-              {t('logs:conversationRawView')}
-            </button>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <div className="max-w-full shrink-0">
+            <Segmented<'chat' | 'raw'>
+              size="sm"
+              ariaLabel={t('logs:conversationChatView')}
+              value={view}
+              onChange={setView}
+              options={[
+                { value: 'chat', label: t('logs:conversationChatView'), icon: MessageSquareText },
+                { value: 'raw', label: t('logs:conversationRawView'), icon: Code2 },
+              ]}
+            />
           </div>
-          <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={copyPayload}>
+          <Button size="sm" variant="outline" className="h-8 shrink-0 px-2.5 text-xs" onClick={copyPayload}>
             {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
             {copied ? t('common:copied') : t('common:copy')}
           </Button>

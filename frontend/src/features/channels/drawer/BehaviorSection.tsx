@@ -34,14 +34,14 @@ export function BehaviorSection({ f, channel }: {
       <OptionalSection id="channel-behavior-options" title={t('admin:groupBehavior')} hint={t('admin:groupBehaviorHint')} defaultOpen
         summary={t(behaviorCustom ? 'admin:channelOptionsCustomized' : 'admin:channelOptionsDefault')}>
         <Switch
-          className="rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30"
+          variant="card"
           label={t('admin:thinkingToContent')}
           description={t('admin:thinkingToContentHint')}
           checked={settings.thinking_to_content}
           onChange={(v) => setSettings((s) => ({ ...s, thinking_to_content: v }))}
         />
         <Switch
-          className="rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30"
+          variant="card"
           label={t('admin:billByResponseModel')}
           description={t('admin:billByResponseModelHint')}
           checked={settings.bill_by_response_model}
@@ -49,7 +49,7 @@ export function BehaviorSection({ f, channel }: {
         />
         {speaksOpenAi(channel.provider) && (
           <Switch
-            className="rounded-lg border border-border/75 bg-card px-3.5 py-3 shadow-xs transition-colors hover:border-muted-foreground/30"
+            variant="card"
             label={t('admin:responsesNative')}
             description={t('admin:responsesNativeHint')}
             checked={settings.responses_native ?? defaultResponsesNative(channel.provider)}

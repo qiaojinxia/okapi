@@ -556,7 +556,7 @@ test('model verification', async ({ page }) => {
 test('conversation archive', async ({ page }) => {
   await prepare(page)
   await page.goto('/admin/logs')
-  await page.getByRole('button', { name: '对话存档' }).click()
+  await page.getByRole('tab', { name: '对话存档' }).click()
   const tab = page.locator('[data-slot="admin-conversations-tab"]')
   await expect(tab).toBeVisible()
   await tab.getByText(ARCHIVE_TEXT.slice(0, 20)).first().click()
