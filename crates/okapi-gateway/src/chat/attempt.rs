@@ -438,6 +438,15 @@ pub(super) async fn exhausted_reply(
 /// 上游请求体构造失败（`UpstreamError::Build` 的原因）→ 400。协议转换表达不了的 content part
 /// 回显 part 类型，调用方才知道是哪块附件不被支持；其它构造失败不带 param。
 pub(super) fn build_rejection(reason: &str) -> AppError {
+    if let Some(rej) = okapi_providers::request_overrides::OverrideRejection::decode_build_reason(reason) {
+        let status = StatusCode::from_u16(rej.status).unwrap_or(StatusCode::BAD_REQUEST);
+        let code = match status {
+            StatusCode::FORBIDDEN => codes::PERMISSION_DENIED,
+            StatusCode::TOO_MANY_REQUESTS => codes::RATE_LIMITED,
+            _ => codes::BAD_REQUEST,
+        };
+        return AppError::new(status, code).with_param(rej.reason);
+    }
     if reason.starts_with(okapi_providers::convert::UNSUPPORTED_CONTENT_PREFIX) {
         AppError::bad_request().with_param(reason)
     } else {

@@ -132,6 +132,7 @@ fn test_billing(ingress: Ingress, model: &str) -> (RequestBilling, ProbeInfo) {
         codex_client: None,
         client_ip: None,
         client_headers: Arc::new(Vec::new()),
+        user_agent: None,
         pool_chain: vec!["default".to_owned()],
         pool_strategy: None,
         effective_policy: Arc::new(
@@ -192,6 +193,7 @@ fn candidate(provider: &str, upstream_model: Option<&str>) -> ChannelCandidate {
         bill_by_response_model: false,
         strip_request_fields: Vec::new(),
         inject_request_fields: serde_json::Map::new(),
+        request_overrides: serde_json::Value::Null,
         tool_loss_policy: None,
         responses_native: false,
         api_version: None,
@@ -238,7 +240,7 @@ async fn same_dialect_native_request_preserves_exact_caller_bytes() {
     )
     .expect("build succeeds");
     assert_eq!(built.as_ref(), raw.as_ref());
-    let outbound = shape_and_verify_outbound(&bill, &cand, built).expect("shape succeeds");
+    let (outbound, _) = shape_and_verify_outbound(&bill, &cand, built).expect("shape succeeds");
     assert_eq!(outbound.as_ref(), raw.as_ref());
 }
 
@@ -269,7 +271,7 @@ async fn two_hop_conversion_and_shaping_produce_expected_body_in_single_pass() {
         Some(&parsed),
     )
     .expect("two-hop build succeeds");
-    let outbound = shape_and_verify_outbound(&bill, &cand, built).expect("shape succeeds");
+    let (outbound, _) = shape_and_verify_outbound(&bill, &cand, built).expect("shape succeeds");
     let v: serde_json::Value = serde_json::from_slice(&outbound).expect("valid json");
     assert_eq!(v["model"], "claude-sonnet-5-5");
     assert_eq!(v["max_tokens"], 1024);
@@ -282,7 +284,7 @@ async fn two_hop_conversion_and_shaping_produce_expected_body_in_single_pass() {
     let (mut openai_bill, _) = test_billing(Ingress::OpenAi, "gpt-5");
     openai_bill.prefs.directive_present = true;
     openai_bill.unified_reasoning = UnifiedReasoning::Present;
-    let shaped = shape_and_verify_outbound(
+    let (shaped, _) = shape_and_verify_outbound(
         &openai_bill,
         &cand,
         Bytes::from_static(
@@ -473,4 +475,62 @@ async fn cross_dialect_fixes_preserve_effort_cache_and_record_field_loss() {
     )
     .expect("failover to native anthropic");
     assert!(cc_bill.trace.snapshot().get("dropped_fields").is_none());
+}
+
+#[tokio::test]
+async fn request_overrides_shape_body_headers_and_return_error() {
+    let (mut bill, _) = test_billing(Ingress::OpenAi, "gpt-5");
+    bill.user_agent = Some("CustomAgent/3.0".to_owned());
+
+    let mut cand = candidate("openai", None);
+    cand.request_overrides = serde_json::json!([
+        {
+            "name": "cap temp & add nested",
+            "enabled": true,
+            "conditions": [
+                {"field": "model", "matcher": "eq", "value": "gpt-5"},
+                {"field": "body:temperature", "matcher": "gt", "value": 0.5}
+            ],
+            "op": "set",
+            "path": "temperature",
+            "value": 0.5
+        },
+        {
+            "op": "set_header",
+            "path": "X-Custom-Route",
+            "value": "fast",
+            "conditions": [{"field": "user_agent", "matcher": "prefix", "value": "CustomAgent"}]
+        }
+    ]);
+    let raw = Bytes::from_static(br#"{"model":"gpt-5","messages":[],"temperature":1.2}"#);
+    let (shaped, headers) =
+        shape_and_verify_outbound(&bill, &cand, raw).expect("overrides should apply");
+    let v: serde_json::Value = serde_json::from_slice(&shaped).expect("valid json");
+    assert_eq!(v["temperature"], serde_json::json!(0.5));
+    assert_eq!(
+        headers.set,
+        vec![("X-Custom-Route".to_owned(), "fast".to_owned())]
+    );
+
+    // return_error 短路拒绝，经 build_rejection 映射为指定 HTTP 状态码与 param
+    cand.request_overrides = serde_json::json!([
+        {
+            "conditions": [{"field": "user_agent", "matcher": "contains", "value": "CustomAgent"}],
+            "op": "return_error",
+            "status": 403,
+            "value": "agent_blocked"
+        }
+    ]);
+    let err = shape_and_verify_outbound(
+        &bill,
+        &cand,
+        Bytes::from_static(br#"{"model":"gpt-5","messages":[]}"#),
+    )
+    .unwrap_err();
+    let UpstreamError::Build(reason) = err else {
+        panic!("expected UpstreamError::Build");
+    };
+    let app_err = super::super::attempt::build_rejection(&reason);
+    assert_eq!(app_err.status, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(app_err.param.as_deref(), Some("agent_blocked"));
 }

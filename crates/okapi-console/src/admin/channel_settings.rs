@@ -57,6 +57,10 @@ pub(super) fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), A
     {
         return Err(AppError::bad_request().with_param("inject_request_fields"));
     }
+    if let Some(v) = s.get("request_overrides") {
+        okapi_providers::request_overrides::validate_rules_value(v)
+            .map_err(|param| AppError::bad_request().with_param(param))?;
+    }
     // aws_region（bedrock SigV4 区域覆写）：`us-east-1` 这类小写字母 / 数字 / 连字符
     if let Some(v) = s.get("aws_region")
         && !v.as_str().is_some_and(|r| {

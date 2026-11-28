@@ -1,6 +1,8 @@
 import type { PoolMember } from '@/features/pools/types'
 import type { EgressBinding } from '@/features/proxies/types'
 import {
+  OVERRIDE_MATCHERS,
+  OVERRIDE_OPS,
   TOOL_LOSS_POLICIES,
   type AccountControl,
   type ChannelExtensions,
@@ -10,10 +12,16 @@ import {
   type CodexClientGate,
   type LocalPeriod,
   type LowBalanceRule,
+  type OverrideCondition,
+  type OverrideMatcher,
+  type OverrideOp,
+  type RequestOverrideRule,
   type ToolLossPolicy,
 } from '@/lib/contracts.gen'
 
 export {
+  OVERRIDE_MATCHERS,
+  OVERRIDE_OPS,
   TOOL_LOSS_POLICIES,
   type AccountControl,
   type ChannelExtensions,
@@ -23,6 +31,10 @@ export {
   type CodexClientGate,
   type LocalPeriod,
   type LowBalanceRule,
+  type OverrideCondition,
+  type OverrideMatcher,
+  type OverrideOp,
+  type RequestOverrideRule,
   type ToolLossPolicy,
 }
 
@@ -241,6 +253,9 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
     typeof raw.inject_request_fields === 'object' &&
     !Array.isArray(raw.inject_request_fields)
       ? { inject_request_fields: raw.inject_request_fields }
+      : {}),
+    ...(Array.isArray(raw?.request_overrides) && raw.request_overrides.length > 0
+      ? { request_overrides: raw.request_overrides }
       : {}),
   }
 }

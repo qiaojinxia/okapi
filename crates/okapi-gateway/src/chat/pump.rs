@@ -522,6 +522,7 @@ mod upstream_endpoint_tests {
             bill_by_response_model: false,
             strip_request_fields: Vec::new(),
             inject_request_fields: serde_json::Map::new(),
+            request_overrides: serde_json::Value::Null,
             responses_native: true,
             tool_loss_policy: None,
             api_version: None,

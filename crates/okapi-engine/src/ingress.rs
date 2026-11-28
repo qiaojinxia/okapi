@@ -31,6 +31,16 @@ impl Ingress {
         Self::ResponsesCompact,
     ];
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Responses => "responses",
+            Self::ResponsesCompact => "responses_compact",
+            Self::Gemini => "gemini",
+        }
+    }
+
     pub fn endpoint(self) -> &'static str {
         match self {
             Self::OpenAi => "/v1/chat/completions",

@@ -10,6 +10,99 @@ use std::fmt::Write as _;
 
 pub const TOOL_LOSS_POLICIES: &[&str] = &["safe", "strict", "allow"];
 
+pub const OVERRIDE_OPS: &[&str] = &[
+    "set",
+    "delete",
+    "move",
+    "copy",
+    "replace",
+    "regex_replace",
+    "set_header",
+    "delete_header",
+    "return_error",
+];
+
+pub const OVERRIDE_MATCHERS: &[&str] = &[
+    "eq",
+    "neq",
+    "prefix",
+    "suffix",
+    "contains",
+    "regex",
+    "exists",
+    "missing",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverrideOpDto {
+    Set,
+    Delete,
+    Move,
+    Copy,
+    Replace,
+    RegexReplace,
+    SetHeader,
+    DeleteHeader,
+    ReturnError,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverrideMatcherDto {
+    Eq,
+    Neq,
+    Prefix,
+    Suffix,
+    Contains,
+    Regex,
+    Exists,
+    Missing,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverrideConditionDto {
+    pub field: String,
+    pub matcher: OverrideMatcherDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestOverrideRuleDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<OverrideConditionDto>,
+    pub op: OverrideOpDto,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolLossPolicyDto {
@@ -132,6 +225,8 @@ pub struct ChannelSettingsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inject_request_fields: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_overrides: Option<Vec<RequestOverrideRuleDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<ChannelExtensionsDto>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -213,6 +308,24 @@ pub fn render_typescript() -> String {
     push_string_list(&mut out, TOOL_LOSS_POLICIES, "  ");
     out.push_str("] as const\n");
     out.push_str("export type ToolLossPolicy = (typeof TOOL_LOSS_POLICIES)[number]\n\n");
+
+    out.push_str("export const OVERRIDE_OPS = [\n");
+    push_string_list(&mut out, OVERRIDE_OPS, "  ");
+    out.push_str("] as const\n");
+    out.push_str("export type OverrideOp = (typeof OVERRIDE_OPS)[number]\n\n");
+
+    out.push_str("export const OVERRIDE_MATCHERS = [\n");
+    push_string_list(&mut out, OVERRIDE_MATCHERS, "  ");
+    out.push_str("] as const\n");
+    out.push_str("export type OverrideMatcher = (typeof OVERRIDE_MATCHERS)[number]\n\n");
+
+    out.push_str(
+        "export interface OverrideCondition {\n  field: string\n  matcher: OverrideMatcher\n  value?: unknown\n}\n\n",
+    );
+    out.push_str(
+        "export interface RequestOverrideRule {\n  name?: string\n  enabled: boolean\n  conditions?: OverrideCondition[]\n  op: OverrideOp\n  path?: string\n  from?: string\n  value?: unknown\n  pattern?: string\n  status?: number\n}\n\n",
+    );
+
     out.push_str("export type LocalPeriod = 'total' | 'day' | 'week' | 'month'\n\n");
 
     out.push_str(
@@ -231,10 +344,10 @@ pub fn render_typescript() -> String {
         "export interface ChannelExtensions {\n  client_profile?: ClientProfile\n  codex_client?: CodexClientGate\n}\n\n",
     );
     out.push_str(
-        "export interface ChannelSettings {\n  account_control?: AccountControl\n  thinking_to_content: boolean\n  bill_by_response_model: boolean\n  strip_request_fields: string[]\n  responses_native?: boolean\n  tool_loss_policy?: ToolLossPolicy\n  api_version?: string\n  aws_region?: string\n  oauth_token_url?: string\n  balance_refresh?: 'on' | 'off'\n  health_probe?: 'on' | 'off'\n  image_stream_usage?: 'cumulative' | 'per_image'\n  low_balance?: LowBalanceRule\n  extra_headers?: Record<string, string>\n  inject_request_fields?: Record<string, unknown>\n  extensions?: ChannelExtensions\n}\n\n",
+        "export interface ChannelSettings {\n  account_control?: AccountControl\n  thinking_to_content: boolean\n  bill_by_response_model: boolean\n  strip_request_fields: string[]\n  responses_native?: boolean\n  tool_loss_policy?: ToolLossPolicy\n  api_version?: string\n  aws_region?: string\n  oauth_token_url?: string\n  balance_refresh?: 'on' | 'off'\n  health_probe?: 'on' | 'off'\n  image_stream_usage?: 'cumulative' | 'per_image'\n  low_balance?: LowBalanceRule\n  extra_headers?: Record<string, string>\n  inject_request_fields?: Record<string, unknown>\n  request_overrides?: RequestOverrideRule[]\n  extensions?: ChannelExtensions\n}\n\n",
     );
     out.push_str(
-        "export interface ChannelSettingsPatch {\n  account_control?: Partial<{ [K in keyof AccountControl]: AccountControl[K] | null }> | null\n  thinking_to_content?: boolean | null\n  bill_by_response_model?: boolean | null\n  strip_request_fields?: string[] | null\n  responses_native?: boolean | null\n  tool_loss_policy?: ToolLossPolicy | null\n  api_version?: string | null\n  aws_region?: string | null\n  oauth_token_url?: string | null\n  balance_refresh?: 'on' | 'off' | null\n  health_probe?: 'on' | 'off' | null\n  image_stream_usage?: 'cumulative' | 'per_image' | null\n  low_balance?: LowBalanceRule | null\n  extra_headers?: Record<string, string> | null\n  inject_request_fields?: Record<string, unknown> | null\n  extensions?: {\n    client_profile?: ClientProfile | null\n    codex_client?: CodexClientGate | null\n  } | null\n}\n",
+        "export interface ChannelSettingsPatch {\n  account_control?: Partial<{ [K in keyof AccountControl]: AccountControl[K] | null }> | null\n  thinking_to_content?: boolean | null\n  bill_by_response_model?: boolean | null\n  strip_request_fields?: string[] | null\n  responses_native?: boolean | null\n  tool_loss_policy?: ToolLossPolicy | null\n  api_version?: string | null\n  aws_region?: string | null\n  oauth_token_url?: string | null\n  balance_refresh?: 'on' | 'off' | null\n  health_probe?: 'on' | 'off' | null\n  image_stream_usage?: 'cumulative' | 'per_image' | null\n  low_balance?: LowBalanceRule | null\n  extra_headers?: Record<string, string> | null\n  inject_request_fields?: Record<string, unknown> | null\n  request_overrides?: RequestOverrideRule[] | null\n  extensions?: {\n    client_profile?: ClientProfile | null\n    codex_client?: CodexClientGate | null\n  } | null\n}\n",
     );
 
     out

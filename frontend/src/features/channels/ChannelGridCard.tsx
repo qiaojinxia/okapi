@@ -3,6 +3,7 @@ import {
   Copy,
   Ellipsis,
   ExternalLink,
+  FilePlus2,
   Gauge,
   Globe,
   KeyRound,
@@ -77,6 +78,7 @@ export interface ChannelGridCardProps {
   onTry: () => void
   onVerify: () => void
   onDuplicate: () => void
+  onUseAsTemplate: () => void
   onDelete: () => void
 }
 
@@ -105,6 +107,7 @@ export function ChannelGridCard({
   onTry,
   onVerify,
   onDuplicate,
+  onUseAsTemplate,
   onDelete,
 }: ChannelGridCardProps) {
   const { t } = useTranslation()
@@ -276,6 +279,9 @@ export function ChannelGridCard({
                 </MenuItem>
                 <MenuItem icon={Copy} onSelect={onDuplicate}>
                   {t('admin:duplicate')}
+                </MenuItem>
+                <MenuItem icon={FilePlus2} onSelect={onUseAsTemplate}>
+                  {t('admin:channelUseAsTemplate')}
                 </MenuItem>
                 <MenuSeparator />
                 <MenuItem icon={Trash2} destructive onSelect={onDelete}>

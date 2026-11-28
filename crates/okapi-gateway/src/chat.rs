@@ -196,6 +196,8 @@ struct RequestBilling {
     client_ip: Option<String>,
     /// 客户端身份头（只在订阅 provider 的出向上透传，§11.38）。
     client_headers: Arc<Vec<(String, String)>>,
+    /// 客户端原始 User-Agent（供渠道级 `request_overrides` 条件匹配）。
+    user_agent: Option<String>,
     /// 渠道可见性组（用户全部组并集，§6.3）。
     /// 有序池链（主池 → 降级池）：候选查询与缓存键都吃它。
     pool_chain: Vec<String>,

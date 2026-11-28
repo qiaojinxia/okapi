@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/switch'
 import { TagInput } from '@/components/ui/tag-input'
 import type { ChannelForm } from './use-channel-form'
 import { ExtraHeadersEditor, InjectFieldsEditor } from './request-editors'
+import { RequestOverridesEditor } from './RequestOverridesEditor'
 
 /// 「请求与计费行为」（只在编辑时有）：客户端模拟、思考内容、按响应模型计费、请求改写。
 export function BehaviorSection({ f, channel }: {
@@ -23,6 +24,7 @@ export function BehaviorSection({ f, channel }: {
     || settings.responses_native !== undefined && settings.responses_native !== defaultResponsesNative(form.provider)
     || settings.strip_request_fields.length > 0 || Object.keys(settings.inject_request_fields ?? {}).length > 0
     || Object.keys(settings.extra_headers ?? {}).length > 0
+    || (settings.request_overrides?.length ?? 0) > 0
   return (
     <>
       {(channel.provider === 'anthropic' || channel.provider === 'anthropic_max') && (
@@ -91,6 +93,14 @@ export function BehaviorSection({ f, channel }: {
           onChange={(extra_headers) =>
             setSettings(({ extra_headers: _drop, ...s }) =>
               Object.keys(extra_headers).length === 0 ? s : { ...s, extra_headers },
+            )
+          }
+        />
+        <RequestOverridesEditor
+          value={settings.request_overrides ?? []}
+          onChange={(request_overrides) =>
+            setSettings(({ request_overrides: _drop, ...s }) =>
+              request_overrides.length === 0 ? s : { ...s, request_overrides },
             )
           }
         />

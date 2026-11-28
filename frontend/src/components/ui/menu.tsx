@@ -63,7 +63,9 @@ export function Menu({ trigger, align = 'end', strategy = 'absolute', className,
     if (!open || strategy !== 'fixed') return
     const anchor = root.current?.getBoundingClientRect()
     if (!anchor) return
-    const height = panel.current?.getBoundingClientRect().height ?? 0
+    // 用 offsetHeight 而非 getBoundingClientRect().height：弹层带 animate-zoom-in（scale 0.95），
+    // 首帧测量缩放后高度会低估真实高度，动画结束放大回 1.0 时可能把顶部推到视口外。
+    const height = panel.current?.offsetHeight ?? 0
     const gap = 6
     const margin = 8
     const spaceBelow = window.innerHeight - anchor.bottom - gap - margin

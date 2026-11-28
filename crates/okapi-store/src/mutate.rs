@@ -128,6 +128,151 @@ pub async fn batch_clear_channel_cooldown(
     Ok((affected, keys))
 }
 
+/// 批量给渠道追加模型（保序去重，单事务 UNNEST 回写）。返回命中的未删渠道数。
+pub async fn batch_add_channel_models(
+    pool: &PgPool,
+    ids: &[i64],
+    models: &[String],
+) -> Result<u64, StoreError> {
+    if ids.is_empty() || models.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, models FROM channels WHERE id = ANY($1) AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.is_empty() {
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let mut update_ids = Vec::with_capacity(rows.len());
+    let mut update_models = Vec::with_capacity(rows.len());
+    for (cid, raw) in &rows {
+        let mut current: Vec<String> = raw
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for model in models {
+            if !current.iter().any(|existing| existing == model) {
+                current.push(model.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            update_ids.push(*cid);
+            update_models.push(serde_json::json!(current));
+        }
+    }
+    if !update_ids.is_empty() {
+        sqlx::query(
+            "UPDATE channels AS c
+             SET models = u.models, updated_at = now()
+             FROM UNNEST($1::bigint[], $2::jsonb[]) AS u(id, models)
+             WHERE c.id = u.id",
+        )
+        .bind(&update_ids)
+        .bind(&update_models)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(rows.len() as u64)
+}
+
+/// 批量从渠道移除指定模型（单事务 UNNEST 回写）。返回命中的未删渠道数。
+pub async fn batch_remove_channel_models(
+    pool: &PgPool,
+    ids: &[i64],
+    models: &[String],
+) -> Result<u64, StoreError> {
+    if ids.is_empty() || models.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, models FROM channels WHERE id = ANY($1) AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.is_empty() {
+        tx.rollback().await?;
+        return Ok(0);
+    }
+    let mut update_ids = Vec::with_capacity(rows.len());
+    let mut update_models = Vec::with_capacity(rows.len());
+    for (cid, raw) in &rows {
+        let current: Vec<String> = raw
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let next: Vec<String> = current
+            .iter()
+            .filter(|existing| !models.iter().any(|target| target == *existing))
+            .cloned()
+            .collect();
+        if next.len() != current.len() {
+            update_ids.push(*cid);
+            update_models.push(serde_json::json!(next));
+        }
+    }
+    if !update_ids.is_empty() {
+        sqlx::query(
+            "UPDATE channels AS c
+             SET models = u.models, updated_at = now()
+             FROM UNNEST($1::bigint[], $2::jsonb[]) AS u(id, models)
+             WHERE c.id = u.id",
+        )
+        .bind(&update_ids)
+        .bind(&update_models)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(rows.len() as u64)
+}
+
+/// 批量设置渠道调度优先级与相对成本系数（千分比）；为 None 的字段保留原值。
+pub async fn batch_set_channel_schedule(
+    pool: &PgPool,
+    ids: &[i64],
+    priority: Option<i32>,
+    cost_milli: Option<i64>,
+) -> Result<u64, StoreError> {
+    if ids.is_empty() || (priority.is_none() && cost_milli.is_none()) {
+        return Ok(0);
+    }
+    Ok(sqlx::query(
+        r"UPDATE channels
+          SET priority = COALESCE($2, priority),
+              upstream_unit_cost = CASE
+                  WHEN $3::bigint IS NULL THEN upstream_unit_cost
+                  ELSE COALESCE(upstream_unit_cost, '{}'::jsonb)
+                       || jsonb_build_object('relative_cost_milli', $3::bigint)
+              END,
+              updated_at = now()
+          WHERE id = ANY($1) AND deleted_at IS NULL",
+    )
+    .bind(ids)
+    .bind(priority)
+    .bind(cost_milli)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 /// 复制渠道（对齐 new-api "复制渠道"）：连同 key 与可见组克隆。
 /// 新渠道**默认停用**——避免半配置的复制体立刻进调度。返回新 id；None = 源不存在。
 pub async fn duplicate_channel(

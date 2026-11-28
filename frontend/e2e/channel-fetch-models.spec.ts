@@ -232,3 +232,116 @@ test('新建渠道以页内页签呈现：支持快捷协议卡片、切换列�
   await expect(panel.getByRole('navigation', { name: '新建渠道的步骤' })).toBeVisible()
   await expect(panel.locator('#d-name')).toHaveValue('tab-draft-anthropic')
 })
+
+test('批量配置（增删模型 / 调度参数 / 调度池 / 解冷）、作为模板新建与条件改写规则端到端提交', async ({ page }) => {
+  const calls = await prepare(page)
+  const sampleChannel = {
+    id: 42,
+    name: 'openai-prod',
+    provider: 'anthropic',
+    api_base: 'https://api.anthropic.com/v1',
+    status: 1,
+    priority: 10,
+    models: ['claude-sonnet-4'],
+    keys: [{ id: 9, status: 1, failed_count: 0, cooldown_until: null, last_error: null, weight: 10, max_concurrency: null, credential_kind: 0 }],
+    settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
+    pools: ['default'],
+    pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
+    cost_milli: 800,
+    egress: { mode: 'inherit' },
+    last_test: null,
+    last_balance: null,
+  }
+  await page.route('**/admin/channels?*', (route) =>
+    route.fulfill({ json: { data: [sampleChannel], total: 1, enabled: 1 } }),
+  )
+  await page.route('**/admin/channels/batch', async (route) => {
+    calls.push({ path: '/admin/channels/batch', method: 'POST', body: route.request().postDataJSON() as Json })
+    await route.fulfill({ json: { affected: 1 } })
+  })
+  await page.route('**/admin/channels/42', async (route) => {
+    if (route.request().method() !== 'PATCH') return route.fallback()
+    calls.push({ path: '/admin/channels/42', method: 'PATCH', body: route.request().postDataJSON() as Json })
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/channels')
+  await page.getByRole('checkbox', { name: '勾选 openai-prod' }).check()
+
+  // 1. 批量配置：追加模型 + 批量改优先级/成本 + 清除冷却
+  await page.getByRole('button', { name: '批量配置', exact: true }).click()
+  const batchDrawer = page.getByRole('dialog')
+  await batchDrawer.locator('#batch-models-manual').fill('gpt-5-mini')
+  await batchDrawer.locator('#batch-models-manual').press('Enter')
+  await batchDrawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(batchDrawer).toBeHidden()
+  await expect.poll(() => calls.find((c) => c.path === '/admin/channels/batch')?.body).toEqual({
+    ids: [42],
+    action: 'add_models',
+    models: ['gpt-5-mini'],
+  })
+
+  await page.getByRole('checkbox', { name: '勾选 openai-prod' }).check()
+  await page.getByRole('button', { name: '批量配置', exact: true }).click()
+  const schedDrawer = page.getByRole('dialog')
+  await schedDrawer.getByRole('tab', { name: '优先级与成本', exact: true }).click()
+  await schedDrawer.locator('#batch-priority').fill('25')
+  await schedDrawer.locator('#batch-cost').fill('0.75')
+  await schedDrawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(schedDrawer).toBeHidden()
+  await expect.poll(() => calls.filter((c) => c.path === '/admin/channels/batch').at(-1)?.body).toEqual({
+    ids: [42],
+    action: 'set_schedule',
+    priority: 25,
+    cost_milli: 750,
+  })
+
+  await page.getByRole('checkbox', { name: '勾选 openai-prod' }).check()
+  await page.getByRole('button', { name: '清除冷却', exact: true }).click()
+  await expect.poll(() => calls.filter((c) => c.path === '/admin/channels/batch').at(-1)?.body).toEqual({
+    ids: [42],
+    action: 'clear_cooldown',
+  })
+  await expect(page.getByRole('checkbox', { name: '勾选 openai-prod' })).not.toBeChecked()
+
+  // 2. 编辑渠道 -> 请求与计费行为 -> 条件改写规则（预设 + 保存）
+  await page.getByRole('row').filter({ hasText: 'openai-prod' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const editDrawer = page.getByRole('dialog')
+  await editDrawer.getByRole('tab', { name: '请求与计费行为', exact: true }).click()
+  await editDrawer.getByRole('button', { name: '+ 按模型控温', exact: true }).click()
+  await editDrawer.getByRole('button', { name: '+ 按 UA 拦截', exact: true }).click()
+  await expect(editDrawer.locator('[data-slot="override-rule-card"]')).toHaveCount(2)
+  await editDrawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => calls.find((c) => c.path === '/admin/channels/42' && c.method === 'PATCH')?.body).toMatchObject({
+    settings: {
+      request_overrides: [
+        {
+          op: 'set',
+          path: 'temperature',
+          value: 0.7,
+          conditions: [
+            { field: 'model', matcher: 'prefix', value: 'gpt-5' },
+            { field: 'body:temperature', matcher: 'gt', value: 0.7 },
+          ],
+        },
+        {
+          op: 'return_error',
+          status: 403,
+          value: 'client_blocked',
+          conditions: [{ field: 'user_agent', matcher: 'contains', value: 'LegacyBot' }],
+        },
+      ],
+    },
+  })
+  await page.keyboard.press('Escape')
+
+  // 3. 作为模板新建 -> 切至新建页签并带出协议、地址、模型与模板横幅
+  await page.getByRole('row').filter({ hasText: 'openai-prod' }).getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '作为模板新建', exact: true }).click()
+  await expect(page).toHaveURL(/tab=create/)
+  const createPanel = channelCreatePanel(page)
+  await expect(createPanel.locator('[data-slot="channel-template-banner"]')).toContainText('openai-prod')
+  await expect(createPanel.locator('#d-provider')).toHaveValue('anthropic')
+  await expect(createPanel.locator('#d-name')).toHaveValue('')
+  await expect(createPanel.locator('[data-slot="guided-summary"]')).toContainText('1 个模型')
+})

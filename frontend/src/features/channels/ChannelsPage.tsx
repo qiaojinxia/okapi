@@ -5,6 +5,7 @@ import {
   Copy,
   Ellipsis,
   ExternalLink,
+  FilePlus2,
   Gauge,
   Globe,
   KeyRound,
@@ -17,8 +18,10 @@ import {
   Plus,
   Power,
   PowerOff,
+  RotateCcw,
   Server,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Wallet,
 } from 'lucide-react'
@@ -30,6 +33,7 @@ import type { ChannelBalance, ChannelRow, ChannelTab } from '@/features/channels
 import { Button } from '@/components/ui/button'
 import { ActionGroup, ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
+import { BatchChannelsDrawer } from '@/features/channels/BatchChannelsDrawer'
 import { ChannelCreateWorkspace } from '@/features/channels/ChannelCreateWorkspace'
 import { ChannelDrawer, type ChannelEditFocus } from '@/features/channels/ChannelDrawer'
 import { ChannelGridCard } from '@/features/channels/ChannelGridCard'
@@ -140,6 +144,7 @@ export function ChannelsPage() {
     })
   }
   const [createSession, setCreateSession] = useState(0)
+  const [createTemplate, setCreateTemplate] = useState<ChannelRow | undefined>(undefined)
   const query = search.q ?? ''
   const providerFilter = search.provider ?? ''
   const statusFilter = search.status ?? ''
@@ -151,6 +156,7 @@ export function ChannelsPage() {
   const [trying, setTrying] = useState<ChannelRow | null>(null)
   const [verifying, setVerifying] = useState<ChannelRow | null>(null)
   const [batchEgress, setBatchEgress] = useState(false)
+  const [batchEdit, setBatchEdit] = useState(false)
   const proxies = useQuery(proxyOptions())
   const proxyGroups = useQuery(proxyGroupOptions())
   const [testingId, setTestingId] = useState<number | null>(null)
@@ -323,7 +329,7 @@ export function ChannelsPage() {
   })
 
   const batch = useMutation({
-    mutationFn: (action: 'enable' | 'disable' | 'delete') =>
+    mutationFn: (action: 'enable' | 'disable' | 'delete' | 'clear_cooldown') =>
       apiFetch<{ affected: number }>('/admin/channels/batch', {
         method: 'POST',
         body: { ids: [...picked], action },
@@ -360,9 +366,15 @@ export function ChannelsPage() {
   const applySearch = () => setFilters({ q: draft })
   const clearFilters = () => setFilters({ q: '', provider: '', status: '' })
   const openCreate = () => setActiveTab('create')
+  const openCreateFromTemplate = (channel: ChannelRow) => {
+    setCreateTemplate(channel)
+    setCreateSession((n) => n + 1)
+    setActiveTab('create')
+  }
   const openEdit = (channel: ChannelRow, focus?: ChannelEditFocus) => setDrawer({ channel, focus })
   const handleCreated = () => {
     invalidate()
+    setCreateTemplate(undefined)
     setCreateSession((n) => n + 1)
     setActiveTab('list')
   }
@@ -455,9 +467,17 @@ export function ChannelsPage() {
       >
         <ChannelCreateWorkspace
           key={createSession}
+          template={createTemplate}
+          onClearTemplate={() => {
+            setCreateTemplate(undefined)
+            setCreateSession((n) => n + 1)
+          }}
           onCancel={() => setActiveTab('list')}
           onCreated={handleCreated}
-          onReset={() => setCreateSession((n) => n + 1)}
+          onReset={() => {
+            setCreateTemplate(undefined)
+            setCreateSession((n) => n + 1)
+          }}
         />
       </TabPanel>
 
@@ -646,6 +666,7 @@ export function ChannelsPage() {
                             onTry={() => setTrying(c)}
                             onVerify={() => setVerifying(c)}
                             onDuplicate={() => duplicate.mutate(c)}
+                            onUseAsTemplate={() => openCreateFromTemplate(c)}
                             onDelete={() =>
                               confirm({
                                 title: t('common:confirmDeleteTitle', { name: shownName(c) }),
@@ -863,6 +884,9 @@ export function ChannelsPage() {
                                       <MenuItem icon={Copy} onSelect={() => duplicate.mutate(c)}>
                                         {t('admin:duplicate')}
                                       </MenuItem>
+                                      <MenuItem icon={FilePlus2} onSelect={() => openCreateFromTemplate(c)}>
+                                        {t('admin:channelUseAsTemplate')}
+                                      </MenuItem>
                                       <MenuSeparator />
                                       <MenuItem
                                         icon={Trash2}
@@ -1000,9 +1024,17 @@ export function ChannelsPage() {
           <PowerOff className="h-3.5 w-3.5" />
           {t('common:disabled')}
         </Button>
+        <Button size="sm" variant="outline" onClick={() => setBatchEdit(true)}>
+          <SlidersHorizontal className="h-3.5 w-3.5" />
+          {t('admin:channelBatchEdit')}
+        </Button>
         <Button size="sm" variant="outline" onClick={() => setBatchEgress(true)}>
           <Globe className="h-3.5 w-3.5" />
           {t('admin:egressBatchAction')}
+        </Button>
+        <Button size="sm" variant="outline" loading={batch.isPending} onClick={() => batch.mutate('clear_cooldown')}>
+          <RotateCcw className="h-3.5 w-3.5" />
+          {t('admin:channelBatchClearCooldown')}
         </Button>
         <Button
           size="sm"
@@ -1033,6 +1065,16 @@ export function ChannelsPage() {
       {trying !== null && <ChannelTryDrawer channel={trying} onClose={() => setTrying(null)} />}
       {verifying !== null && <ChannelVerifyDrawer channel={verifying} onClose={() => setVerifying(null)} />}
       {diagnosing && <RouteDiagnosisDrawer onClose={() => setDiagnosing(false)} />}
+      {batchEdit && (
+        <BatchChannelsDrawer
+          ids={[...picked]}
+          onClose={() => setBatchEdit(false)}
+          onDone={() => {
+            setPicked(new Set())
+            invalidate()
+          }}
+        />
+      )}
       {batchEgress && (
         <BatchEgressDrawer
           ids={[...picked]}

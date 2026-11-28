@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ChannelRow, ChannelSettings } from '@/features/channels/types'
-import { toBinding } from '@/features/proxies/EgressPicker'
+import { draftOf, toBinding } from '@/features/proxies/EgressPicker'
 import type { EgressDraft } from '@/features/proxies/EgressPicker'
 import { parseLimit } from '../account-controls/policy'
 import { useAccountCapabilities } from '../account-controls/api'
@@ -11,22 +11,24 @@ import { parseInt32 } from '@/lib/int32'
 import { usePermission } from '@/hooks/use-auth'
 
 /// 渠道抽屉的表单状态与由它算出的校验结果：新建与编辑共用一份，四个分区组件各取所需。
-export function useChannelForm(channel: ChannelRow | undefined) {
+/// 新建态可选传入 `template`（从已有渠道作为模板预填协议/地址/模型/调度/设置/池/出口，名称与凭证保持空白）。
+export function useChannelForm(channel: ChannelRow | undefined, template?: ChannelRow) {
   const isEdit = channel !== undefined
+  const seed = channel ?? template
   // 入池只有全站范围的 channel.write 能做（后端 pools_require_all_scope）；own 范围建出来是孤儿，等管理员审过再入池
   const canManagePools = usePermission()('channel.write')
   const [form, setForm] = useState({
     name: channel?.name ?? '',
-    provider: channel?.provider ?? 'openai',
-    api_base: channel?.api_base ?? '',
-    priority: String(channel?.priority ?? 0),
-    cost: costMilliToRatio(channel?.cost_milli ?? 1000),
+    provider: seed?.provider ?? 'openai',
+    api_base: seed?.api_base ?? '',
+    priority: String(seed?.priority ?? 0),
+    cost: costMilliToRatio(seed?.cost_milli ?? 1000),
   })
   const account = useAccountCapabilities(form.provider)
   const authorization = account.capabilities?.authorization
   const accountReady = account.isSuccess
   const costMilli = ratioToCostMilli(form.cost)
-  const [models, setModels] = useState<string[]>(channel?.models ?? [])
+  const [models, setModels] = useState<string[]>(seed?.models ?? [])
   const [credential, setCredential] = useState('')
   const [oauthInput, setOauthInput] = useState<'login' | 'import'>(
     channel?.keys.some((key) => key.oauth_refreshable === false)
@@ -35,7 +37,7 @@ export function useChannelForm(channel: ChannelRow | undefined) {
   const [rotationKeyId, setRotationKeyId] = useState<number | undefined>(
     channel?.keys.length === 1 ? channel.keys[0]?.id : undefined,
   )
-  const [settings, setSettings] = useState<ChannelSettings>(readSettings(channel?.settings ?? null))
+  const [settings, setSettings] = useState<ChannelSettings>(readSettings(seed?.settings ?? null))
   const [controlValid, setControlValid] = useState(true)
   const [newConcurrency, setNewConcurrency] = useState('')
   const concurrency = parseLimit(newConcurrency)
@@ -44,9 +46,13 @@ export function useChannelForm(channel: ChannelRow | undefined) {
   const priority = parseInt32(form.priority)
   // 新建时的池成员关系：缺省只进 default 池（建完即对 default 分组可用）；
   // 渠道只服务它所在的池，全站分组都配了专属池的站点在这里勾对应的池
-  const [newPools, setNewPools] = useState<PoolMember[]>(defaultMembership)
+  const [newPools, setNewPools] = useState<PoolMember[]>(() =>
+    template?.pool_members && template.pool_members.length > 0
+      ? template.pool_members.map((m) => ({ ...m }))
+      : defaultMembership(),
+  )
   // 新建时的出口（§11.41）：缺省继承全局默认；OAuth 登录在换码前就按它选代理
-  const [newEgress, setNewEgress] = useState<EgressDraft>({ mode: 'inherit' })
+  const [newEgress, setNewEgress] = useState<EgressDraft>(() => draftOf(template?.egress))
   const egressBinding = toBinding(newEgress)
 
   // Login uses exchange; imported Claude tokens use the ordinary channel create endpoint.

@@ -15,7 +15,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { toast } from '@/components/ui/toast'
 import { OAuthLoginSteps, useOAuthLogin } from '@/features/channels/OAuthLoginCard'
 import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
-import { channelSettingsForSave } from '@/features/channels/types'
+import { channelSettingsForSave, type ChannelRow } from '@/features/channels/types'
 import { configuredModelsOptions } from '@/features/models/configured-models'
 import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -35,17 +35,21 @@ const NOOP_ROTATE = { isPending: false, mutate: () => {} }
 /// 「完整表单」模式同屏填写（共享同一份表单状态，切换不丢草稿）；右侧常驻配置摘要与
 /// 就绪检查清单，点击任意清单项即可跳转到对应步骤。
 export function ChannelCreateWorkspace({
+  template,
+  onClearTemplate,
   onCancel,
   onCreated,
   onReset,
 }: {
+  template?: ChannelRow
+  onClearTemplate?: () => void
   onCancel: () => void
   onCreated: () => void
   onReset: () => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const f = useChannelForm(undefined)
+  const f = useChannelForm(undefined, template)
   const {
     canManagePools,
     form,
@@ -448,6 +452,20 @@ export function ChannelCreateWorkspace({
       }
     >
       <div ref={bodyRef} className="flex min-w-0 flex-col gap-4">
+        {template !== undefined && (
+          <div
+            role="status"
+            data-slot="channel-template-banner"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/25 bg-primary/[0.06] px-4 py-2.5 text-xs text-foreground"
+          >
+            <span>{t('admin:channelTemplateBanner', { name: template.name })}</span>
+            {onClearTemplate && (
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onClearTemplate}>
+                {t('admin:channelTemplateClear')}
+              </Button>
+            )}
+          </div>
+        )}
         {account.isError && (
           <div className="flex items-center justify-between gap-2 rounded-xl border border-destructive/30 bg-destructive/8 px-4 py-2.5">
             <p role="alert" className="text-xs text-destructive">

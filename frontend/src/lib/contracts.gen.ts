@@ -78,6 +78,53 @@ export const TOOL_LOSS_POLICIES = [
 ] as const
 export type ToolLossPolicy = (typeof TOOL_LOSS_POLICIES)[number]
 
+export const OVERRIDE_OPS = [
+  'set',
+  'delete',
+  'move',
+  'copy',
+  'replace',
+  'regex_replace',
+  'set_header',
+  'delete_header',
+  'return_error',
+] as const
+export type OverrideOp = (typeof OVERRIDE_OPS)[number]
+
+export const OVERRIDE_MATCHERS = [
+  'eq',
+  'neq',
+  'prefix',
+  'suffix',
+  'contains',
+  'regex',
+  'exists',
+  'missing',
+  'gt',
+  'gte',
+  'lt',
+  'lte',
+] as const
+export type OverrideMatcher = (typeof OVERRIDE_MATCHERS)[number]
+
+export interface OverrideCondition {
+  field: string
+  matcher: OverrideMatcher
+  value?: unknown
+}
+
+export interface RequestOverrideRule {
+  name?: string
+  enabled: boolean
+  conditions?: OverrideCondition[]
+  op: OverrideOp
+  path?: string
+  from?: string
+  value?: unknown
+  pattern?: string
+  status?: number
+}
+
 export type LocalPeriod = 'total' | 'day' | 'week' | 'month'
 
 export interface CodexClientGate {
@@ -139,6 +186,7 @@ export interface ChannelSettings {
   low_balance?: LowBalanceRule
   extra_headers?: Record<string, string>
   inject_request_fields?: Record<string, unknown>
+  request_overrides?: RequestOverrideRule[]
   extensions?: ChannelExtensions
 }
 
@@ -158,6 +206,7 @@ export interface ChannelSettingsPatch {
   low_balance?: LowBalanceRule | null
   extra_headers?: Record<string, string> | null
   inject_request_fields?: Record<string, unknown> | null
+  request_overrides?: RequestOverrideRule[] | null
   extensions?: {
     client_profile?: ClientProfile | null
     codex_client?: CodexClientGate | null

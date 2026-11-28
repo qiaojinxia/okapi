@@ -463,6 +463,7 @@ pub(super) async fn prepare_chat(
         codex_client: okapi_providers::profiles::codex_client::detect(headers),
         client_ip: okapi_kernel::clients::detect_client_ip(headers),
         client_headers: Arc::new(super::super::oauth_cred::client_headers(headers)),
+        user_agent: user_agent(headers).map(str::to_owned),
         pool_chain: pool_chain.iter().map(|p| (*p).to_owned()).collect(),
         pin: pin.map(Arc::new),
         pool_strategy: effective_strategy,

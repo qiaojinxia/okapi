@@ -104,21 +104,23 @@ impl AppState {
         stream: bool,
     ) -> Result<okapi_providers::gemini::GeminiResponse, UpstreamError> {
         let outbound = super::openai_dialect::outbound(cand);
-        match self
-            .infer_via(
-                Surface::Generate,
-                InferCall {
-                    cand,
-                    endpoint,
-                    base,
-                    model,
-                    body,
-                    stream,
-                    outbound: &outbound,
-                },
-            )
-            .await?
-        {
+        self.generate_via_outbound(InferCall {
+            cand,
+            endpoint,
+            base,
+            model,
+            body,
+            stream,
+            outbound: &outbound,
+        })
+        .await
+    }
+
+    pub async fn generate_via_outbound(
+        &self,
+        call: InferCall<'_>,
+    ) -> Result<okapi_providers::gemini::GeminiResponse, UpstreamError> {
+        match self.infer_via(Surface::Generate, call).await? {
             Response::Gemini(response) => Ok(response),
             _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
         }

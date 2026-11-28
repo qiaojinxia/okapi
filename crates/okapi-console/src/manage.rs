@@ -259,7 +259,7 @@ pub async fn list_settings(
 #[derive(Deserialize)]
 pub struct BatchChannelReq {
     pub ids: Vec<i64>,
-    /// enable | disable | delete | set_egress | set_pools | clear_cooldown
+    /// enable | disable | delete | set_egress | set_pools | clear_cooldown | add_models | remove_models | set_schedule
     pub action: String,
     /// `set_egress` 的目标绑定（§11.41），形状同 `POST /admin/channels/{id}/egress`。
     #[serde(default)]
@@ -267,9 +267,41 @@ pub struct BatchChannelReq {
     /// `set_pools` 的目标池成员列表，形状同 `POST /admin/channels/{id}/pools`。
     #[serde(default)]
     pub pools: Option<Vec<super::admin::PoolMemberReq>>,
+    /// `add_models` / `remove_models` 的模型名列表（去空白、去重，单批最多 256 项）。
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+    /// `set_schedule` 的目标优先级（None = 保持不变）。
+    #[serde(default)]
+    pub priority: Option<i32>,
+    /// `set_schedule` 的相对成本千分比（None = 保持不变；0..=100_000）。
+    #[serde(default)]
+    pub cost_milli: Option<i64>,
 }
 
-/// 批量启停/删除/切出口/切池/解冷渠道（对齐 new-api 批量操作）。
+fn normalize_batch_models(raw: Option<Vec<String>>) -> Result<Vec<String>, AppError> {
+    let Some(list) = raw else {
+        return Err(AppError::bad_request().with_param("models"));
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        let name = item.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name.len() > 256 || name.chars().any(char::is_control) {
+            return Err(AppError::bad_request().with_param("models"));
+        }
+        if !out.iter().any(|existing| existing == name) {
+            out.push(name.to_owned());
+        }
+    }
+    if out.is_empty() || out.len() > 256 {
+        return Err(AppError::bad_request().with_param("models"));
+    }
+    Ok(out)
+}
+
+/// 批量启停/删除/切出口/切池/解冷/增删模型/改调度参数（对齐 new-api 批量操作）。
 /// own 范围拒绝批量：逐条属主校验会放大误操作面，own 角色请用单条端点。
 pub async fn batch_channels(
     State(state): State<AppState>,
@@ -287,6 +319,7 @@ pub async fn batch_channels(
         return Err(AppError::bad_request().with_param("ids"));
     }
     let mut assignment = None;
+    let mut audit_models: Option<Vec<String>> = None;
     let affected = match req.action.as_str() {
         "enable" => mutate::batch_set_channel_status(&state.pg, &req.ids, 1).await?,
         "disable" => mutate::batch_set_channel_status(&state.pg, &req.ids, 2).await?,
@@ -328,6 +361,27 @@ pub async fn batch_channels(
             }
             affected
         }
+        "add_models" => {
+            let models = normalize_batch_models(req.models)?;
+            let affected = mutate::batch_add_channel_models(&state.pg, &req.ids, &models).await?;
+            audit_models = Some(models);
+            affected
+        }
+        "remove_models" => {
+            let models = normalize_batch_models(req.models)?;
+            let affected =
+                mutate::batch_remove_channel_models(&state.pg, &req.ids, &models).await?;
+            audit_models = Some(models);
+            affected
+        }
+        "set_schedule" => {
+            if req.priority.is_none() && req.cost_milli.is_none() {
+                return Err(AppError::bad_request().with_param("priority"));
+            }
+            super::admin::ensure_cost_milli(req.cost_milli)?;
+            mutate::batch_set_channel_schedule(&state.pg, &req.ids, req.priority, req.cost_milli)
+                .await?
+        }
         _ => return Err(AppError::bad_request().with_param("action")),
     };
     state.invalidate_cache(okapi_engine::state::CacheInvalidation::Channels);
@@ -336,7 +390,15 @@ pub async fn batch_channels(
         &actor,
         "channel.batch",
         &req.action,
-        json!({"ids": req.ids, "affected": affected, "egress": req.egress, "assignment": assignment}),
+        json!({
+            "ids": req.ids,
+            "affected": affected,
+            "egress": req.egress,
+            "assignment": assignment,
+            "models": audit_models,
+            "priority": req.priority,
+            "cost_milli": req.cost_milli,
+        }),
     )
     .await;
     Ok(Json(

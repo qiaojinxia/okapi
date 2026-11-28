@@ -48,6 +48,7 @@ pub mod openai;
 pub mod profiles;
 pub mod reasoning;
 pub mod registry;
+pub mod request_overrides;
 pub mod response_lifetime;
 pub mod response_relay;
 pub mod responses;

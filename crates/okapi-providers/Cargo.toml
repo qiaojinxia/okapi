@@ -40,6 +40,7 @@ http = { workspace = true }
 http-body = { workspace = true }
 tower-service = { workspace = true }
 percent-encoding = { workspace = true }
+regex = { workspace = true }
 tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
 webpki-root-certs = { workspace = true }

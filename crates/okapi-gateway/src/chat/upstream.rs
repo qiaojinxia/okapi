@@ -458,36 +458,42 @@ pub(super) fn shape_upstream_body(
     cand: &ChannelCandidate,
     body: Bytes,
 ) -> Result<Bytes, UpstreamError> {
-    shape_and_maybe_verify(bill, cand, body, false)
+    shape_and_maybe_verify(bill, cand, body, false).map(|(body, _)| body)
 }
 
 fn shape_and_verify_outbound(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
     body: Bytes,
-) -> Result<Bytes, UpstreamError> {
+) -> Result<(Bytes, okapi_providers::request_overrides::OverrideHeaderPatch), UpstreamError> {
     shape_and_maybe_verify(bill, cand, body, true)
 }
 
-/// 单次解析完成出站塑形（路由偏好摘除、统一 reasoning 摘除、渠道字段增删、`previous_response_id` 校验）
-/// 与 `server_tools` 终检；没有任何塑形/检查需求时零解析、零拷贝直通。
+/// 单次解析完成出站塑形（路由偏好摘除、统一 reasoning 摘除、渠道字段增删、条件改写规则、
+/// `previous_response_id` 校验）与 `server_tools` 终检；没有任何塑形/检查需求时零解析、零拷贝直通。
 fn shape_and_maybe_verify(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
     body: Bytes,
     verify_tools: bool,
-) -> Result<Bytes, UpstreamError> {
+) -> Result<(Bytes, okapi_providers::request_overrides::OverrideHeaderPatch), UpstreamError> {
+    use okapi_providers::request_overrides::{
+        OverrideContext, OverrideHeaderPatch, apply_rules, parse_rules_runtime,
+    };
+
     let needs_fields =
         !cand.strip_request_fields.is_empty() || !cand.inject_request_fields.is_empty();
+    let override_rules = parse_rules_runtime(&cand.request_overrides);
     let needs_shape = bill.prefs.directive_present
         || bill.unified_reasoning != UnifiedReasoning::Absent
         || needs_fields
+        || override_rules.is_some()
         || bill.response_parent.is_some();
     if !needs_shape {
         if verify_tools {
             bill.server_tools.verify_outbound(&body)?;
         }
-        return Ok(body);
+        return Ok((body, OverrideHeaderPatch::default()));
     }
     let native_responses = if bill.unified_reasoning == UnifiedReasoning::Absent {
         false
@@ -504,7 +510,7 @@ fn shape_and_maybe_verify(
             if verify_tools {
                 bill.server_tools.verify_outbound(&body)?;
             }
-            return Ok(body);
+            return Ok((body, OverrideHeaderPatch::default()));
         }
     };
     let mut changed = false;
@@ -525,6 +531,22 @@ fn shape_and_maybe_verify(
             &cand.inject_request_fields,
         );
     }
+    let mut header_patch = OverrideHeaderPatch::default();
+    if let Some(rules) = override_rules.as_deref() {
+        let upstream_model = cand.upstream_model(&bill.model);
+        let ctx = OverrideContext {
+            model: &bill.model,
+            requested_model: &bill.requested_model,
+            upstream_model,
+            ingress: bill.ingress.as_str(),
+            user_agent: bill.user_agent.as_deref(),
+            client_headers: &bill.client_headers,
+        };
+        let outcome = apply_rules(rules, &ctx, &mut value)
+            .map_err(|rej| UpstreamError::Build(rej.encode_build_reason()))?;
+        changed |= outcome.body_changed;
+        header_patch = outcome.headers;
+    }
     if let Some(parent) = &bill.response_parent
         && value
             .get("previous_response_id")
@@ -539,11 +561,12 @@ fn shape_and_maybe_verify(
         bill.server_tools.verify_outbound_value(&value)?;
     }
     if !changed {
-        return Ok(body);
+        return Ok((body, header_patch));
     }
-    serde_json::to_vec(&value)
+    let encoded = serde_json::to_vec(&value)
         .map(Bytes::from)
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+        .map_err(|e| UpstreamError::Build(e.to_string()))?;
+    Ok((encoded, header_patch))
 }
 
 // 入口方言 × 上游协议矩阵的收敛点，拆分损害路由全貌可读性
@@ -558,14 +581,15 @@ pub(super) async fn dispatch_chat(
     use futures::StreamExt as _;
     let plan = ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?;
     let native_responses = plan.native_responses();
-    let body = shape_and_verify_outbound(bill, cand, body)?;
+    let (body, override_headers) = shape_and_verify_outbound(bill, cand, body)?;
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
     // 订阅 provider 额外带上客户端身份头（真实 Claude Code / Codex CLI 经网关出去时上游看到它自己）
-    let outbound = super::super::oauth_cred::outbound_with_client(
+    let mut outbound = super::super::oauth_cred::outbound_with_client(
         cand,
         &bill.client_headers,
         Some(bill.user_id),
     );
+    override_headers.apply_to(&mut outbound.extra_headers);
     // 操作臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
     let endpoint = plan.endpoint(stream);
     let infer_call = |model, body, stream| super::super::dialect::InferCall {
@@ -593,7 +617,7 @@ pub(super) async fn dispatch_chat(
         (Ingress::Gemini, Operation::GenerateContent) => {
             match bill
                 .state
-                .generate_via(cand, endpoint, base, &upstream_model, body, stream)
+                .generate_via_outbound(infer_call(&upstream_model, body, stream))
                 .await?
             {
                 okapi_providers::gemini::GeminiResponse::Json {
@@ -633,14 +657,14 @@ pub(super) async fn dispatch_chat(
         // Gemini 客户端 + OpenAI(兼容 / Azure) 上游：chat 形状 → Gemini 形状
         (Ingress::Gemini, Operation::ChatCompletions) => bill
             .state
-            .openai_chat(cand, endpoint, &upstream_model, body, stream)
+            .openai_chat_with_outbound(cand, endpoint, &upstream_model, body, stream, &outbound)
             .await
             .map(surface_stream_failures)
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + gemini 方言上游：providers 内转回 OpenAI 形状
         (Ingress::OpenAi | Ingress::Responses, Operation::GenerateContent) => bill
             .state
-            .generate_via(cand, endpoint, base, &upstream_model, body, stream)
+            .generate_via_outbound(infer_call(&upstream_model, body, stream))
             .await
             .and_then(|resp| conv_gem::wrap_generate(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状
@@ -652,7 +676,7 @@ pub(super) async fn dispatch_chat(
         // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
         (Ingress::OpenAi | Ingress::Responses, Operation::ChatCompletions) => {
             bill.state
-                .openai_chat(cand, endpoint, &upstream_model, body, stream)
+                .openai_chat_with_outbound(cand, endpoint, &upstream_model, body, stream, &outbound)
                 .await
         }
         // Anthropic 客户端 + anthropic 方言上游：透传 + 计费元数据扫描
@@ -716,7 +740,7 @@ pub(super) async fn dispatch_chat(
         (Ingress::Anthropic, Operation::ChatCompletions) => wrap_chat_as_anthropic(
             surface_stream_failures(
                 bill.state
-                    .openai_chat(cand, endpoint, &upstream_model, body, stream)
+                    .openai_chat_with_outbound(cand, endpoint, &upstream_model, body, stream, &outbound)
                     .await?,
             ),
             &upstream_model,

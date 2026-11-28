@@ -39,6 +39,9 @@ pub struct ChannelCandidate {
     /// 强制写入请求顶层的字段（channels.settings.inject_request_fields）；
     /// 在 strip 之后浅合并。model/messages/stream/provider 受保护。
     pub inject_request_fields: serde_json::Map<String, serde_json::Value>,
+    /// 声明式参数 / Header 条件改写规则（channels.settings.request_overrides）；
+    /// 由 providers::request_overrides 解释，store 与调度器不解析其内容。
+    pub request_overrides: serde_json::Value,
     /// 跨方言转换会丢工具时怎么办（channels.settings.tool_loss_policy：safe / strict / allow；
     /// None = 缺省 safe，解析见 `okapi_providers::convert::tool_loss::ToolLossPolicy`）。
     pub tool_loss_policy: Option<String>,
@@ -221,6 +224,7 @@ struct MemberMeta {
     enabled: bool,
     tags: Vec<String>,
     model_filter: Option<Vec<String>>,
+    request_overrides: serde_json::Value,
 }
 
 /// 服务指定模型的可用渠道 key 候选：
@@ -326,11 +330,14 @@ pub async fn candidates_for_model(
                 bool,
                 serde_json::Value,
                 Option<serde_json::Value>,
+                Option<serde_json::Value>,
             ),
         >(
-            r"SELECT pool_code, channel_id, role, enabled, tags, model_filter
-              FROM pool_channels
-              WHERE pool_code = ANY($1::varchar[])",
+            r"SELECT pc.pool_code, pc.channel_id, pc.role, pc.enabled, pc.tags, pc.model_filter,
+                     c.settings -> 'request_overrides'
+              FROM pool_channels pc
+              JOIN channels c ON c.id = pc.channel_id
+              WHERE pc.pool_code = ANY($1::varchar[]) AND c.deleted_at IS NULL",
         )
         .bind(&chain)
         .fetch_all(pool),
@@ -338,7 +345,9 @@ pub async fn candidates_for_model(
 
     let mut meta_map: std::collections::HashMap<(String, i64), MemberMeta> =
         std::collections::HashMap::with_capacity(member_metas.len());
-    for (pool_code, channel_id, role, enabled, tags, model_filter) in member_metas {
+    for (pool_code, channel_id, role, enabled, tags, model_filter, request_overrides) in
+        member_metas
+    {
         let tags: Vec<String> = serde_json::from_value(tags).unwrap_or_default();
         let model_filter: Option<Vec<String>> =
             model_filter.and_then(|v| serde_json::from_value(v).ok());
@@ -349,6 +358,7 @@ pub async fn candidates_for_model(
                 enabled,
                 tags,
                 model_filter,
+                request_overrides: request_overrides.unwrap_or(serde_json::Value::Null),
             },
         );
     }
@@ -369,13 +379,20 @@ pub async fn candidates_for_model(
             if !seen.insert(r.channel_key_id) {
                 return None;
             }
-            let (pool_role, pool_tags, pool_model_filter) = meta.map_or_else(
-                || ("primary".to_owned(), Vec::new(), None),
-                |m| (m.role.clone(), m.tags.clone(), m.model_filter.clone()),
+            let (pool_role, pool_tags, pool_model_filter, request_overrides) = meta.map_or_else(
+                || ("primary".to_owned(), Vec::new(), None, serde_json::Value::Null),
+                |m| {
+                    (
+                        m.role.clone(),
+                        m.tags.clone(),
+                        m.model_filter.clone(),
+                        m.request_overrides.clone(),
+                    )
+                },
             );
-            Some((r, pool_role, pool_tags, pool_model_filter))
+            Some((r, pool_role, pool_tags, pool_model_filter, request_overrides))
         })
-        .map(|(r, pool_role, pool_tags, pool_model_filter)| {
+        .map(|(r, pool_role, pool_tags, pool_model_filter, request_overrides)| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             let responses_native = responses_native_for(&r.provider, r.responses_native);
             let (same_key_retries, first_output_timeout_secs) =
@@ -435,6 +452,7 @@ pub async fn candidates_for_model(
                     .inject_request_fields
                     .and_then(|v| v.as_object().cloned())
                     .unwrap_or_default(),
+                request_overrides,
                 responses_native,
                 tool_loss_policy: r.tool_loss_policy,
                 capabilities: r.capabilities,
