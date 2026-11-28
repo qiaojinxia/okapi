@@ -28,6 +28,7 @@ mod model_cooldown;
 pub mod response_affinity;
 mod responses_ws;
 mod session_affinity;
+mod sync_revision;
 pub mod token_count;
 mod user_limits;
 mod verification;
@@ -39,6 +40,7 @@ pub use self::channel_keys::{KeyQualitySample, channel_lease_key};
 use self::kpi::KPI_TTL_SECS;
 pub use self::kpi::{KPI_WINDOW_MAX, KpiSecond};
 pub use self::session_affinity::StickyHit;
+pub use self::sync_revision::{PRICING_REVISION_TOPIC, RevisionCursor, SYNC_REVISIONS_KEY};
 pub use self::web_sessions::WebSessionRow;
 
 #[derive(Clone)]

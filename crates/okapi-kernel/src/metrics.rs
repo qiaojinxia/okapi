@@ -269,6 +269,7 @@ pub struct Metrics {
     auth_cache_misses: AtomicU64,
     routing_invalidations_local: AtomicU64,
     routing_invalidations_broadcast: AtomicU64,
+    routing_invalidations_revision: AtomicU64,
     settlement_batches_ok: AtomicU64,
     settlement_batches_fallback: AtomicU64,
     settlement_batch_size: FixedHistogram,
@@ -307,6 +308,7 @@ impl Metrics {
             auth_cache_misses: AtomicU64::new(0),
             routing_invalidations_local: AtomicU64::new(0),
             routing_invalidations_broadcast: AtomicU64::new(0),
+            routing_invalidations_revision: AtomicU64::new(0),
             settlement_batches_ok: AtomicU64::new(0),
             settlement_batches_fallback: AtomicU64::new(0),
             settlement_batch_size: FixedHistogram::new(BATCH_SIZE_BUCKETS, false),
@@ -374,6 +376,12 @@ impl Metrics {
             self.routing_invalidations_local
                 .fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// 记录通过 Redis revision 同步触发的跨副本路由/配置缓存失效次数。
+    pub fn record_routing_invalidation_revision(&self) {
+        self.routing_invalidations_revision
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_settlement_batch(&self, batch_size: usize, duration: Duration, fallbacks: usize) {
@@ -502,6 +510,11 @@ impl Metrics {
             out,
             "okapi_routing_cache_invalidations_total{{source=\"broadcast\"}} {}",
             self.routing_invalidations_broadcast.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "okapi_routing_cache_invalidations_total{{source=\"revision\"}} {}",
+            self.routing_invalidations_revision.load(Ordering::Relaxed)
         );
 
         out.push_str("# HELP okapi_settlement_batches_total Micro-batch settlement executions.\n");
@@ -809,6 +822,7 @@ mod tests {
         m.record_upstream_failover();
         m.record_auth_cache(true);
         m.record_auth_cache(false);
+        m.record_routing_invalidation_revision();
         m.record_settlement_batch(8, Duration::from_millis(12), 0);
         m.record_worker_maintenance("reconcile", "ran");
 
@@ -838,6 +852,7 @@ mod tests {
         );
         assert!(body.contains("okapi_pg_pool_connections{role=\"gateway\",state=\"active\"} 3"));
         assert!(body.contains("okapi_pricebook_epoch 7"));
+        assert!(body.contains("okapi_routing_cache_invalidations_total{source=\"revision\"} 1"));
         assert!(
             body.contains(
                 "okapi_worker_maintenance_runs_total{job=\"reconcile\",outcome=\"ran\"} 1"

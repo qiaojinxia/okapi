@@ -311,6 +311,107 @@ async fn routing_invalidate_broadcast_clears_margin_cache_across_replicas() {
 }
 
 #[tokio::test]
+async fn revision_sync_invalidates_scoped_caches_without_nats() {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+
+    // 显式关闭 NATS：仅靠 Redis 单调 revision 游标实现跨副本按作用域收敛
+    let replica_a = engine::build_state(&database_url, &redis_url, "gw-rev-a", None, None)
+        .await
+        .unwrap();
+    let replica_b = engine::build_state(&database_url, &redis_url, "gw-rev-b", None, None)
+        .await
+        .unwrap();
+    engine::spawn_revision_sync_with_interval(replica_b.clone(), Duration::from_millis(80));
+    // 等待启动基线采完
+    for _ in 0..40 {
+        if replica_b
+            .routing
+            .sync_cursor
+            .lock()
+            .expect("lock")
+            .is_seeded()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    replica_b
+        .routing
+        .margin_cache
+        .insert(0, Arc::new(HashSet::from(["default|77".to_owned()])))
+        .await;
+    replica_b
+        .routing
+        .cand_cache
+        .insert("gpt-5|default".to_owned(), Arc::new(Vec::new()))
+        .await;
+    replica_b
+        .routing
+        .model_cache
+        .insert("gpt-5".to_owned(), Arc::new(None))
+        .await;
+    replica_b
+        .settings_cache
+        .insert("site_notices".to_owned(), Arc::new(None))
+        .await;
+
+    // 1. Margin 作用域仅清除 margin_cache
+    replica_a.invalidate_cache(engine::state::CacheInvalidation::Margin);
+    let mut margin_cleared = false;
+    for _ in 0..40 {
+        if replica_b.routing.margin_cache.get(&0).await.is_none() {
+            margin_cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        margin_cleared,
+        "无 NATS 时 Margin revision 必须同步失效其它副本的 margin_cache"
+    );
+    assert!(replica_b.routing.cand_cache.get("gpt-5|default").await.is_some());
+    assert!(replica_b.routing.model_cache.get("gpt-5").await.is_some());
+    assert!(replica_b.settings_cache.get("site_notices").await.is_some());
+
+    // 2. Setting 作用域仅清除目标设置键
+    replica_a.invalidate_setting_cache("site_notices").await;
+    let mut setting_cleared = false;
+    for _ in 0..40 {
+        if replica_b.settings_cache.get("site_notices").await.is_none() {
+            setting_cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        setting_cleared,
+        "无 NATS 时 Setting revision 必须同步失效目标设置键"
+    );
+    assert!(replica_b.routing.cand_cache.get("gpt-5|default").await.is_some());
+    assert!(replica_b.routing.model_cache.get("gpt-5").await.is_some());
+
+    // 3. All 作用域全量失效路由缓存
+    replica_a.invalidate_routing_caches();
+    let mut all_cleared = false;
+    for _ in 0..40 {
+        if replica_b.routing.cand_cache.get("gpt-5|default").await.is_none()
+            && replica_b.routing.model_cache.get("gpt-5").await.is_none()
+        {
+            all_cleared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        all_cleared,
+        "无 NATS 时 All revision 必须全量失效其它副本路由缓存"
+    );
+}
+
+#[tokio::test]
 async fn gateway_exposes_prometheus_metrics_and_propagates_w3c_traceparent() {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");

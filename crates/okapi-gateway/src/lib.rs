@@ -21,8 +21,9 @@ pub use okapi_engine::{
     channel_balance, channel_permit, channel_probe, channel_test, connect_nats_optional,
     credentials, diagnostics, dialect, flow_control_for_pool, images, ingress, oauth_cred,
     openai_dialect, refresh_pricebook_if_newer, request_policy, rule_inputs, scheduler,
-    settlement_retry, spawn_epoch_poller, spawn_epoch_subscriber,
-    spawn_routing_invalidate_subscriber, spawn_ssrf_policy_sync, spawn_state_sync, state,
+    settlement_retry, spawn_epoch_poller, spawn_epoch_subscriber, spawn_revision_sync,
+    spawn_revision_sync_with_interval, spawn_routing_invalidate_subscriber, spawn_ssrf_policy_sync,
+    spawn_state_sync, state,
     stream_policy, sync_ssrf_policy, user_turns, videos,
 };
 pub(crate) use okapi_engine::{

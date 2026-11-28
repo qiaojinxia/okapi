@@ -232,6 +232,7 @@ pub async fn build_state_with_clients(
                 .max_capacity(1)
                 .time_to_live(Duration::from_mins(1))
                 .build(),
+            sync_cursor: Arc::default(),
         },
         health: state::HealthMarks {
             key_failures: moka::future::Cache::builder()
@@ -381,6 +382,189 @@ fn next_nats_backoff(current: Duration, ran_for: Duration) -> Duration {
     }
 }
 
+async fn apply_invalidation_scope(state: &AppState, scope: &state::CacheInvalidation) {
+    // 只清本地：清完再广播/递增 revision 会打环
+    state.invalidate_cache_local(scope).await;
+    match scope {
+        state::CacheInvalidation::All => {
+            sync_ssrf_policy(state).await;
+        }
+        state::CacheInvalidation::Setting(key) => {
+            sync_setting_runtime(state, key).await;
+        }
+        state::CacheInvalidation::Channels
+        | state::CacheInvalidation::Models
+        | state::CacheInvalidation::Pools
+        | state::CacheInvalidation::Margin => {}
+    }
+}
+
+/// 无 NATS 时 Redis revision 轮询间隔（主同步通道，显著优于 5–60s 本地 TTL）。
+const REVISION_SYNC_INTERVAL_NO_NATS: Duration = Duration::from_secs(2);
+/// 有 NATS 时 Redis revision 轮询间隔（轻量丢广播自愈安全网）。
+const REVISION_SYNC_INTERVAL_WITH_NATS: Duration = Duration::from_secs(15);
+const REVISION_SYNC_INTERVAL_MIN_MS: u64 = 200;
+const REVISION_SYNC_INTERVAL_MAX_MS: u64 = 60_000;
+
+fn revision_sync_interval(has_nats: bool) -> Duration {
+    revision_sync_interval_from_raw(
+        has_nats,
+        std::env::var("OKAPI_REVISION_SYNC_INTERVAL_MS").ok().as_deref(),
+    )
+}
+
+fn revision_sync_interval_from_raw(has_nats: bool, raw: Option<&str>) -> Duration {
+    if let Some(ms) = raw
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+    {
+        return Duration::from_millis(
+            ms.clamp(REVISION_SYNC_INTERVAL_MIN_MS, REVISION_SYNC_INTERVAL_MAX_MS),
+        );
+    }
+    if has_nats {
+        REVISION_SYNC_INTERVAL_WITH_NATS
+    } else {
+        REVISION_SYNC_INTERVAL_NO_NATS
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RevisionActions {
+    refresh_pricing: bool,
+    scopes: Vec<state::CacheInvalidation>,
+}
+
+fn plan_revision_actions(topics: &[String]) -> RevisionActions {
+    let mut actions = RevisionActions::default();
+    let mut has_all = false;
+    for raw in topics {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == okapi_kernel::sched_redis::PRICING_REVISION_TOPIC {
+            actions.refresh_pricing = true;
+            continue;
+        }
+        let scope = state::CacheInvalidation::from_wire(trimmed);
+        if matches!(scope, state::CacheInvalidation::All) {
+            has_all = true;
+        } else if !actions.scopes.contains(&scope) {
+            actions.scopes.push(scope);
+        }
+    }
+    if has_all {
+        actions.scopes.clear();
+        actions.scopes.push(state::CacheInvalidation::All);
+    }
+    actions
+}
+
+/// 将本轮检测到的变更 revision 主题落到本进程缓存与运行时配置上（供轮询器与单测共用）。
+pub async fn apply_revision_topics(state: &AppState, topics: &[String]) {
+    let actions = plan_revision_actions(topics);
+    if actions.refresh_pricing {
+        match refresh_pricebook_if_newer(state).await {
+            Ok(true) => {
+                tracing::info!(
+                    epoch = state.pricebook.epoch(),
+                    "PriceBook 已通过 revision 同步热更"
+                );
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "revision 触发的 PriceBook 热更失败");
+            }
+        }
+    }
+    for scope in &actions.scopes {
+        okapi_kernel::metrics::global().record_routing_invalidation_revision();
+        apply_invalidation_scope(state, scope).await;
+        tracing::debug!(?scope, "路由/配置缓存已通过 revision 同步按作用域失效");
+    }
+}
+
+/// 无 NATS 轻量配置同步（有 NATS 时同时作为丢广播自愈安全网）：
+/// 定期单次 `HGETALL sync:revisions` 对比本进程 [`okapi_kernel::sched_redis::RevisionCursor`]，
+/// 仅对发生变更的主题按作用域失效本地缓存并同步运行时配置 / PriceBook。
+pub fn spawn_revision_sync(state: AppState) {
+    let interval = revision_sync_interval(state.nats.is_some());
+    spawn_revision_sync_with_interval(state, interval);
+}
+
+/// 同 [`spawn_revision_sync`]，允许显式指定轮询间隔（供集成测试加速验证）。
+pub fn spawn_revision_sync_with_interval(state: AppState, interval: Duration) {
+    let stop = state.settlements.subscribe_draining();
+    tokio::spawn(okapi_kernel::supervision::run(
+        "revision_sync",
+        stop.clone(),
+        move || {
+            let state = state.clone();
+            let mut stop = stop.clone();
+            async move {
+                // 启动时先读一次基线快照：避免冷启动把刚预热的缓存全刷一遍；
+                // 若启动瞬间 Redis 不可达，则以空基线进入轮询态，恢复后不漏掉期间其它副本的变更。
+                match state.sched.sync_revisions_snapshot().await {
+                    Ok(snapshot) => {
+                        if let Ok(mut guard) = state.routing.sync_cursor.lock() {
+                            guard.seed_if_unseeded(snapshot);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "revision 同步启动基线读取失败，将在恢复后补齐变更"
+                        );
+                        if let Ok(mut guard) = state.routing.sync_cursor.lock() {
+                            guard.mark_seeded_empty();
+                        }
+                    }
+                }
+
+                let mut tick = tokio::time::interval(interval);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await; // 跳过立即触发的首拍（刚采过启动基线）
+                let mut degraded = false;
+
+                loop {
+                    tokio::select! {
+                        _ = stop.changed() => return,
+                        _ = tick.tick() => {}
+                    }
+                    if *stop.borrow() {
+                        return;
+                    }
+                    match state.sched.sync_revisions_snapshot().await {
+                        Ok(snapshot) => {
+                            if degraded {
+                                degraded = false;
+                                tracing::info!("revision 同步已从 Redis 异常恢复");
+                            }
+                            let changed = match state.routing.sync_cursor.lock() {
+                                Ok(mut guard) => guard.diff(&snapshot),
+                                Err(poisoned) => poisoned.into_inner().diff(&snapshot),
+                            };
+                            if !changed.is_empty() {
+                                apply_revision_topics(&state, &changed).await;
+                            }
+                        }
+                        Err(err) => {
+                            if !degraded {
+                                degraded = true;
+                                tracing::warn!(
+                                    error = %err,
+                                    "revision 同步拉取失败（期间依赖 NATS / TTL 兜底）"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    ));
+}
+
 /// routing.invalidate 广播订阅：任一实例改了渠道/池/模型/设置/熔断，全集群立即弃用旧缓存。
 ///
 /// 由 `okapi_kernel::supervision` 托管并在断流后按退避自动重订、主动补刷本地路由缓存与 SSRF 策略，
@@ -434,20 +618,7 @@ pub fn spawn_routing_invalidate_subscriber(state: AppState) {
                                     state::CacheInvalidation::All,
                                     state::CacheInvalidation::from_wire,
                                 );
-                                // 只清本地：清完再广播会打环
-                                state.invalidate_cache_local(&scope).await;
-                                match &scope {
-                                    state::CacheInvalidation::All => {
-                                        sync_ssrf_policy(&state).await;
-                                    }
-                                    state::CacheInvalidation::Setting(key) => {
-                                        sync_setting_runtime(&state, key).await;
-                                    }
-                                    state::CacheInvalidation::Channels
-                                    | state::CacheInvalidation::Models
-                                    | state::CacheInvalidation::Pools
-                                    | state::CacheInvalidation::Margin => {}
-                                }
+                                apply_invalidation_scope(&state, &scope).await;
                                 tracing::debug!(?scope, "路由缓存已按作用域失效");
                             }
                             let ran_for = started.elapsed();
@@ -603,11 +774,12 @@ pub fn spawn_epoch_poller(state: AppState) {
     ));
 }
 
-/// 启动共享状态的后台同步（epoch 轮询/广播、路由缓存失效广播、SSRF 与扩展运行时配置同步）。
+/// 启动共享状态的后台同步（epoch 轮询/广播、路由缓存失效广播、无 NATS revision 轻量同步、SSRF 与扩展运行时配置同步）。
 pub fn spawn_state_sync(state: &AppState) {
     spawn_epoch_poller(state.clone());
     spawn_epoch_subscriber(state.clone());
     spawn_routing_invalidate_subscriber(state.clone());
+    spawn_revision_sync(state.clone());
     spawn_ssrf_policy_sync(state.clone());
 }
 
@@ -629,5 +801,117 @@ mod tests {
             next_nats_backoff(Duration::from_secs(30), Duration::from_secs(60)),
             Duration::from_secs(1)
         );
+    }
+
+    #[test]
+    fn revision_sync_interval_defaults_and_env_clamping() {
+        assert_eq!(
+            revision_sync_interval_from_raw(false, None),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            revision_sync_interval_from_raw(true, None),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            revision_sync_interval_from_raw(false, Some("50")),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            revision_sync_interval_from_raw(true, Some("120000")),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            revision_sync_interval_from_raw(false, Some("3500")),
+            Duration::from_millis(3500)
+        );
+        assert_eq!(
+            revision_sync_interval_from_raw(false, Some("0")),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            revision_sync_interval_from_raw(true, Some("invalid")),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn plan_revision_actions_coalesces_all_and_keeps_pricing_distinct() {
+        let planned = plan_revision_actions(&[
+            "channels".into(),
+            "models".into(),
+            "channels".into(),
+            "setting:site_notices".into(),
+        ]);
+        assert!(!planned.refresh_pricing);
+        assert_eq!(
+            planned.scopes,
+            vec![
+                state::CacheInvalidation::Channels,
+                state::CacheInvalidation::Models,
+                state::CacheInvalidation::Setting("site_notices".into()),
+            ]
+        );
+
+        // `all` 合并其它路由缓存作用域，但保留独立的 `pricing` 刷新标志
+        let merged = plan_revision_actions(&[
+            "channels".into(),
+            "all".into(),
+            "pricing".into(),
+            "pools".into(),
+        ]);
+        assert!(merged.refresh_pricing);
+        assert_eq!(merged.scopes, vec![state::CacheInvalidation::All]);
+    }
+
+    #[tokio::test]
+    async fn apply_revision_topics_invalidates_only_targeted_scopes() {
+        let state = state::tests::test_app_state();
+        state
+            .routing
+            .margin_cache
+            .insert(0, Arc::new(["default|1".to_owned()].into()))
+            .await;
+        state
+            .routing
+            .cand_cache
+            .insert("gpt-5|default".into(), Arc::new(Vec::new()))
+            .await;
+        state
+            .routing
+            .model_cache
+            .insert("gpt-5".into(), Arc::new(None))
+            .await;
+        state
+            .settings_cache
+            .insert("site_notices".into(), Arc::new(None))
+            .await;
+        state
+            .settings_cache
+            .insert("request_policy".into(), Arc::new(None))
+            .await;
+        state
+            .routing
+            .request_policy
+            .insert(0, Arc::new(okapi_kernel::policies::RequestPolicy::default()))
+            .await;
+
+        apply_revision_topics(
+            &state,
+            &["margin".into(), "setting:request_policy".into()],
+        )
+        .await;
+
+        assert!(state.routing.margin_cache.get(&0).await.is_none());
+        assert!(state.settings_cache.get("request_policy").await.is_none());
+        assert!(state.routing.request_policy.get(&0).await.is_none());
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_some());
+        assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.settings_cache.get("site_notices").await.is_some());
+
+        apply_revision_topics(&state, &["channels".into()]).await;
+        assert!(state.routing.cand_cache.get("gpt-5|default").await.is_none());
+        assert!(state.routing.model_cache.get("gpt-5").await.is_some());
+        assert!(state.settings_cache.get("site_notices").await.is_some());
     }
 }

@@ -292,12 +292,8 @@ pub(crate) async fn publish_pricing_inner(
     snapshot["base_price_per_1m_micro"] = json!(base);
 
     let epoch = okapi_store::admin::publish_epoch(&state.pg, publisher_user_id, &snapshot).await?;
-    // 广播（best-effort；丢失由 gateway 30s 轮询兜底）
-    if let Some(nats) = &state.nats {
-        let _ = nats
-            .publish("pricing.epoch", epoch.to_string().into())
-            .await;
-    }
+    // 本进程立即热更 + NATS 广播（如有）+ Redis revision 递增（无 NATS 时 2s 收敛，30s 轮询兜底）
+    state.publish_pricing_epoch(epoch).await;
     Ok(epoch)
 }
 

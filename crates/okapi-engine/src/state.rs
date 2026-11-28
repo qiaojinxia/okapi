@@ -155,6 +155,8 @@ pub struct RoutingCaches {
     pub pool_policies: Cache<String, Arc<okapi_store::pool_policy::StoredPoolPolicy>>,
     /// 启用中模型目录缓存（`GET /v1/models`、`GET /v1beta/models` 与批量模型清单共用，60s；由 `Models` 作用域即时失效）。
     pub active_models_cache: Cache<u8, Arc<Vec<okapi_store::pricing::ActiveModelCard>>>,
+    /// 本进程已应用的 Redis `sync:revisions` 游标（`okapi all` 下多角色共用同一份 `Arc`，免自回声重复失效）。
+    pub sync_cursor: Arc<std::sync::Mutex<okapi_kernel::sched_redis::RevisionCursor>>,
 }
 
 /// 渠道 key 与出口代理的健康标记：本地标记加 5s 集群脏集缓存，成功时才回 PG 清零。
@@ -546,20 +548,66 @@ impl AppState {
         self.invalidate_cache(CacheInvalidation::All);
     }
 
+    /// 广播新发布的定价 epoch：本进程立即热更 PriceBook，同时并行发 NATS `pricing.epoch`
+    ///（若已配置）并递增 Redis `sync:revisions["pricing"]`（无 NATS 时 2s 收敛，有 NATS 时丢广播兜底）。
+    pub async fn publish_pricing_epoch(&self, epoch: i64) {
+        let local_refreshed = match crate::refresh_pricebook_if_newer(self).await {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(error = %err, epoch, "发布定价后本进程立即刷新 PriceBook 失败（下轮同步补齐）");
+                false
+            }
+        };
+        let nats_fut = async {
+            if let Some(nats) = &self.nats
+                && let Err(err) = nats
+                    .publish("pricing.epoch", epoch.to_string().into())
+                    .await
+            {
+                tracing::debug!(error = %err, epoch, "pricing.epoch 广播发送失败（revision / 轮询兜底）");
+            }
+        };
+        let rev_fut = self
+            .sched
+            .sync_revision_bump(okapi_kernel::sched_redis::PRICING_REVISION_TOPIC);
+        let ((), bumped) = tokio::join!(nats_fut, rev_fut);
+        if local_refreshed
+            && let Some(rev) = bumped
+            && let Ok(mut guard) = self.routing.sync_cursor.lock()
+        {
+            guard.observe_local_bump(okapi_kernel::sched_redis::PRICING_REVISION_TOPIC, rev);
+        }
+    }
+
     fn publish_invalidation(&self, scope: CacheInvalidation) {
+        let wire = scope.into_wire();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         if let Some(nats) = self.nats.clone() {
             okapi_kernel::metrics::global().record_routing_invalidation(true);
-            let payload = scope.into_wire();
-            // detach 说明：fire-and-forget 广播，失败由 TTL 兜底
-            tokio::spawn(async move {
+            let payload = wire.clone();
+            // detach 说明：fire-and-forget 广播，失败由 revision 同步与 TTL 兜底
+            handle.spawn(async move {
                 if let Err(err) = nats
                     .publish(ROUTING_INVALIDATE_SUBJECT, payload.into())
                     .await
                 {
-                    tracing::debug!(error = %err, "路由缓存失效广播发送失败（TTL 兜底）");
+                    tracing::debug!(error = %err, "路由缓存失效广播发送失败（revision / TTL 兜底）");
                 }
             });
         }
+        // 无 NATS 时的主同步通道（有 NATS 时兼作丢广播安全网）：递增 Redis 单调 revision，
+        // 严格连续时推进本副本游标以避免 2s 后自回声重复失效。
+        let sched = self.sched.clone();
+        let cursor = Arc::clone(&self.routing.sync_cursor);
+        handle.spawn(async move {
+            if let Some(rev) = sched.sync_revision_bump(&wire).await
+                && let Ok(mut guard) = cursor.lock()
+            {
+                guard.observe_local_bump(&wire, rev);
+            }
+        });
     }
 
     /// 为共享同一进程运行时（`okapi all`）衍生一份隔离的 PostgreSQL 连接池、结算计数与流控闸；
@@ -779,10 +827,10 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn test_app_state() -> AppState {
+    pub(crate) fn test_app_state() -> AppState {
         let pg = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:5432/okapi_gw")
             .expect("lazy pool parses");
         let redis = fred::prelude::Builder::from_config(fred::prelude::Config::default())
@@ -839,6 +887,7 @@ mod tests {
                 request_policy: Cache::builder().max_capacity(1).build(),
                 pool_policies: Cache::builder().max_capacity(16).build(),
                 active_models_cache: Cache::builder().max_capacity(1).build(),
+                sync_cursor: Arc::default(),
             },
             health: HealthMarks {
                 key_failures: Cache::builder().max_capacity(16).build(),
@@ -867,6 +916,7 @@ mod tests {
 
         let bg = gw.with_isolated_pg(bg_pg, 4);
         assert!(Arc::ptr_eq(&gw.core.pricebook, &bg.core.pricebook));
+        assert!(Arc::ptr_eq(&gw.routing.sync_cursor, &bg.routing.sync_cursor));
         assert!(Arc::ptr_eq(
             &gw.upstreams.refresh_gate,
             &bg.upstreams.refresh_gate

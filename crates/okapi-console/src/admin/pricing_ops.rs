@@ -239,11 +239,7 @@ pub async fn rollback_pricing_epoch(
     .map_err(okapi_store::StoreError::from)?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
 
-    if let Some(nats) = &state.nats {
-        let _ = nats
-            .publish("pricing.epoch", new_epoch.to_string().into())
-            .await;
-    }
+    state.publish_pricing_epoch(new_epoch).await;
     state.invalidate_routing_caches();
     audit(
         &state,
